@@ -120,6 +120,14 @@ InputEvent CancelEvent(int32_t source_id, int32_t display_id) {
     return event;
 }
 
+InputEvent KeyUpEvent(int32_t source_id, uint32_t code) {
+    InputEvent up;
+    up.set_input_source_id(source_id);
+    up.mutable_key()->set_action(KeyAction::KEY_ACTION_UP);
+    up.mutable_key()->set_evdev_code(static_cast<int32_t>(code));
+    return up;
+}
+
 }  // namespace
 
 InputDispatcher::InputDispatcher(::goldfish::async::EventLoop& loop, TouchDevices& devices,
@@ -206,6 +214,10 @@ void InputDispatcher::InstallKeyboardSink(KeyboardSink& keyboard) {
         DCHECK(keyboard_ == nullptr) << "The keyboard is already installed";
         keyboard_ = &keyboard;
     });
+}
+
+void InputDispatcher::OnSnapshotLoaded() {
+    PostUnlessShutDown([this] { ResetAfterSnapshotLoad(); });
 }
 
 void InputDispatcher::PostUnlessShutDown(absl::AnyInvocable<void() &&> task) {
@@ -503,11 +515,53 @@ void InputDispatcher::ReleaseSession(InputSessionId session) {
     std::ranges::sort(held);
     for (uint32_t code : held) {
         ReleaseKey(session, code);
-        InputEvent up;
-        up.set_input_source_id(source_id);
-        up.mutable_key()->set_action(KeyAction::KEY_ACTION_UP);
-        up.mutable_key()->set_evdev_code(static_cast<int32_t>(code));
-        Report(std::move(up), /*synthesized=*/true);
+        Report(KeyUpEvent(source_id, code), /*synthesized=*/true);
+    }
+}
+
+void InputDispatcher::ResetAfterSnapshotLoad() {
+    DCHECK(loop_.IsOnLoopThread());
+    EvDevEvents palm_all;
+    EvDevEvents lift_all;
+    for (int slot = 0; slot < kTouchDeviceSlots; ++slot) {
+        AppendContactCancel(slot, palm_all, lift_all);
+    }
+    for (TouchDeviceId device : devices_.Devices()) {
+        TouchDeviceSink* sink = devices_.Find(device);
+        if (sink != nullptr && sink->IsActive()) {
+            sink->WriteReport(palm_all);
+            sink->WriteReport(lift_all);
+            active_generations_[device] = sink->ActiveGeneration();
+        } else {
+            active_generations_.erase(device);
+        }
+    }
+    ReportCancels(contacts_.Clear());
+
+    struct HeldKey {
+        uint32_t code;
+        std::vector<InputSessionId> sessions;
+    };
+    std::vector<HeldKey> held_keys;
+    held_keys.reserve(key_holders_.size());
+    for (const auto& [code, holders] : key_holders_) {
+        std::vector<InputSessionId> sessions(holders.begin(), holders.end());
+        std::ranges::sort(sessions);
+        held_keys.push_back({code, std::move(sessions)});
+    }
+    key_holders_.clear();
+    std::ranges::sort(held_keys, {}, &HeldKey::code);
+    // The sink's Reset() releases the held keys in the guest, paced with the
+    // ones the snapshot restored; writing them here first could overflow the
+    // guest's input queue ahead of that sweep.
+    for (const HeldKey& held : held_keys) {
+        for (InputSessionId session : held.sessions) {
+            Report(KeyUpEvent(sessions_.at(session).source_id, held.code),
+                   /*synthesized=*/true);
+        }
+    }
+    if (keyboard_ != nullptr) {
+        keyboard_->Reset();
     }
 }
 

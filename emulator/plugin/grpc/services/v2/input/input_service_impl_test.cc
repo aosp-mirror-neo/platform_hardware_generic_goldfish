@@ -107,6 +107,8 @@ class RecordingKeyboard : public KeyboardSink {
         }
     }
 
+    void Reset() override {}
+
     std::vector<std::string> Writes() const {
         absl::MutexLock writes_lock(writes_mutex_);
         return writes_;

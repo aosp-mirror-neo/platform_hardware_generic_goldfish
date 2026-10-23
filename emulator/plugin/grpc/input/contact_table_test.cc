@@ -205,5 +205,27 @@ TEST(ContactTableTest, ClearDeviceClearsOnlyThatDeviceSorted) {
     }
 }
 
+TEST(ContactTableTest, ClearFreesAllDevicesSorted) {
+    ContactTable table;
+    ASSERT_THAT(table.Acquire({kAgent, 5}, kDisplay1, kRequested, kNotHuman), IsOkAndHolds(0));
+    ASSERT_THAT(table.Acquire({kHuman, 0}, kDisplay0, kRequested, kIsHuman), IsOkAndHolds(0));
+    ASSERT_THAT(table.Acquire({kOtherAgent, 3}, kDisplay0, kRequested, kNotHuman), IsOkAndHolds(1));
+    ASSERT_THAT(table.Acquire({kHuman, 1}, kDisplay1, kRequested, kIsHuman), IsOkAndHolds(1));
+
+    EXPECT_THAT(table.Clear(),
+                ElementsAre(Pair(Eq(ContactKey{kHuman, 0}), Contact{kDisplay0, 0, kRequested}),
+                            Pair(Eq(ContactKey{kOtherAgent, 3}), Contact{kDisplay0, 1, kRequested}),
+                            Pair(Eq(ContactKey{kAgent, 5}), Contact{kDisplay1, 0, kRequested}),
+                            Pair(Eq(ContactKey{kHuman, 1}), Contact{kDisplay1, 1, kRequested})));
+
+    EXPECT_FALSE(table.IsHeld({kHuman, 0}));
+    EXPECT_FALSE(table.IsHeld({kAgent, 5}));
+    EXPECT_THAT(table.Clear(), ElementsAre());
+    for (int i = 0; i < kNonHumanSlots; ++i) {
+        EXPECT_THAT(table.Acquire({kAgent, i}, kDisplay0, kRequested, kNotHuman), IsOkAndHolds(i));
+        EXPECT_THAT(table.Acquire({kAgent, i}, kDisplay1, kRequested, kNotHuman), IsOkAndHolds(i));
+    }
+}
+
 }  // namespace
 }  // namespace goldfish::grpc::v2

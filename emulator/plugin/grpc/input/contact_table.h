@@ -136,6 +136,12 @@ class ContactTable {
      */
     ReleasedContacts ClearDevice(TouchDeviceId device);
 
+    /**
+     * @brief Frees all contacts across all devices.
+     * @return The released contacts, sorted by `(device, slot)`.
+     */
+    ReleasedContacts Clear();
+
   private:
     struct HeldContact {
         Contact contact;

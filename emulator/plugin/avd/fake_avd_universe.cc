@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <memory>
 #include <string_view>
+#include <vector>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -45,12 +46,14 @@ class NoTouchDevices : public grpc::v2::TouchDevices {
                 "for touch tests."));
     }
     grpc::v2::TouchDeviceSink* Find(grpc::v2::TouchDeviceId /*device*/) override { return nullptr; }
+    std::vector<grpc::v2::TouchDeviceId> Devices() override { return {}; }
 };
 
 class NoOpKeyboard : public grpc::v2::KeyboardSink {
   public:
     void WriteKey(uint32_t /*evdev_code*/, bool /*down*/) override {}
     void TypeText(std::string_view /*utf8*/) override {}
+    void Reset() override {}
 };
 
 // Maps only `evdev_code`, without the QEMU key tables.

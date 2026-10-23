@@ -120,6 +120,19 @@ class InputDispatcher final : public IInputDispatcher {
      */
     void InstallKeyboardSink(KeyboardSink& keyboard);
 
+    /**
+     * @brief Releases all touch slots on every active device, resets the
+     * keyboard (which releases the keys it holds), clears held contacts and
+     * keys, and reports their synthesized `CANCEL` and `KEY_ACTION_UP`
+     * activities.
+     *
+     * Call once the VM is running again after a snapshot load, so contacts or
+     * keys restored from the snapshot or held by sessions are released.
+     *
+     * Applied on the loop. After `Shutdown()`, posts nothing.
+     */
+    void OnSnapshotLoaded();
+
     /** @brief Callbacks run on the delivery thread. */
     ActivityEventSource& activity() override { return activity_events_; }
 
@@ -220,6 +233,7 @@ class InputDispatcher final : public IInputDispatcher {
     absl::Status CancelOnDisplay(InputSessionId session, int32_t source_id, int32_t display_id,
                                  ::android::emulation::v2::PointerAction action);
     void ReleaseSession(InputSessionId session);
+    void ResetAfterSnapshotLoad();
     // Clears the contacts of each device whose guest driver went active or
     // inactive since the dispatcher recorded its generation, as the guest
     // forgot them, and reports their synthesized CANCELs. Writes nothing.

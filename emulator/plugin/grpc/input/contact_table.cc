@@ -93,6 +93,10 @@ ReleasedContacts ContactTable::ClearDevice(TouchDeviceId device) {
     });
 }
 
+ReleasedContacts ContactTable::Clear() {
+    return ReleaseIf([](const ContactKey&, const Contact&) { return true; });
+}
+
 template <typename Predicate>
 ReleasedContacts ContactTable::ReleaseIf(Predicate matches) {
     ReleasedContacts released;

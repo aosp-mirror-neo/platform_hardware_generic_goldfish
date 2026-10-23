@@ -49,6 +49,7 @@
 extern "C" {
 #include "hw/core/qdev.h"
 #include "system/reset.h"
+#include "system/runstate.h"
 #include "qemu/main-loop.h"
 #include "ui/console.h"
 }
@@ -115,6 +116,15 @@ absl::StatusOr<std::unique_ptr<AvdExtendedUniverse>> AvdExtendedUniverse::Create
 
 AvdExtendedUniverse::AvdExtendedUniverse(Private, std::unique_ptr<AvdProperties> props)
         : AvdUniverse(std::move(props)) {}
+
+template <>
+void AvdExtendedUniverse::OnVmStateChanged(void* opaque, bool running, RunState /*state*/) {
+    auto* self = static_cast<AvdExtendedUniverse*>(opaque);
+    if (running && self->snapshot_loaded_) {
+        self->snapshot_loaded_ = false;
+        self->input_dispatcher_->OnSnapshotLoaded();
+    }
+}
 
 absl::Status AvdExtendedUniverse::Initialize() {
     auto& avd_universe = *this;
@@ -246,6 +256,7 @@ absl::Status AvdExtendedUniverse::Initialize() {
     avd_universe.input_dispatcher_ = std::make_shared<::goldfish::grpc::v2::InputDispatcher>(
             *qemu_loop, *avd_universe.touch_devices_, /*keyboard=*/nullptr,
             android::emulation::control::keyboard::ResolveEvdevKeyCode);
+    avd_universe.vm_state_entry_ = qemu_add_vm_change_state_handler(OnVmStateChanged, this);
 
     // Initialize the battery to a default state and register it.
     avd_universe.battery_subscription = DEVS::battery::RegisterBattery(
@@ -274,6 +285,10 @@ AvdExtendedUniverse::~AvdExtendedUniverse() {
         if (qemu_event_loop) {
             hd.RemoveWatchedLooper(*qemu_event_loop);
         }
+    }
+
+    if (vm_state_entry_ != nullptr) {
+        qemu_del_vm_change_state_handler(vm_state_entry_);
     }
 
     if (qemu_event_loop) {
@@ -460,6 +475,7 @@ void AvdExtendedUniverse::OnSavePhysicalState(archive::IWriter& writer) const {
 }
 
 void AvdExtendedUniverse::OnPreLoad() {
+    snapshot_loaded_ = false;
     quickboot_metrics_.op_start_time = absl::Now();
 }
 
@@ -710,6 +726,7 @@ void AvdExtendedUniverse::SyncGuestTimeToHost() {
 }
 
 absl::Status AvdExtendedUniverse::OnPostLoad() {
+    snapshot_loaded_ = true;
     guest_status_.OnPostLoad();
 
     if (props_->snapshot_update_time) {

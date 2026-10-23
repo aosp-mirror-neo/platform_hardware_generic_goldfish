@@ -99,6 +99,9 @@ class IInputDispatcher {
      *   so held contacts on that device are forgotten without writing to the
      *   guest and a synthesized `CANCEL` is reported per session and requested
      *   display.
+     * - Snapshot load: a synthesized `CANCEL` per session and requested display
+     *   of the contacts held before the load, and a synthesized `KEY_ACTION_UP`
+     *   per session and held key.
      *
      * Rejected events report nothing.
      *

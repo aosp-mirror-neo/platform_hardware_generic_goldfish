@@ -210,6 +210,8 @@ class FakeTouchDevices : public TouchDevices {
         return device == kOuter ? &outer : nullptr;
     }
 
+    std::vector<TouchDeviceId> Devices() override { return {kInner, kOuter}; }
+
     // Simulates a guest driver reset or re-probe on `device`: advances its
     // active generation and fires the push notification.
     void ResetDriver(TouchDeviceId device) {
@@ -236,6 +238,7 @@ class FakeKeyboard : public KeyboardSink {
     void TypeText(std::string_view utf8) override {
         log_.Record(loop_, absl::StrCat("text ", utf8));
     }
+    void Reset() override { log_.Record(loop_, "reset"); }
 
   private:
     const EventLoop& loop_;
@@ -1489,6 +1492,109 @@ TEST_F(InputDispatcherTest, KeysWaitForInstalledKeyboard) {
     EXPECT_THAT(done[2].status, IsOk());
     EXPECT_THAT(done[3].status, IsOk());
     EXPECT_THAT(log_.writes, ElementsAre(Down(KEY_B), Up(KEY_B), "text y"));
+}
+
+TEST_F(InputDispatcherTest, SnapshotLoadReleasesAllGuestSlotsAndResetsKeyboardEvenWhenIdle) {
+    // Simulate ghost contacts left in the guest by a loaded snapshot.
+    const EvDevEvent ghost_inner[] = {{EV_ABS, ABS_MT_SLOT, 7}, {EV_ABS, ABS_MT_TRACKING_ID, 7}};
+    const EvDevEvent ghost_outer[] = {{EV_ABS, ABS_MT_SLOT, 10}, {EV_ABS, ABS_MT_TRACKING_ID, 10}};
+    inner_.guest.ApplyReport(ghost_inner);
+    outer_.guest.ApplyReport(ghost_outer);
+    ASSERT_THAT(inner_.guest.Active(), SizeIs(1));
+    ASSERT_THAT(outer_.guest.Active(), SizeIs(1));
+
+    dispatcher_.OnSnapshotLoaded();
+    loop_->RunAll();
+
+    std::vector<EvDevEvent> expected_palm;
+    std::vector<EvDevEvent> expected_lift;
+    for (uint32_t slot = 0; slot < static_cast<uint32_t>(kTouchDeviceSlots); ++slot) {
+        std::ranges::copy(Palm(slot), std::back_inserter(expected_palm));
+        std::ranges::copy(Lift(slot), std::back_inserter(expected_lift));
+    }
+    EXPECT_THAT(inner_.reports, ElementsAre(expected_palm, expected_lift));
+    EXPECT_THAT(outer_.reports, ElementsAre(expected_palm, expected_lift));
+    EXPECT_THAT(inner_.frames[0],
+                ElementsAre(::testing::AllOf(Field(&GuestContact::slot, 7),
+                                             Field(&GuestContact::tool_type, MT_TOOL_PALM))));
+    EXPECT_THAT(outer_.frames[0],
+                ElementsAre(::testing::AllOf(Field(&GuestContact::slot, 10),
+                                             Field(&GuestContact::tool_type, MT_TOOL_PALM))));
+    EXPECT_THAT(inner_.guest.Active(), IsEmpty());
+    EXPECT_THAT(outer_.guest.Active(), IsEmpty());
+    EXPECT_THAT(log_.writes,
+                ElementsAre("touch inner", "touch inner", "touch outer", "touch outer", "reset"));
+    EXPECT_THAT(log_.on_loop_thread, Each(true));
+    EXPECT_THAT(Activities(), IsEmpty());
+}
+
+TEST_F(InputDispatcherTest, SnapshotLoadReleasesHeldContactsAndKeysAndReportsSynthesizedActivity) {
+    const InputSessionId a = Source(1);
+    const InputSessionId b = Source(2);
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.25F, 0.25F}, {1, 0.5F, 0.5F}})), IsOk());
+    devices_.remap[0] = kOuter;  // Foldable folds: display 0 resolves to device 1.
+    ASSERT_THAT(Dispatch(b, Touch(kDown, {{0, 0.75F, 0.75F}})), IsOk());
+    ASSERT_THAT(Dispatch(a, Key(kKeyDown, KEY_B)), IsOk());
+    ASSERT_THAT(Dispatch(a, Key(kKeyDown, KEY_A)), IsOk());
+    ASSERT_THAT(Dispatch(b, Key(kKeyDown, KEY_A)), IsOk());
+    Activities();
+    log_.writes.clear();
+    inner_.reports.clear();
+    outer_.reports.clear();
+
+    dispatcher_.OnSnapshotLoaded();
+    loop_->RunAll();
+
+    static_assert(KEY_A < KEY_B);
+    EXPECT_THAT(inner_.reports, SizeIs(2));
+    EXPECT_THAT(outer_.reports, SizeIs(2));
+    EXPECT_THAT(inner_.guest.Active(), IsEmpty());
+    EXPECT_THAT(outer_.guest.Active(), IsEmpty());
+    // The keyboard's Reset() releases the held keys; nothing is written first.
+    EXPECT_THAT(log_.writes,
+                ElementsAre("touch inner", "touch inner", "touch outer", "touch outer", "reset"));
+    EXPECT_THAT(Activities(),
+                ElementsAre("src1 synthesized POINTER_ACTION_CANCEL display 0 ids 0 1",
+                            "src2 synthesized POINTER_ACTION_CANCEL display 0 ids 0",
+                            absl::StrCat("src1 synthesized KEY_ACTION_UP ", KEY_A),
+                            absl::StrCat("src2 synthesized KEY_ACTION_UP ", KEY_A),
+                            absl::StrCat("src1 synthesized KEY_ACTION_UP ", KEY_B)));
+
+    // Subsequent DOWNs start fresh in slot 0, and released keys are no longer held.
+    devices_.remap.clear();
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0}})), IsOk());
+    ASSERT_THAT(inner_.reports.back(), SizeIs(::testing::Ge(2)));
+    EXPECT_EQ(inner_.reports.back()[0], (EvDevEvent{EV_ABS, ABS_MT_SLOT, 0}));
+    EXPECT_EQ(inner_.reports.back()[1], (EvDevEvent{EV_ABS, ABS_MT_TRACKING_ID, 0}));
+    log_.writes.clear();
+    ASSERT_THAT(Dispatch(a, Key(kKeyUp, KEY_A)), IsOk());
+    ASSERT_THAT(Dispatch(b, Key(kKeyUp, KEY_A)), IsOk());
+    EXPECT_THAT(log_.writes, IsEmpty());
+}
+
+TEST_F(InputDispatcherTest, SnapshotLoadSkipsInactiveDeviceWriteButClearsItsContacts) {
+    const InputSessionId a = Source(1);
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0}})), IsOk());
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1}}, 1)), IsOk());
+    Activities();
+    inner_.reports.clear();
+    outer_.reports.clear();
+    outer_.active = false;
+
+    dispatcher_.OnSnapshotLoaded();
+    loop_->RunAll();
+
+    EXPECT_THAT(inner_.reports, SizeIs(2));
+    EXPECT_THAT(outer_.reports, IsEmpty());
+    EXPECT_THAT(Activities(),
+                ElementsAre("src1 synthesized POINTER_ACTION_CANCEL display 0 ids 0",
+                            "src1 synthesized POINTER_ACTION_CANCEL display 1 ids 1"));
+
+    outer_.active = true;
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1}}, 1)), IsOk());
+    ASSERT_THAT(outer_.reports.back(), SizeIs(::testing::Ge(2)));
+    EXPECT_EQ(outer_.reports.back()[0], (EvDevEvent{EV_ABS, ABS_MT_SLOT, 0}));
+    EXPECT_EQ(outer_.reports.back()[1], (EvDevEvent{EV_ABS, ABS_MT_TRACKING_ID, 0}));
 }
 
 }  // namespace

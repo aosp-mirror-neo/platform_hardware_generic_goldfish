@@ -40,6 +40,10 @@
 #include "goldfish/metrics/snapshot_metrics.h"
 #include "vcpu_event_loop.h"
 
+extern "C" {
+typedef struct VMChangeStateEntry VMChangeStateEntry;
+}
+
 namespace goldfish::avd {
 
 struct AvdExtendedUniverse : public AvdUniverse {
@@ -106,6 +110,9 @@ struct AvdExtendedUniverse : public AvdUniverse {
 
     void SyncGuestTimeToHost();
 
+    template <typename State>
+    static void OnVmStateChanged(void* opaque, bool running, State state);
+
     metrics::QuickbootMetricsState quickboot_metrics_;
 
     // Declared after the QEMU loop and the multi-display they use, and in
@@ -116,6 +123,8 @@ struct AvdExtendedUniverse : public AvdUniverse {
     std::unique_ptr<::goldfish::grpc::v2::MultiDisplayTouchDevices> touch_devices_;
     std::unique_ptr<::android::emulation::control::keyboard::QemuKeyboardSink> keyboard_sink_;
     std::shared_ptr<::goldfish::grpc::v2::InputDispatcher> input_dispatcher_;
+    VMChangeStateEntry* vm_state_entry_ = nullptr;
+    bool snapshot_loaded_ = false;
 };
 
 }  // namespace goldfish::avd

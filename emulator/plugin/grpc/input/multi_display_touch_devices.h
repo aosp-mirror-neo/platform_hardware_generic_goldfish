@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/statusor.h"
@@ -70,6 +71,12 @@ class MultiDisplayTouchDevices : public TouchDevices {
      *         such display.
      */
     TouchDeviceSink* Find(TouchDeviceId device) override;
+
+    /**
+     * @return The IDs of all existing displays, including display 0 on a folded
+     *         foldable, in ascending order.
+     */
+    std::vector<TouchDeviceId> Devices() override;
 
   private:
     class DisplaySink;

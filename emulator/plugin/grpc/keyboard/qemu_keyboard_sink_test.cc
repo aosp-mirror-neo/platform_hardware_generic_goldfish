@@ -17,6 +17,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <map>
 #include <memory>
 #include <ostream>
 #include <utility>
@@ -45,8 +47,23 @@ struct SentKey {
 
 // The key events sent to QEMU's keyboard state, in order.
 std::vector<SentKey> g_sent_keys;
+// Direct key-up and pacing events sent bypassing QKbdState during Reset().
+struct DirectEvent {
+    QemuConsole* console = nullptr;
+    int qcode_or_delay = 0;
+    bool is_delay = false;
+    bool down = false;
+};
+std::vector<DirectEvent> g_direct_events;
+// The number of times QEMU's keyboard state lifted all keys.
+int g_lifts = 0;
 // The number of times QEMU's keyboard state was freed.
 int g_frees = 0;
+
+QemuConsole* FakeConsole() {
+    static int storage;
+    return reinterpret_cast<QemuConsole*>(&storage);
+}
 
 QKbdState* FakeKeyboardState() {
     static int storage;
@@ -74,9 +91,27 @@ void qkbd_state_key_event(  // NOLINT(readability-identifier-naming)
     }
 }
 
-// Maps only KEY_A, which is enough to see that WriteKey() translates its code.
-int qemu_input_linux_to_qcode(unsigned int lnx) {
-    return lnx == KEY_A ? Q_KEY_CODE_A : Q_KEY_CODE_UNMAPPED;
+void qkbd_state_lift_all_keys(QKbdState* kbd) {  // NOLINT(readability-identifier-naming)
+    if (kbd == FakeKeyboardState()) {
+        ++g_lifts;
+    }
+}
+
+void qemu_input_event_send_key_qcode(  // NOLINT(readability-identifier-naming)
+        QemuConsole* src, QKeyCode q, bool down) {
+    g_direct_events.push_back({src, static_cast<int>(q), /*is_delay=*/false, down});
+}
+
+void qemu_input_event_send_key_delay(uint32_t delay_ms) {  // NOLINT(readability-identifier-naming)
+    g_direct_events.push_back({nullptr, static_cast<int>(delay_ms), /*is_delay=*/true, false});
+}
+
+// How qemu_input_linux_to_qcode() maps Linux key codes; unlisted codes are unmapped.
+std::map<unsigned int, int> g_linux_to_qcode;
+
+int qemu_input_linux_to_qcode(unsigned int lnx) {  // NOLINT(readability-identifier-naming)
+    auto it = g_linux_to_qcode.find(lnx);
+    return it == g_linux_to_qcode.end() ? Q_KEY_CODE_UNMAPPED : it->second;
 }
 }
 
@@ -91,8 +126,12 @@ class QemuKeyboardSinkTest : public ::testing::Test {
   protected:
     void SetUp() override {
         g_sent_keys.clear();
+        g_direct_events.clear();
+        g_lifts = 0;
         g_frees = 0;
-        sink_ = std::make_unique<QemuKeyboardSink>(/*console=*/nullptr, *loop_);
+        // Only KEY_A, which is enough to see that WriteKey() translates its code.
+        g_linux_to_qcode = {{KEY_A, Q_KEY_CODE_A}};
+        sink_ = std::make_unique<QemuKeyboardSink>(FakeConsole(), *loop_);
     }
 
     void TearDown() override {
@@ -145,6 +184,49 @@ TEST_F(QemuKeyboardSinkTest, TypeTextSendsTheKeyEventSenderSequenceBeforeReturni
     EXPECT_THAT(typed, ElementsAre(SentKey{Q_KEY_CODE_A, true}, SentKey{Q_KEY_CODE_A, false},
                                    SentKey{Q_KEY_CODE_SHIFT, true}, SentKey{Q_KEY_CODE_B, true},
                                    SentKey{Q_KEY_CODE_B, false}, SentKey{Q_KEY_CODE_SHIFT, false}));
+}
+
+TEST_F(QemuKeyboardSinkTest,
+       ResetReinitializesHostStateAndReleasesEachMappedQcodeOnceInPacedBatches) {
+    // Linux codes 101..150 map to qcodes 1..50, so Reset() fills two 24-key
+    // batches. Another code maps to qcode 7 again, which is released once, and
+    // KEY_MAX, the last Linux code, maps to qcode 51.
+    g_linux_to_qcode.clear();
+    for (int qcode = 1; qcode <= 50; ++qcode) {
+        g_linux_to_qcode[100 + qcode] = qcode;
+    }
+    g_linux_to_qcode[200] = 7;
+    g_linux_to_qcode[KEY_MAX] = 51;
+
+    int frees_by_reset = 0;
+    std::vector<DirectEvent> direct;
+    RunOnLoop([&] {
+        sink_->Reset();
+        frees_by_reset = g_frees;
+        direct = g_direct_events;
+    });
+
+    EXPECT_EQ(frees_by_reset, 1);
+    EXPECT_TRUE(g_sent_keys.empty());
+    // 51 distinct qcodes + 2 delays (after items 24 and 48) = 53 direct entries.
+    ASSERT_EQ(direct.size(), 53U);
+    EXPECT_TRUE(direct[24].is_delay);
+    EXPECT_EQ(direct[24].qcode_or_delay, 1);
+    EXPECT_TRUE(direct[49].is_delay);
+    EXPECT_EQ(direct[49].qcode_or_delay, 1);
+
+    std::vector<int> released_qcodes;
+    for (const DirectEvent& ev : direct) {
+        if (!ev.is_delay) {
+            EXPECT_EQ(ev.console, FakeConsole());
+            EXPECT_FALSE(ev.down);
+            released_qcodes.push_back(ev.qcode_or_delay);
+        }
+    }
+    EXPECT_EQ(released_qcodes.size(), 51U);
+    EXPECT_EQ(released_qcodes.front(), 1);
+    EXPECT_EQ(released_qcodes.back(), 51);
+    EXPECT_EQ(std::ranges::count(released_qcodes, 7), 1);
 }
 
 TEST_F(QemuKeyboardSinkTest, DestructorFreesTheKeyboardState) {
