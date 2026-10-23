@@ -14,6 +14,7 @@
 #pragma once
 
 #include <atomic>
+#include <bitset>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -133,6 +134,26 @@ class InputDispatcher final : public IInputDispatcher {
      */
     void OnSnapshotLoaded();
 
+    /**
+     * @brief Cancels any slots left down on `device`'s guest touch device from
+     * a prior `OnDisplayRemoved()` if its driver has not reset since. Call when
+     * a display is added.
+     *
+     * Applied on the loop. After `Shutdown()`, posts nothing.
+     */
+    void OnDisplayAdded(TouchDeviceId device);
+
+    /**
+     * @brief Clears all contacts on `device` without writing to it, and reports
+     * their synthesized `CANCEL` activities. Call when a display is removed.
+     *
+     * Slots held on `device` are remembered and cancelled on the guest if
+     * `device` becomes active again without a driver reset.
+     *
+     * Applied on the loop. After `Shutdown()`, posts nothing.
+     */
+    void OnDisplayRemoved(TouchDeviceId device);
+
     /** @brief Callbacks run on the delivery thread. */
     ActivityEventSource& activity() override { return activity_events_; }
 
@@ -200,6 +221,10 @@ class InputDispatcher final : public IInputDispatcher {
         absl::Mutex mutex;
         InputDispatcher* dispatcher ABSL_GUARDED_BY(mutex);
     };
+    struct StaleDeviceSlots {
+        uint64_t generation = 0;
+        std::bitset<kTouchDeviceSlots> slots;
+    };
 
     void ShutdownOnce() ABSL_LOCKS_EXCLUDED(pending_mutex_, outbox_mutex_);
     void OnDeviceActiveChanged() ABSL_LOCKS_EXCLUDED(pending_mutex_);
@@ -234,6 +259,9 @@ class InputDispatcher final : public IInputDispatcher {
                                  ::android::emulation::v2::PointerAction action);
     void ReleaseSession(InputSessionId session);
     void ResetAfterSnapshotLoad();
+    // Cancels slots left down on `device` by OnDisplayRemoved() if `sink` is
+    // still on the same driver generation.
+    void FlushStaleSlots(TouchDeviceId device, TouchDeviceSink& sink);
     // Clears the contacts of each device whose guest driver went active or
     // inactive since the dispatcher recorded its generation, as the guest
     // forgot them, and reports their synthesized CANCELs. Writes nothing.
@@ -276,6 +304,9 @@ class InputDispatcher final : public IInputDispatcher {
     // The active generation of each device written to, as of the first write
     // or the last resync; see ResyncDevices().
     absl::flat_hash_map<TouchDeviceId, uint64_t> active_generations_;
+    // Slots held on a removed display's permanent virtio-input device, to be
+    // cancelled if the display is recreated without a guest driver reset.
+    absl::flat_hash_map<TouchDeviceId, StaleDeviceSlots> stale_slots_;
     // When the activity of the running Dispatch*() operation, which reports
     // at most one, was stamped; unset until it reports it.
     std::optional<absl::Time> reported_at_;

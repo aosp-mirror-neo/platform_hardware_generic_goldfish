@@ -98,6 +98,10 @@ struct AvdExtendedUniverse : public AvdUniverse {
     std::shared_ptr<async::EventLoop::Timer> perf_stat_reporter_task;
 
   private:
+    using DisplayEventSubscription =
+            std::unique_ptr<android::base::eventing::ScopedEventCallback<display::IMultiDisplay,
+                                                                         display::DisplayEvent>>;
+
     absl::Status Initialize();
 
     void OnSaveProps(archive::IWriter&) const;
@@ -123,6 +127,7 @@ struct AvdExtendedUniverse : public AvdUniverse {
     std::unique_ptr<::goldfish::grpc::v2::MultiDisplayTouchDevices> touch_devices_;
     std::unique_ptr<::android::emulation::control::keyboard::QemuKeyboardSink> keyboard_sink_;
     std::shared_ptr<::goldfish::grpc::v2::InputDispatcher> input_dispatcher_;
+    DisplayEventSubscription input_display_subscription_;
     VMChangeStateEntry* vm_state_entry_ = nullptr;
     bool snapshot_loaded_ = false;
 };

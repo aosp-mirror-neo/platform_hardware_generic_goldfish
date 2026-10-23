@@ -207,7 +207,11 @@ class FakeTouchDevices : public TouchDevices {
         if (device == kInner) {
             return &inner;
         }
-        return device == kOuter ? &outer : nullptr;
+        if (device == kOuter) {
+            return &outer;
+        }
+        auto it = extra.find(device);
+        return it == extra.end() ? nullptr : it->second;
     }
 
     std::vector<TouchDeviceId> Devices() override { return {kInner, kOuter}; }
@@ -223,6 +227,7 @@ class FakeTouchDevices : public TouchDevices {
 
     FakeSink inner;
     FakeSink outer;
+    absl::flat_hash_map<TouchDeviceId, TouchDeviceSink*> extra;
     absl::flat_hash_map<int32_t, TouchDeviceId> remap;
     absl::Status resolve_status;
 };
@@ -1595,6 +1600,88 @@ TEST_F(InputDispatcherTest, SnapshotLoadSkipsInactiveDeviceWriteButClearsItsCont
     ASSERT_THAT(outer_.reports.back(), SizeIs(::testing::Ge(2)));
     EXPECT_EQ(outer_.reports.back()[0], (EvDevEvent{EV_ABS, ABS_MT_SLOT, 0}));
     EXPECT_EQ(outer_.reports.back()[1], (EvDevEvent{EV_ABS, ABS_MT_TRACKING_ID, 0}));
+}
+
+TEST_F(InputDispatcherTest, DisplayRemovedClearsOnlyThatDevicesContactsWithoutWriting) {
+    FakeSink secondary(*loop_, "secondary", log_);
+    devices_.extra[2] = &secondary;
+    const InputSessionId a = Source(1);
+    const InputSessionId b = Source(2);
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.25F, 0.25F}})), IsOk());
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1}, {2}}, 2)), IsOk());
+    devices_.remap[5] = 2;
+    ASSERT_THAT(Dispatch(b, Touch(kDown, {{0}}, 5)), IsOk());
+    Activities();
+    secondary.reports.clear();
+
+    dispatcher_.OnDisplayRemoved(2);
+    loop_->RunAll();
+
+    EXPECT_THAT(secondary.reports, IsEmpty());
+    EXPECT_THAT(Activities(),
+                ElementsAre("src1 synthesized POINTER_ACTION_CANCEL display 2 ids 1 2",
+                            "src2 synthesized POINTER_ACTION_CANCEL display 5 ids 0"));
+
+    // Device 0's contact is intact, and a recreated device 2 cancels its stale
+    // guest slots before starting fresh at slot 0.
+    ASSERT_THAT(Dispatch(a, Touch(kMove, {{0, 0.75F, 0.75F}})), IsOk());
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.75F, 0.75F)));
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1, 0.1F, 0.9F}}, 2)), IsOk());
+    EXPECT_THAT(secondary.guest.Active(), ElementsAre(ContactAt(0.1F, 0.9F)));
+    ASSERT_THAT(secondary.reports.back(), SizeIs(::testing::Ge(2)));
+    EXPECT_EQ(secondary.reports.back()[0], (EvDevEvent{EV_ABS, ABS_MT_SLOT, 0}));
+    EXPECT_EQ(secondary.reports.back()[1], (EvDevEvent{EV_ABS, ABS_MT_TRACKING_ID, 0}));
+}
+
+TEST_F(InputDispatcherTest, DisplayAddedProactivelyCancelsStaleSlotsUnlessDriverReset) {
+    FakeSink secondary(*loop_, "secondary", log_);
+    devices_.extra[2] = &secondary;
+    const InputSessionId a = Source(1);
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1, 0.2F, 0.3F}, {2, 0.4F, 0.5F}}, 2)), IsOk());
+    EXPECT_THAT(secondary.guest.Active(), SizeIs(2));
+    secondary.reports.clear();
+
+    devices_.extra.erase(2);
+    dispatcher_.OnDisplayRemoved(2);
+    loop_->RunAll();
+    EXPECT_THAT(secondary.reports, IsEmpty());
+
+    // Recreating display 2 on the same permanent virtio-input device cancels
+    // the previously held guest slots right when the display is added.
+    devices_.extra[2] = &secondary;
+    dispatcher_.OnDisplayAdded(2);
+    loop_->RunAll();
+    EXPECT_THAT(secondary.reports, SizeIs(2));
+    EXPECT_THAT(secondary.guest.Active(), IsEmpty());
+
+    // If the guest driver resets while the display is removed, OnDisplayAdded
+    // drops the stale slot record without writing to the fresh driver.
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1, 0.2F, 0.3F}}, 2)), IsOk());
+    devices_.extra.erase(2);
+    dispatcher_.OnDisplayRemoved(2);
+    loop_->RunAll();
+
+    ++secondary.active_generation;
+    secondary.guest = GuestTouchState{};
+    secondary.reports.clear();
+    devices_.extra[2] = &secondary;
+    dispatcher_.OnDisplayAdded(2);
+    loop_->RunAll();
+    EXPECT_THAT(secondary.reports, IsEmpty());
+}
+
+TEST_F(InputDispatcherTest, DisplayRemovedWithNoContactsDoesNothing) {
+    const InputSessionId a = Source(1);
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.25F, 0.25F}})), IsOk());
+    Activities();
+    log_.writes.clear();
+
+    dispatcher_.OnDisplayRemoved(2);
+    loop_->RunAll();
+
+    EXPECT_THAT(log_.writes, IsEmpty());
+    EXPECT_THAT(Activities(), IsEmpty());
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.25F, 0.25F)));
 }
 
 }  // namespace

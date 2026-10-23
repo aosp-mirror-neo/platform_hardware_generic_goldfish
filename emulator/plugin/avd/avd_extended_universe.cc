@@ -256,6 +256,17 @@ absl::Status AvdExtendedUniverse::Initialize() {
     avd_universe.input_dispatcher_ = std::make_shared<::goldfish::grpc::v2::InputDispatcher>(
             *qemu_loop, *avd_universe.touch_devices_, /*keyboard=*/nullptr,
             android::emulation::control::keyboard::ResolveEvdevKeyCode);
+    avd_universe.input_display_subscription_ = android::base::eventing::MakeScopedCallback(
+            *avd_universe.multi_display,
+            [dispatcher = avd_universe.input_dispatcher_](const display::DisplayEvent& event) {
+                if (event.IsAddedEvent()) {
+                    if (auto display = event.Display().lock()) {
+                        dispatcher->OnDisplayAdded(display->Id());
+                    }
+                } else if (event.IsDeletedEvent()) {
+                    dispatcher->OnDisplayRemoved(event.DisplayId());
+                }
+            });
     avd_universe.vm_state_entry_ = qemu_add_vm_change_state_handler(OnVmStateChanged, this);
 
     // Initialize the battery to a default state and register it.
@@ -290,6 +301,7 @@ AvdExtendedUniverse::~AvdExtendedUniverse() {
     if (vm_state_entry_ != nullptr) {
         qemu_del_vm_change_state_handler(vm_state_entry_);
     }
+    input_display_subscription_.reset();
 
     if (qemu_event_loop) {
         WaitUntilEventLoopsIdle();

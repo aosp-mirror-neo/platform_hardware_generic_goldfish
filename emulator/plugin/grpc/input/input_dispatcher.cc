@@ -80,11 +80,14 @@ absl::Status AddTarget(TouchDevices& devices, TouchDeviceId device, Reports& rep
     return absl::OkStatus();
 }
 
+template <typename FlushFn>
 void WriteReports(const ::goldfish::async::EventLoop& loop, const Reports& reports,
-                  absl::flat_hash_map<TouchDeviceId, uint64_t>& active_generations) {
+                  absl::flat_hash_map<TouchDeviceId, uint64_t>& active_generations,
+                  FlushFn&& flush_stale) {
     DCHECK(loop.IsOnLoopThread());
     for (const DeviceReport& report : reports) {
         if (!report.events.empty()) {
+            flush_stale(report.device, *report.sink);
             report.sink->WriteReport(report.events);
             active_generations.try_emplace(report.device, report.sink->ActiveGeneration());
         }
@@ -218,6 +221,35 @@ void InputDispatcher::InstallKeyboardSink(KeyboardSink& keyboard) {
 
 void InputDispatcher::OnSnapshotLoaded() {
     PostUnlessShutDown([this] { ResetAfterSnapshotLoad(); });
+}
+
+void InputDispatcher::OnDisplayAdded(TouchDeviceId device) {
+    PostUnlessShutDown([this, device] {
+        if (TouchDeviceSink* sink = devices_.Find(device)) {
+            FlushStaleSlots(device, *sink);
+        }
+    });
+}
+
+void InputDispatcher::OnDisplayRemoved(TouchDeviceId device) {
+    PostUnlessShutDown([this, device] {
+        const ReleasedContacts released = contacts_.ClearDevice(device);
+        if (auto gen_it = active_generations_.find(device); gen_it != active_generations_.end()) {
+            StaleDeviceSlots& stale = stale_slots_[device];
+            if (stale.generation != gen_it->second) {
+                stale.generation = gen_it->second;
+                stale.slots.reset();
+            }
+            for (const auto& [key, contact] : released) {
+                stale.slots.set(static_cast<size_t>(contact.slot));
+            }
+            if (stale.slots.none()) {
+                stale_slots_.erase(device);
+            }
+            active_generations_.erase(gen_it);
+        }
+        ReportCancels(released);
+    });
 }
 
 void InputDispatcher::PostUnlessShutDown(absl::AnyInvocable<void() &&> task) {
@@ -392,7 +424,8 @@ absl::Status InputDispatcher::ApplyPointer(InputSessionId session, const Pointer
             *reported.add_pointers() = pointer;
         }
     }
-    WriteReports(loop_, reports, active_generations_);
+    WriteReports(loop_, reports, active_generations_,
+                 [this](TouchDeviceId d, TouchDeviceSink& s) { FlushStaleSlots(d, s); });
     if (!reported.pointers().empty()) {
         Report(std::move(applied));
     }
@@ -409,7 +442,8 @@ absl::Status InputDispatcher::CancelOnDisplay(InputSessionId session, int32_t so
         AppendLift(action, contact.slot, reports.front());
         cancel.mutable_pointer()->add_pointers()->set_pointer_id(key.pointer_id);
     }
-    WriteReports(loop_, reports, active_generations_);
+    WriteReports(loop_, reports, active_generations_,
+                 [this](TouchDeviceId d, TouchDeviceSink& s) { FlushStaleSlots(d, s); });
     if (!cancel.pointer().pointers().empty()) {
         Report(std::move(cancel));
     }
@@ -502,7 +536,8 @@ void InputDispatcher::ReleaseSession(InputSessionId session) {
         AppendContactCancel(contact.slot, report.events, report.follow_up);
         written.emplace_back(key, contact);
     }
-    WriteReports(loop_, reports, active_generations_);
+    WriteReports(loop_, reports, active_generations_,
+                 [this](TouchDeviceId d, TouchDeviceSink& s) { FlushStaleSlots(d, s); });
     ReportCancels(written);
     sessions_.erase(session);
 
@@ -521,6 +556,7 @@ void InputDispatcher::ReleaseSession(InputSessionId session) {
 
 void InputDispatcher::ResetAfterSnapshotLoad() {
     DCHECK(loop_.IsOnLoopThread());
+    stale_slots_.clear();
     EvDevEvents palm_all;
     EvDevEvents lift_all;
     for (int slot = 0; slot < kTouchDeviceSlots; ++slot) {
@@ -562,6 +598,33 @@ void InputDispatcher::ResetAfterSnapshotLoad() {
     }
     if (keyboard_ != nullptr) {
         keyboard_->Reset();
+    }
+}
+
+void InputDispatcher::FlushStaleSlots(TouchDeviceId device, TouchDeviceSink& sink) {
+    auto it = stale_slots_.find(device);
+    if (it == stale_slots_.end()) {
+        return;
+    }
+    if (sink.ActiveGeneration() != it->second.generation) {
+        stale_slots_.erase(it);
+        return;
+    }
+    if (!sink.IsActive()) {
+        return;
+    }
+    EvDevEvents palm;
+    EvDevEvents lift;
+    for (int slot = 0; slot < kTouchDeviceSlots; ++slot) {
+        if (it->second.slots.test(static_cast<size_t>(slot))) {
+            AppendContactCancel(slot, palm, lift);
+        }
+    }
+    stale_slots_.erase(it);
+    if (!palm.empty()) {
+        sink.WriteReport(palm);
+        sink.WriteReport(lift);
+        active_generations_[device] = sink.ActiveGeneration();
     }
 }
 

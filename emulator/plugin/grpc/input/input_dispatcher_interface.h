@@ -102,6 +102,8 @@ class IInputDispatcher {
      * - Snapshot load: a synthesized `CANCEL` per session and requested display
      *   of the contacts held before the load, and a synthesized `KEY_ACTION_UP`
      *   per session and held key.
+     * - Display removal: a synthesized `CANCEL` per session and requested
+     *   display of the contacts bound to the removed display's device.
      *
      * Rejected events report nothing.
      *
