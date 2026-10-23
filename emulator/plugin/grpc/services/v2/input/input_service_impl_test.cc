@@ -675,7 +675,7 @@ TEST_F(InputServiceImplTest, SendInputEventsFailsForKeyThatIsNotAW3cCode) {
 
     EXPECT_EQ(status.error_code(), ::grpc::StatusCode::INVALID_ARGUMENT);
     EXPECT_THAT(status.error_message(), HasSubstr("events[1]"));
-    EXPECT_THAT(keyboard_.Writes(), ElementsAre("text before"));
+    EXPECT_THAT(keyboard_.Writes(), IsEmpty());
 }
 
 TEST_F(InputServiceImplTest, RejectsUnsupportedPeripheralsWithFailedPrecondition) {
@@ -699,7 +699,7 @@ TEST_F(InputServiceImplTest, RejectsUnsupportedPeripheralsWithFailedPrecondition
         ev.mutable_axis()->set_value(1.0F);
         const auto status = Send({ev});
         EXPECT_EQ(status.error_code(), ::grpc::StatusCode::FAILED_PRECONDITION);
-        EXPECT_THAT(status.error_message(), HasSubstr("hw.rotaryInput"));
+        EXPECT_THAT(status.error_message(), HasSubstr("no guest rotary device is registered"));
     }
 }
 

@@ -30,9 +30,11 @@
 #include "api/make_ref_counted.h"
 #include "emulator/plugin/grpc/input/dispatcher_session.h"
 #include "emulator/plugin/grpc/input/input_dispatcher_interface.h"
+#include "emulator/plugin/grpc/input/v2_input_validator.h"
 #include "emulator/plugin/grpc/services/v2/environment/sensors_service_impl.h"
 #include "emulator/plugin/grpc/services/v2/webrtc/rtc_service_impl.h"
 #include "goldfish/audio/qemu_audio_source.h"
+#include "goldfish/avd/avd_properties.h"
 #include "goldfish/avd/avd_universe.h"
 #include "goldfish/display/abstract_multi_display.h"
 #include "goldfish/videobridge/in_process_input_sender.h"
@@ -55,6 +57,7 @@ using ::goldfish::avd::AvdUniverse;
 using ::goldfish::display::IMultiDisplay;
 using ::goldfish::grpc::v2::DispatcherSession;
 using ::goldfish::grpc::v2::IInputDispatcher;
+using ::goldfish::grpc::v2::V2InputValidator;
 using ::goldfish::videobridge::DataChannelLabel;
 using ::goldfish::videobridge::InProcessInputSender;
 using ::goldfish::videobridge::InProcessVideoSource;
@@ -110,14 +113,21 @@ void LogRejectedV2InputEvent(IInputDispatcher::DispatchResult result) {
 // One WebRTC v2 input channel: a human session on `input_dispatcher` that
 // lives as long as the sender, so closing the channel releases its input. As
 // for every v2 client, DOWN for a pointer it holds is rejected.
-std::unique_ptr<InputSender> CreateV2InputSender(
-        std::shared_ptr<IInputDispatcher> input_dispatcher) {
+std::unique_ptr<InputSender> CreateV2InputSender(IMultiDisplay& multidisplay,
+                                                 std::shared_ptr<IInputDispatcher> input_dispatcher,
+                                                 V2InputValidator::Options v2_validator_options) {
     auto session = std::make_shared<DispatcherSession>(
             std::move(input_dispatcher),
             IInputDispatcher::SessionOptions{
                 .human = true, .source_id = 0, .reject_down_on_held = true});
+    V2InputValidator validator(multidisplay, v2_validator_options);
     return std::make_unique<InProcessInputSender>(
-            /*dispatcher=*/nullptr, [session](const ::android::emulation::v2::InputEvent& event) {
+            /*dispatcher=*/nullptr, [session = std::move(session),
+                                     validator](const ::android::emulation::v2::InputEvent& event) {
+                if (absl::Status status = validator.Validate(event); !status.ok()) {
+                    VLOG(1) << "Dropped invalid WebRTC v2 input event: " << status;
+                    return absl::OkStatus();
+                }
                 session->Dispatch(event, LogRejectedV2InputEvent);
                 return absl::OkStatus();
             });
@@ -128,7 +138,8 @@ std::unique_ptr<InputSender> CreateV2InputSender(
 InputSenderFactory CreateInProcessInputSenderFactory(
         IMultiDisplay& multidisplay, std::shared_ptr<IKeyEventSender> key_event_sender,
         std::shared_ptr<IInputDispatcher> input_dispatcher,
-        ::goldfish::sensors::PhysicalModel* physical_model) {
+        ::goldfish::sensors::PhysicalModel* physical_model,
+        V2InputValidator::Options v2_validator_options) {
     CHECK_NE(key_event_sender, nullptr) << "key_event_sender must not be null";
     auto input_event_sender = std::make_shared<InputEventSender>(&multidisplay);
     std::shared_ptr<::goldfish::grpc::v2::SensorsServiceImpl> sensors_service;
@@ -137,11 +148,11 @@ InputSenderFactory CreateInProcessInputSenderFactory(
                 std::make_shared<::goldfish::grpc::v2::SensorsServiceImpl>(*physical_model);
     }
 
-    return [input_event_sender, key_event_sender = std::move(key_event_sender),
-            input_dispatcher = std::move(input_dispatcher),
-            sensors_service](DataChannelLabel label) -> std::unique_ptr<InputSender> {
+    return [&multidisplay, input_event_sender, key_event_sender = std::move(key_event_sender),
+            input_dispatcher = std::move(input_dispatcher), sensors_service,
+            v2_validator_options](DataChannelLabel label) -> std::unique_ptr<InputSender> {
         if (label == DataChannelLabel::kInputV2 && input_dispatcher != nullptr) {
-            return CreateV2InputSender(input_dispatcher);
+            return CreateV2InputSender(multidisplay, input_dispatcher, v2_validator_options);
         }
         if (label == DataChannelLabel::kSensorsV2 && sensors_service != nullptr) {
             return std::make_unique<InProcessInputSender>(
@@ -183,9 +194,11 @@ static std::shared_ptr<Switchboard> CreateInProcessSwitchboard(AvdUniverse& avd_
     // keyboard::createKeyEventSender explicitly supports a null QemuConsole* gracefully.
     std::shared_ptr<IKeyEventSender> key_event_sender =
             keyboard::createKeyEventSender(console, &avd_universe.GetQemuEventLoop());
+    const auto& hw = avd_universe.Props().hw_config;
     auto input_sender_factory = CreateInProcessInputSenderFactory(
             avd_universe.GetMultiDisplay(), std::move(key_event_sender),
-            avd_universe.GetInputDispatcher(), &avd_universe.GetSensorsPhysicalModel());
+            avd_universe.GetInputDispatcher(), &avd_universe.GetSensorsPhysicalModel(),
+            {.hw_sensor_hinge = hw.hw_sensor_hinge, .hw_keyboard = hw.hw_keyboard});
     return std::make_shared<Switchboard>(media_provider, input_sender_factory);
 }
 

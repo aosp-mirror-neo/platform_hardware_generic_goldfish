@@ -57,7 +57,6 @@ std::vector<std::shared_ptr<Service>> CreateV2Services(AvdUniverse& avd_universe
             avd_universe.GetInputDispatcher(), avd_universe.GetMultiDisplay(),
             InputServiceImpl::Options{.hw_sensor_hinge = hw.hw_sensor_hinge,
                                       .hw_keyboard = hw.hw_keyboard,
-                                      .hw_rotary_input = hw.hw_rotaryInput,
                                       .event_loop = ::goldfish::avd::globalEventLoop()}));
 
     if (vm_operations != nullptr) {

@@ -32,7 +32,7 @@
 #include "android/emulation/control/grpc_event_stream_support.h"
 #include "emulator/plugin/grpc/input/dispatcher_session.h"
 #include "emulator/plugin/grpc/input/input_dispatcher_interface.h"
-#include "emulator/plugin/grpc/input/slot_registry.h"
+#include "emulator/plugin/grpc/input/v2_input_validator.h"
 #include "goldfish/async/event_loop.h"
 #include "goldfish/display/abstract_multi_display.h"
 #include "input_service.grpc.pb.h"
@@ -83,8 +83,7 @@ class InputServiceImpl final : public InputServiceBase {
   public:
     static constexpr absl::Duration kDefaultMaxBatchDuration = absl::Seconds(30);
     static constexpr absl::Duration kDefaultMaxStreamStepDuration = absl::Seconds(1);
-    static constexpr int32_t kDefaultMaxTouchPoints =
-            static_cast<int32_t>(::android::emulation::control::kMtsPointersNum);
+    static constexpr int32_t kDefaultMaxTouchPoints = V2InputValidator::kDefaultMaxTouchPoints;
 
     using IMultiDisplay = ::goldfish::display::IMultiDisplay;
 
@@ -107,7 +106,7 @@ class InputServiceImpl final : public InputServiceBase {
     struct Options {
         bool hw_sensor_hinge{false};
         bool hw_keyboard{true};
-        bool hw_rotary_input{true};
+        bool hw_rotary_input{false};
         bool read_only{false};
         bool supports_input_activity_observation{true};
         int32_t max_touch_points{kDefaultMaxTouchPoints};
@@ -169,7 +168,6 @@ class InputServiceImpl final : public InputServiceBase {
     using SourceSessions = absl::flat_hash_map<int32_t, std::unique_ptr<DispatcherSession>>;
 
     absl::Status ValidateInputEvent(const InputEvent& event) const;
-    absl::Status ValidatePointerEvent(const PointerEvent& pointer) const;
     absl::Status ValidateBatchRequest(const SendInputEventsRequest& request) const;
     std::unique_ptr<DispatcherSession> OpenSession(int32_t source_id) const;
     // @return The session that the SendInputEvents calls of `source_id` share,
@@ -178,8 +176,8 @@ class InputServiceImpl final : public InputServiceBase {
     void SleepUntil(absl::Time target) const;
 
     const std::shared_ptr<IInputDispatcher> dispatcher_;
-    IMultiDisplay& multi_display_;
     const Options options_;
+    const V2InputValidator validator_;
 
     absl::Mutex batch_sessions_mutex_;
     // TODO(b/554875313): "persistent sessions for identified SendInputEvents

@@ -295,6 +295,46 @@ cc_library(
 )
 
 cc_library(
+    name = "v2_input_validator",
+    srcs = ["v2_input_validator.cc"],
+    hdrs = ["v2_input_validator.h"],
+    deps = [
+        ":slot_registry",
+        "//emulator/libs/status_macros",
+        "//emulator/plugin/display",
+        "//emulator/plugin/display:abstract_multi_display",
+        "//emulator/plugin/display:base",
+        "//emulator/plugin/grpc/keyboard:key_code_resolver",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@aemu//protos/services_v2:input_service_cc_proto",
+    ],
+)
+
+cc_test(
+    name = "v2_input_validator_test",
+    size = "small",
+    srcs = ["v2_input_validator_test.cc"],
+    data = [":binplace"],
+    dynamic_deps = [
+        "@glib//glib:glib_shared",
+        "@glib//gmodule:gmodule_shared",
+    ],
+    deps = [
+        ":v2_input_validator",
+        "//emulator/libs/async:async_testing",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/display:test-display",
+        "//emulator/plugin/grpc/keyboard:test_qemu_input_stub",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@aemu//protos/services_v2:input_service_cc_proto",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
     name = "input_dispatcher",
     srcs = ["input_dispatcher.cc"],
     hdrs = ["input_dispatcher.h"],
@@ -364,6 +404,8 @@ clang_tidy_test(
         ":multi_display_touch_devices_test",
         ":touch_device",
         ":touch_encoding",
+        ":v2_input_validator",
+        ":v2_input_validator_test",
     ],
     tidy_config_file = "//:clang_tidy_config",
 )

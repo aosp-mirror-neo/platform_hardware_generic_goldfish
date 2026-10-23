@@ -197,5 +197,42 @@ TEST(InProcessRtcServiceTest, InputSenderV2DispatchesToAHumanSessionClosedWithTh
     EXPECT_TRUE(key_event_sender->sent_events.empty());
 }
 
+TEST(InProcessRtcServiceTest, InputSenderV2DropsInvalidEventsBeforeDispatch) {
+    ::goldfish::display::test::FakeMultiDisplay fake_multidisplay(
+            ::goldfish::avd::globalEventLoop());
+    TestAvdUniverse universe(&fake_multidisplay, *::goldfish::avd::globalEventLoop());
+    auto key_event_sender = std::make_shared<FakeKeyEventSender>();
+    auto dispatcher = std::make_shared<RecordingInputDispatcher>();
+    auto factory =
+            CreateInProcessInputSenderFactory(fake_multidisplay, key_event_sender, dispatcher);
+    auto sender = factory(DataChannelLabel::kInputV2);
+    ASSERT_NE(sender, nullptr);
+    EXPECT_TRUE(sender->Start().ok());
+
+    ::android::emulation::v2::InputEvent mouse_event;
+    auto* mouse_pointer = mouse_event.mutable_pointer();
+    mouse_pointer->set_display_id(0);
+    mouse_pointer->set_action(::android::emulation::v2::PointerAction::POINTER_ACTION_DOWN);
+    auto* mouse_ptr = mouse_pointer->add_pointers();
+    mouse_ptr->set_pointer_id(0);
+    mouse_ptr->set_tool_type(::android::emulation::v2::ToolType::TOOL_TYPE_MOUSE);
+    sender->SendV2Event(mouse_event);
+
+    ::android::emulation::v2::InputEvent scroll_event;
+    scroll_event.mutable_pointer()->set_display_id(0);
+    scroll_event.mutable_pointer()->set_action(
+            ::android::emulation::v2::PointerAction::POINTER_ACTION_SCROLL);
+    scroll_event.mutable_pointer()->set_scroll_y(1.0F);
+    sender->SendV2Event(scroll_event);
+
+    ::android::emulation::v2::InputEvent invalid_key_event;
+    invalid_key_event.mutable_key()->set_action(
+            ::android::emulation::v2::KeyAction::KEY_ACTION_PRESS);
+    invalid_key_event.mutable_key()->set_dom_code("a");
+    sender->SendV2Event(invalid_key_event);
+
+    EXPECT_THAT(dispatcher->calls, ::testing::IsEmpty());
+}
+
 }  // namespace
 }  // namespace android::emulation::control

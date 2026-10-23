@@ -228,11 +228,13 @@ cc_library(
     includes = ["include"],
     deps = [
         "//emulator/plugin/audio:qemu_audio_source",
+        "//emulator/plugin/avd:avd_properties",
         "//emulator/plugin/avd:avd_universe",
         "//emulator/plugin/display:base",
         "//emulator/plugin/grpc/input:dispatcher_session",
         "//emulator/plugin/grpc/input:event_sender",
         "//emulator/plugin/grpc/input:input_dispatcher_interface",
+        "//emulator/plugin/grpc/input:v2_input_validator",
         "//emulator/plugin/grpc/keyboard",
         "//emulator/plugin/grpc/services/v2:rtc_service",
         "//emulator/plugin/grpc/services/v2:sensors_service",
