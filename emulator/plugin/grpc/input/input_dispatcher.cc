@@ -142,6 +142,7 @@ InputDispatcher::InputDispatcher(::goldfish::async::EventLoop& loop, TouchDevice
         , clock_(clock)
         , max_pending_per_session_(max_pending_per_session)
         , active_gate_(std::make_shared<ActiveGate>(this))
+        , timer_gate_(std::make_shared<TimerGate>(this))
         , keyboard_(keyboard)
         , delivery_thread_([this] { DeliverActivity(); }) {
     DCHECK_GT(max_pending_per_session_, 0U);
@@ -163,6 +164,12 @@ void InputDispatcher::ShutdownOnce() {
     {
         absl::MutexLock gate_lock(active_gate_->mutex);
         active_gate_->dispatcher = nullptr;
+    }
+    // First, so no idle timer touches the dispatcher from here on: one that is
+    // running finishes before this returns, later ones find the gate closed.
+    {
+        absl::MutexLock gate_lock(timer_gate_->mutex);
+        timer_gate_->dispatcher = nullptr;
     }
     absl::flat_hash_map<OperationId, PendingOperation> pending;
     {
@@ -204,7 +211,8 @@ void InputDispatcher::OnDeviceActiveChanged() {
 InputSessionId InputDispatcher::OpenSession(SessionOptions options) {
     const InputSessionId session = next_session_.fetch_add(1, std::memory_order_relaxed);
     // If the loop is gone, later operations of this session fail to post too.
-    PostUnlessShutDown([this, session, options] { sessions_.emplace(session, options); });
+    PostUnlessShutDown(
+            [this, session, options] { sessions_.emplace(session, Session{.options = options}); });
     return session;
 }
 
@@ -294,10 +302,11 @@ void InputDispatcher::PostOperation(InputSessionId session,
     }
     // `done` stays in `pending_` until the task or Shutdown() claims it, so it
     // survives a rejected Post, which destroys the task.
-    absl::Status posted = loop_.Post([this, id = *id, apply = std::move(apply)]() mutable {
+    absl::Status posted = loop_.Post([this, session, id = *id, apply = std::move(apply)]() mutable {
         if (std::optional<DispatchCallback> claimed = ClaimPending(id)) {
             reported_at_.reset();
             absl::Status status = std::move(apply)();
+            RefreshIdleTimer(session);
             Complete(*claimed, {std::move(status), reported_at_});
         }
     });
@@ -349,7 +358,7 @@ absl::StatusOr<InputDispatcher::SessionOptions> InputDispatcher::FindSession(
         return absl::FailedPreconditionError(
                 absl::StrCat("Input session ", session, " is not open."));
     }
-    return it->second;
+    return it->second.options;
 }
 
 absl::Status InputDispatcher::ApplyPointer(InputSessionId session, const PointerEvent& event) {
@@ -518,12 +527,68 @@ absl::Status InputDispatcher::CheckKeyboard() const {
     return absl::OkStatus();
 }
 
-void InputDispatcher::ReleaseSession(InputSessionId session) {
-    auto options = sessions_.find(session);
-    if (options == sessions_.end()) {
+bool InputDispatcher::SessionHasHeldInput(InputSessionId session) const {
+    if (contacts_.HasSession(session)) {
+        return true;
+    }
+    return std::ranges::any_of(
+            key_holders_, [session](const auto& entry) { return entry.second.contains(session); });
+}
+
+void InputDispatcher::RefreshIdleTimer(InputSessionId session) {
+    auto it = sessions_.find(session);
+    if (it == sessions_.end() || it->second.options.idle_timeout <= absl::ZeroDuration()) {
+        return;
+    }
+    Session& state = it->second;
+    const uint64_t generation = ++state.idle_generation;
+    if (!SessionHasHeldInput(session)) {
+        return;
+    }
+    if (state.idle_timer == nullptr) {
+        state.idle_timer = loop_.CreateTimer([gate = timer_gate_, session] {
+            absl::MutexLock gate_lock(gate->mutex);
+            if (gate->dispatcher != nullptr) {
+                gate->dispatcher->OnIdleTimer(session);
+            }
+            return true;  // Keeps the timer armable; Schedule() re-arms it.
+        });
+    }
+    state.idle_timer->Schedule(state.options.idle_timeout);
+    // Schedule() arms the timer from a loop task of its own, so record the
+    // generation it fires for in the same order. A firing for the previous
+    // deadline that lands in between then reads the previous generation and
+    // is stale, rather than releasing input the operation just held.
+    loop_.Post([gate = timer_gate_, session, generation] {
+             absl::MutexLock gate_lock(gate->mutex);
+             if (gate->dispatcher != nullptr) {
+                 gate->dispatcher->ArmIdleGeneration(session, generation);
+             }
+         }).IgnoreError();
+}
+
+void InputDispatcher::ArmIdleGeneration(InputSessionId session, uint64_t generation) {
+    DCHECK(loop_.IsOnLoopThread());
+    if (auto it = sessions_.find(session); it != sessions_.end()) {
+        it->second.armed_generation = generation;
+    }
+}
+
+void InputDispatcher::OnIdleTimer(InputSessionId session) {
+    DCHECK(loop_.IsOnLoopThread());
+    auto it = sessions_.find(session);
+    if (it == sessions_.end() || it->second.idle_generation != it->second.armed_generation) {
+        return;  // Closed, or an operation ran since the timer was armed.
+    }
+    ReleaseSessionInput(session);
+}
+
+void InputDispatcher::ReleaseSessionInput(InputSessionId session) {
+    auto it = sessions_.find(session);
+    if (it == sessions_.end()) {
         return;  // Only open sessions hold contacts or keys.
     }
-    const int32_t source_id = options->second.source_id;
+    const int32_t source_id = it->second.options.source_id;
     ResyncDevices();
     // Contacts on inactive devices are forgotten without a report.
     Reports reports;
@@ -539,7 +604,6 @@ void InputDispatcher::ReleaseSession(InputSessionId session) {
     WriteReports(loop_, reports, active_generations_,
                  [this](TouchDeviceId d, TouchDeviceSink& s) { FlushStaleSlots(d, s); });
     ReportCancels(written);
-    sessions_.erase(session);
 
     std::vector<uint32_t> held;
     for (const auto& [code, holders] : key_holders_) {
@@ -552,6 +616,19 @@ void InputDispatcher::ReleaseSession(InputSessionId session) {
         ReleaseKey(session, code);
         Report(KeyUpEvent(source_id, code), /*synthesized=*/true);
     }
+}
+
+void InputDispatcher::ReleaseSession(InputSessionId session) {
+    auto it = sessions_.find(session);
+    if (it == sessions_.end()) {
+        return;  // Only open sessions hold contacts or keys.
+    }
+    if (it->second.idle_timer != nullptr) {
+        // On the loop, so this cancels in place rather than posting and waiting.
+        it->second.idle_timer->Cancel();
+    }
+    ReleaseSessionInput(session);
+    sessions_.erase(session);
 }
 
 void InputDispatcher::ResetAfterSnapshotLoad() {
@@ -592,7 +669,7 @@ void InputDispatcher::ResetAfterSnapshotLoad() {
     // guest's input queue ahead of that sweep.
     for (const HeldKey& held : held_keys) {
         for (InputSessionId session : held.sessions) {
-            Report(KeyUpEvent(sessions_.at(session).source_id, held.code),
+            Report(KeyUpEvent(sessions_.at(session).options.source_id, held.code),
                    /*synthesized=*/true);
         }
     }
@@ -648,7 +725,7 @@ void InputDispatcher::ReportCancels(const ReleasedContacts& released) {
                    session_cancel.second.pointer().display_id() == contact.display_id;
         });
         if (cancel == cancels.end()) {
-            const int32_t source_id = sessions_.at(key.session).source_id;
+            const int32_t source_id = sessions_.at(key.session).options.source_id;
             cancel = cancels.emplace(cancels.end(), key.session,
                                      CancelEvent(source_id, contact.display_id));
         }

@@ -322,14 +322,18 @@ absl::Status InputServiceImpl::ValidateBatchRequest(const SendInputEventsRequest
     return absl::OkStatus();
 }
 
-std::unique_ptr<DispatcherSession> InputServiceImpl::OpenSession(int32_t source_id) const {
-    return std::make_unique<DispatcherSession>(
-            dispatcher_,
-            IInputDispatcher::SessionOptions{
-                .human = source_id == 0, .source_id = source_id, .reject_down_on_held = true});
+std::unique_ptr<DispatcherSession> InputServiceImpl::OpenSession(
+        int32_t source_id, absl::Duration idle_timeout) const {
+    return std::make_unique<DispatcherSession>(dispatcher_, IInputDispatcher::SessionOptions{
+                                                                .human = source_id == 0,
+                                                                .source_id = source_id,
+                                                                .reject_down_on_held = true,
+                                                                .idle_timeout = idle_timeout,
+                                                            });
 }
 
 DispatcherSession& InputServiceImpl::BatchSession(int32_t source_id) {
+    DCHECK_NE(source_id, 0);
     {
         absl::MutexLock batch_sessions_lock(batch_sessions_mutex_);
         if (auto it = batch_sessions_.find(source_id); it != batch_sessions_.end()) {
@@ -338,7 +342,8 @@ DispatcherSession& InputServiceImpl::BatchSession(int32_t source_id) {
     }
     // Opened outside the lock, as opening calls into the dispatcher. Sessions
     // are never removed, so the reference stays valid after unlocking.
-    std::unique_ptr<DispatcherSession> opened = OpenSession(source_id);
+    std::unique_ptr<DispatcherSession> opened =
+            OpenSession(source_id, options_.held_input_idle_timeout);
     absl::MutexLock batch_sessions_lock(batch_sessions_mutex_);
     return *batch_sessions_.try_emplace(source_id, std::move(opened)).first->second;
 }
@@ -362,6 +367,9 @@ void InputServiceImpl::SleepUntil(absl::Time target) const {
     }
 
     const int32_t client_source_id = ClientSourceId(*context);
+    // Closed when the call returns, so anonymous batches release what they left
+    // held instead of sharing a persistent session across callers.
+    std::unique_ptr<DispatcherSession> anonymous_session;
     auto dispatched = std::make_shared<DispatchedEvents>();
     // Host time corresponding to client timestamp 0, anchored at the first timed event.
     std::optional<absl::Time> client_epoch;
@@ -381,7 +389,16 @@ void InputServiceImpl::SleepUntil(absl::Time target) const {
             break;
         }
         const int32_t source_id = SourceOf(event, client_source_id);
-        BatchSession(source_id).Dispatch(event, dispatched->Track(i, source_id));
+        DispatcherSession* session = nullptr;
+        if (source_id == 0) {
+            if (anonymous_session == nullptr) {
+                anonymous_session = OpenSession(0);
+            }
+            session = anonymous_session.get();
+        } else {
+            session = &BatchSession(source_id);
+        }
+        session->Dispatch(event, dispatched->Track(i, source_id));
     }
 
     if (!dispatched->AwaitAll(*context)) {
