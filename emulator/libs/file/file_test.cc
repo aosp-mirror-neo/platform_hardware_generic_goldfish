@@ -2,8 +2,13 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #include "absl/status/status_matchers.h"
 
@@ -216,6 +221,43 @@ TEST(File, mvFileOverwritesExisting) {
     EXPECT_THAT(file::mv_file(src, dst), absl_testing::IsOk());
     EXPECT_FALSE(file::exists(src));
     EXPECT_THAT(file::read_whole_file(dst, false), absl_testing::IsOkAndHolds("new_content"));
+}
+
+TEST(File, freeSpaceAndDiskPressureLimit) {
+    EXPECT_EQ(file::kDiskPressureLimit, 2_GiB);
+
+    const android::base::TestTempDir tmpdir("FreeSpace");
+    const fs::path unicode_dir = tmpdir.Path() / "测试_🚀_é";
+    ASSERT_THAT(file::mkdir_recursive(unicode_dir, 0755), absl_testing::IsOk());
+
+    const absl::StatusOr<StorageCapacity> space = file::free_space(unicode_dir);
+    ASSERT_THAT(space, absl_testing::IsOk());
+    EXPECT_GT(space->Bytes(), 0U);
+    EXPECT_LT(space->Bytes(), static_cast<std::uintmax_t>(-1));
+
+    EXPECT_THAT(file::free_space(unicode_dir / "non_existent_subpath"),
+                absl_testing::StatusIs(absl::StatusCode::kInternal));
+}
+
+TEST(File, readSymlink) {
+    const android::base::TestTempDir tmpdir("ReadSymlink");
+    const fs::path unicode_dir = tmpdir.Path() / "测试_🚀_é";
+    ASSERT_THAT(file::mkdir_recursive(unicode_dir, 0755), absl_testing::IsOk());
+
+    const fs::path target_file = unicode_dir / "target_测试.txt";
+    ASSERT_THAT(file::touch(target_file), absl_testing::IsOk());
+
+    EXPECT_THAT(file::read_symlink(unicode_dir / "missing_link"),
+                absl_testing::StatusIs(absl::StatusCode::kInternal));
+    EXPECT_THAT(file::read_symlink(target_file),
+                absl_testing::StatusIs(absl::StatusCode::kInternal));
+
+#ifndef _WIN32
+    const fs::path link_path = unicode_dir / "link_🚀";
+    ASSERT_EQ(HANDLE_EINTR(::symlink(target_file.c_str(), link_path.c_str())), 0);
+    EXPECT_TRUE(file::is_link(link_path));
+    EXPECT_THAT(file::read_symlink(link_path), absl_testing::IsOkAndHolds(target_file));
+#endif
 }
 
 }  // namespace android::base

@@ -16,15 +16,15 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstdlib>
-#include <cstring>
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
-
-#include "goldfish/base/unique_handle.h"
+#include "android/base/eintr_wrapper.h"
+#include "emulator/libs/file/posix_scoped_fd.h"
 #include "goldfish/file/file.h"
 #include "goldfish/file/file_atomic.h"
 
@@ -40,34 +40,13 @@ namespace android::base::file {
 
 namespace {
 
-struct FdDeleter {
-    struct Empty {};
-    FdDeleter() = default;
-    FdDeleter(Empty) {}
-    void operator()(int fd) const { ::close(fd); }
-};
-
-using ScopedFd = goldfish::base::UniqueHandle<int, -1, FdDeleter>;
-
-absl::Status WriteToFd(int fd, std::string_view content, const fs::path& path) {
-    size_t total_written = 0;
-    while (total_written < content.size()) {
-        const ssize_t n = write(fd, content.data() + total_written, content.size() - total_written);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return absl::InternalError(absl::StrCat(
-                    "Failed to write to '", path.string(), "'. System error: ", strerror(errno),
-                    ". Please check if the disk is full or permissions changed."));
-        }
-        if (n == 0) {
-            return absl::InternalError(absl::StrCat("Failed to write to '", path.string(),
-                                                    "'. Zero bytes written (unexpected EOF)."));
-        }
-        total_written += n;
+absl::Status MapCreatePrivateFileErrno(int err, std::string_view context, std::string_view hint) {
+    const absl::Status errno_status = absl::ErrnoToStatus(err, context);
+    const std::string detail = absl::StrCat(errno_status.message(), ". ", hint);
+    if (err == EACCES || err == EPERM) {
+        return absl::PermissionDeniedError(detail);
     }
-    return absl::OkStatus();
+    return absl::InternalError(detail);
 }
 
 }  // namespace
@@ -77,15 +56,17 @@ absl::Status CreatePrivateFileExclusive(const fs::path& path, std::string_view c
     std::string tmp_name_template = absl::StrCat(path.string(), ".tmp.XXXXXX");
 
     // Open with 0600 permissions and close-on-exec flag, tmp_name_template is modified in place.
-    ScopedFd fd(mkostemp(tmp_name_template.data(), O_CLOEXEC));
-    if (!fd.ok()) {
-        return absl::InternalError(absl::StrCat("Failed to write to '", path.string(),
-                                                "'. We couldn't create a temporary file in '",
-                                                path.parent_path().string(),
-                                                "' (error: ", strerror(errno),
-                                                "). Please check if you have write permissions "
-                                                "and enough disk space."));
+    const int raw_fd = ::mkostemp(tmp_name_template.data(), O_CLOEXEC);
+    if (raw_fd < 0) {
+        const int err = errno;
+        return MapCreatePrivateFileErrno(
+                err,
+                absl::StrCat("Failed to write to '", path.string(),
+                             "': could not create temporary file in '",
+                             path.parent_path().string(), "'"),
+                "Ensure the parent directory exists, is writable, and has sufficient disk space.");
     }
+    internal::ScopedFd fd(raw_fd);
 
     // Setup cleanup to remove the temporary file.
     // We use hard links so we can always remove it.
@@ -97,26 +78,31 @@ absl::Status CreatePrivateFileExclusive(const fs::path& path, std::string_view c
         }
     };
 
-    auto status = WriteToFd(fd.get(), content, tmp_name_template);
-    if (!status.ok()) {
-        return status;
+    if (absl::Status status = internal::WriteAllToFd(fd.get(), content, tmp_name_template);
+        !status.ok()) {
+        const std::string detail = absl::StrCat(
+                status.message(), ". Please check if the disk is full or permissions changed.");
+        if (absl::IsPermissionDenied(status)) {
+            return absl::PermissionDeniedError(detail);
+        }
+        return absl::InternalError(detail);
     }
 
     // We are going to create a hardlink, which means that path will point
     // to the same (refcounted) inode as tmp_name_template, if path already points to something
     // this will fail. Since it is a hardlink we can safely remove tmp_name_template, as it
     // will merely decrease the refcount.
-    if (link(tmp_name_template.c_str(), path.c_str()) != 0) {
-        int err = errno;
+    const int link_rc = HANDLE_EINTR(::link(tmp_name_template.c_str(), path.c_str()));
+    if (link_rc != 0) {
+        const int err = errno;
         if (err == EEXIST) {
             return absl::AlreadyExistsError(absl::StrCat(
                     "The file '", path.string(),
                     "' already exists and cannot be overwritten for security reasons."));
         }
-        return absl::InternalError(absl::StrCat("Failed to finalize creation of '", path.string(),
-                                                "' (error: ", strerror(err),
-                                                "). Check permissions or if another process is "
-                                                "modifying this directory."));
+        return MapCreatePrivateFileErrno(
+                err, absl::StrCat("Failed to finalize creation of '", path.string(), "'"),
+                "Check permissions or if another process is modifying this directory.");
     }
 
     return absl::OkStatus();
