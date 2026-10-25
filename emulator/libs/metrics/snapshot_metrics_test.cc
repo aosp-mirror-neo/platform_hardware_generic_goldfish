@@ -53,8 +53,7 @@ TEST(SnapshotMetricsTest, FillEmulatorSnapshotSaveFailed) {
     SnapshotOperationStats stats;
     stats.for_save = true;
     stats.name = "default_boot";
-    stats.save_state = android_studio::EMULATOR_SNAPSHOT_SAVE_FAILED;
-    stats.failure_reason = android_studio::EMULATOR_SNAPSHOT_FAILURE_REASON_INTERNAL_ERROR;
+    stats.ReportFailure();
 
     android_studio::AndroidStudioEvent event;
     FillSnapshotMetrics(event, stats);
@@ -140,10 +139,7 @@ TEST(SnapshotMetricsTest, FillSnapshotMetricsQuickbootSaveFailed) {
     stats.for_save = true;
     stats.is_quickboot = true;
     stats.name = "default_boot";
-    stats.quickboot_save_state =
-            android_studio::EmulatorQuickbootSave::EMULATOR_QUICKBOOT_SAVE_FAILED;
-    stats.save_state = android_studio::EMULATOR_SNAPSHOT_SAVE_FAILED;
-    stats.failure_reason = android_studio::EMULATOR_SNAPSHOT_FAILURE_REASON_INTERNAL_ERROR;
+    stats.ReportFailure();
 
     android_studio::AndroidStudioEvent event;
     FillSnapshotMetrics(event, stats);
