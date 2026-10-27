@@ -1,6 +1,9 @@
+load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_license//rules:license.bzl", "license")
 load("@rules_license//rules:license_kind.bzl", "license_kind")
+load("//emulator/tools:plugins.bzl", "collect_plugins")
 
 package(
     default_applicable_licenses = [":license"],
@@ -33,4 +36,40 @@ cc_library(
         "//emulator/libs/logging:absl_c_bridge",
         "@qemu//:qemu-headers-exported",
     ],
+)
+
+collect_plugins(
+    name = "binplace",
+    output_dir = ".",
+    plugins = [
+        "@glib//glib:glib_shared",
+        "@glib//gmodule:gmodule_shared",
+    ],
+)
+
+cc_test(
+    name = "virtio_wifi_test",
+    size = "small",
+    srcs = ["virtio_wifi_test.cc"],
+    data = [":binplace"],
+    dynamic_deps = [
+        "@glib//glib:glib_shared",
+        "@glib//gmodule:gmodule_shared",
+    ],
+    deps = [
+        ":virtio-wifi",
+        "//emulator/libs/test:googletest_main",
+        "@glib//glib:glib_import",
+        "@glib//gmodule:gmodule_import",
+        "@googletest//:gtest",
+        "@qemu//:qemu-headers-exported",
+    ],
+)
+
+clang_tidy_test(
+    name = "tidy",
+    targets = [
+        ":virtio_wifi_test",
+    ],
+    tidy_config_file = "//:clang_tidy_config",
 )
