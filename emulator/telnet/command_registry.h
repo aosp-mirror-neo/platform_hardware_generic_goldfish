@@ -195,15 +195,8 @@ class CommandRegistryBuilder {
         template <typename F>
         NodeBuilder& On(std::string name, std::string abstract, std::string description,
                         F&& handler) {
-            using CtxType = typename parsing::FunctionTraits<std::decay_t<F>>::ContextType;
-            auto wrapped = [func = std::forward<F>(handler)](
-                                   LineCommandHandler::Context& ctx,
-                                   ArgStream& args) mutable -> absl::StatusOr<std::string> {
-                return parsing::BindAndInvoke(std::forward<decltype(func)>(func),
-                                              static_cast<CtxType&>(ctx), args);
-            };
             return OnInternal(std::move(name), std::move(abstract), std::move(description),
-                              std::move(wrapped));
+                              WrapHandler(std::forward<F>(handler)));
         }
 
         /**
@@ -275,17 +268,8 @@ class CommandRegistryBuilder {
      */
     template <typename F>
     NodeBuilder On(std::string name, std::string abstract, std::string description, F&& handler) {
-        using CtxType = typename parsing::FunctionTraits<std::decay_t<F>>::ContextType;
-        CommandRegistry::CommandHandler wrapped =
-                [func = std::forward<F>(handler)](
-                        LineCommandHandler::Context& ctx,
-                        ArgStream& args) mutable -> absl::StatusOr<std::string> {
-            return parsing::BindAndInvoke(std::forward<decltype(func)>(func),
-                                          static_cast<CtxType&>(ctx), args);
-        };
-
         return Command(std::move(name), std::move(abstract), std::move(description))
-                .Handler(std::move(wrapped));
+                .Handler(WrapHandler(std::forward<F>(handler)));
     }
 
     /**
@@ -297,6 +281,18 @@ class CommandRegistryBuilder {
     std::unique_ptr<CommandRegistry> Build();
 
   private:
+    // Wraps a typed command handler into a generic CommandRegistry::CommandHandler.
+    template <typename F>
+    static CommandRegistry::CommandHandler WrapHandler(F&& handler) {
+        using CtxType = typename parsing::FunctionTraits<std::decay_t<F>>::ContextType;
+        return [func = std::forward<F>(handler)](
+                       LineCommandHandler::Context& ctx,
+                       ArgStream& args) mutable -> absl::StatusOr<std::string> {
+            return parsing::BindAndInvoke(std::forward<decltype(func)>(func),
+                                          static_cast<CtxType&>(ctx), args);
+        };
+    }
+
     static CommandRegistry::Entry* GetOrCreateChild(
             std::vector<std::unique_ptr<CommandRegistry::Entry>>& children, std::string name,
             std::string abstract, std::string description);
