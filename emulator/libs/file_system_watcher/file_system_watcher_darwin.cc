@@ -83,15 +83,6 @@ std::string StripTrailingSlashes(std::string path_str) {
 }
 
 template <typename Sink>
-void AppendFlag(Sink& sink, bool* first, absl::string_view flag) {
-    if (!(*first)) {
-        sink.Append("|");
-    }
-    sink.Append(flag);
-    *first = false;
-}
-
-template <typename Sink>
 void AbslStringify(Sink& sink, FSEventFlagsWrapper wrapper) {
     const FSEventStreamEventFlags flags = wrapper.flags;
     if (flags == kFSEventStreamEventFlagNone) {
@@ -99,75 +90,46 @@ void AbslStringify(Sink& sink, FSEventFlagsWrapper wrapper) {
         return;
     }
 
+    struct FlagEntry {
+        FSEventStreamEventFlags mask;
+        absl::string_view name;
+    };
+    constexpr FlagEntry kFlagEntries[] = {
+        // Item-level flags
+        {kFSEventStreamEventFlagItemCreated, "Created"},
+        {kFSEventStreamEventFlagItemRemoved, "Removed"},
+        {kFSEventStreamEventFlagItemModified, "Modified"},
+        {kFSEventStreamEventFlagItemInodeMetaMod, "InodeMetaMod"},
+        {kFSEventStreamEventFlagItemRenamed, "Renamed"},
+        {kFSEventStreamEventFlagItemXattrMod, "XattrMod"},
+        {kFSEventStreamEventFlagItemFinderInfoMod, "FinderInfoMod"},
+        {kFSEventStreamEventFlagItemChangeOwner, "ChangeOwner"},
+        {kFSEventStreamEventFlagItemCloned, "Cloned"},
+        // Item type flags
+        {kFSEventStreamEventFlagItemIsFile, "IsFile"},
+        {kFSEventStreamEventFlagItemIsDir, "IsDir"},
+        {kFSEventStreamEventFlagItemIsSymlink, "IsSymlink"},
+        {kFSEventStreamEventFlagItemIsHardlink, "IsHardlink"},
+        // Stream-level flags
+        {kFSEventStreamEventFlagMustScanSubDirs, "MustScanSubDirs"},
+        {kFSEventStreamEventFlagUserDropped, "UserDropped"},
+        {kFSEventStreamEventFlagKernelDropped, "KernelDropped"},
+        {kFSEventStreamEventFlagEventIdsWrapped, "EventIdsWrapped"},
+        {kFSEventStreamEventFlagHistoryDone, "HistoryDone"},
+        {kFSEventStreamEventFlagRootChanged, "RootChanged"},
+        {kFSEventStreamEventFlagMount, "Mount"},
+        {kFSEventStreamEventFlagUnmount, "Unmount"},
+    };
+
     bool first = true;
-
-    // --- Item-level flags ---
-    if (flags & kFSEventStreamEventFlagItemCreated) {
-        AppendFlag(sink, &first, "Created");
-    }
-    if (flags & kFSEventStreamEventFlagItemRemoved) {
-        AppendFlag(sink, &first, "Removed");
-    }
-    if (flags & kFSEventStreamEventFlagItemModified) {
-        AppendFlag(sink, &first, "Modified");
-    }
-    if (flags & kFSEventStreamEventFlagItemInodeMetaMod) {
-        AppendFlag(sink, &first, "InodeMetaMod");
-    }
-    if (flags & kFSEventStreamEventFlagItemRenamed) {
-        AppendFlag(sink, &first, "Renamed");
-    }
-    if (flags & kFSEventStreamEventFlagItemXattrMod) {
-        AppendFlag(sink, &first, "XattrMod");
-    }
-    if (flags & kFSEventStreamEventFlagItemFinderInfoMod) {
-        AppendFlag(sink, &first, "FinderInfoMod");
-    }
-    if (flags & kFSEventStreamEventFlagItemChangeOwner) {
-        AppendFlag(sink, &first, "ChangeOwner");
-    }
-    if (flags & kFSEventStreamEventFlagItemCloned) {
-        AppendFlag(sink, &first, "Cloned");
-    }
-
-    // --- Item type flags ---
-    if (flags & kFSEventStreamEventFlagItemIsFile) {
-        AppendFlag(sink, &first, "IsFile");
-    }
-    if (flags & kFSEventStreamEventFlagItemIsDir) {
-        AppendFlag(sink, &first, "IsDir");
-    }
-    if (flags & kFSEventStreamEventFlagItemIsSymlink) {
-        AppendFlag(sink, &first, "IsSymlink");
-    }
-    if (flags & kFSEventStreamEventFlagItemIsHardlink) {
-        AppendFlag(sink, &first, "IsHardlink");
-    }
-
-    // --- Stream-level flags ---
-    if (flags & kFSEventStreamEventFlagMustScanSubDirs) {
-        AppendFlag(sink, &first, "MustScanSubDirs");
-    }
-    if (flags & kFSEventStreamEventFlagUserDropped) {
-        AppendFlag(sink, &first, "UserDropped");
-    }
-    if (flags & kFSEventStreamEventFlagKernelDropped) {
-        AppendFlag(sink, &first, "KernelDropped");
-    }
-    if (flags & kFSEventStreamEventFlagEventIdsWrapped) {
-        AppendFlag(sink, &first, "EventIdsWrapped");
-    }
-    if (flags & kFSEventStreamEventFlagHistoryDone) {
-        AppendFlag(sink, &first, "HistoryDone");
-    }
-    if (flags & kFSEventStreamEventFlagRootChanged) {
-        AppendFlag(sink, &first, "RootChanged");
-    }
-    if (flags & kFSEventStreamEventFlagMount) {
-        AppendFlag(sink, &first, "Mount");
-    }
-    if (flags & kFSEventStreamEventFlagUnmount) {
-        AppendFlag(sink, &first, "Unmount");
+    for (const auto& entry : kFlagEntries) {
+        if (flags & entry.mask) {
+            if (!first) {
+                sink.Append("|");
+            }
+            sink.Append(entry.name);
+            first = false;
+        }
     }
 }
 }  // namespace
@@ -285,6 +247,12 @@ class FileSystemWatcherFS : public FileSystemWatcher {
 
     bool IsIdle() const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) { return state_ == State::kIdle; }
 
+    // Returns true if the watcher is currently stopping.
+    bool IsStopping() ABSL_LOCKS_EXCLUDED(mu_) {
+        const absl::MutexLock lock(mu_);
+        return state_ == State::kStopping;
+    }
+
     static void NotifyRunning(void* info) {
         auto* self = static_cast<FileSystemWatcherFS*>(info);
         const absl::MutexLock lock(self->mu_);
@@ -378,11 +346,8 @@ class FileSystemWatcherFS : public FileSystemWatcher {
         };
 
         // Setup run loop source to signal that we are fully operational.
-        {
-            const absl::MutexLock lock(mu_);
-            if (state_ == State::kStopping) {
-                return;
-            }
+        if (IsStopping()) {
+            return;
         }
 
         CFRunLoopRef run_loop = CFRunLoopGetCurrent();
@@ -406,11 +371,8 @@ class FileSystemWatcherFS : public FileSystemWatcher {
         }
         stream_started = true;
 
-        {
-            const absl::MutexLock lock(mu_);
-            if (state_ == State::kStopping) {
-                return;
-            }
+        if (IsStopping()) {
+            return;
         }
 
         CFRunLoopRun();  // Waits until we cancel it (by calling CFRunLoopStop).
@@ -440,9 +402,6 @@ std::unique_ptr<FileSystemWatcher> CreateDarwinFileSystemWatcherForTesting(
 
 std::unique_ptr<FileSystemWatcher> FileSystemWatcher::GetFileSystemWatcher(
         const std::filesystem::path& path, const FileSystemWatcherCallback& on_change_callback) {
-    if (!base::file::is_dir(path)) {
-        return nullptr;
-    }
-    return std::make_unique<FileSystemWatcherFS>(path, on_change_callback);
+    return CreateDarwinFileSystemWatcherForTesting(path, on_change_callback, {});
 };
 }  // namespace android::base
