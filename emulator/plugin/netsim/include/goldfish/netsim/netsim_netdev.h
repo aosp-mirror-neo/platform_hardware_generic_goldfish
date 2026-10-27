@@ -14,8 +14,15 @@
 
 #pragma once
 
+#include <memory>
+
+#include "emulator/plugin/netsim/packet_transport.h"
+
 namespace goldfish::netsim {
 
+using PacketTransportFactory = std::unique_ptr<PacketTransport> (*)(PacketTransport::RecvCallback);
+
 void netsim_netdev_register_types(void);
+void SetNetsimNetdevPacketTransportFactoryForTesting(PacketTransportFactory factory);
 
 }  // namespace goldfish::netsim
