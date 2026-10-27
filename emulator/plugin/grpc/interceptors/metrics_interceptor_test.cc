@@ -18,8 +18,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include <condition_variable>
-#include <mutex>
+#include "absl/base/thread_annotations.h"
+#include "absl/synchronization/mutex.h"
 
 #include "android/control/interceptor/logging_interceptor.h"
 #include "goldfish/metrics/metrics_reporter.h"
@@ -37,20 +37,18 @@ class MockMetricsWriter : public ::goldfish::metrics::MetricsWriter {
 };
 
 struct Completion {
-    std::mutex mutex;
-    std::condition_variable cv;
-    bool notified = false;
-
-    void Notify() {
-        std::lock_guard<std::mutex> lock(mutex);
+    void Notify() ABSL_LOCKS_EXCLUDED(mutex) {
+        const absl::MutexLock lock(mutex);
         notified = true;
-        cv.notify_one();
     }
 
-    void Wait() {
-        std::unique_lock<std::mutex> lock(mutex);
-        cv.wait(lock, [this] { return notified; });
+    void Wait() ABSL_LOCKS_EXCLUDED(mutex) {
+        const absl::MutexLock lock(mutex);
+        mutex.Await(absl::Condition(&notified));
     }
+
+    bool notified ABSL_GUARDED_BY(mutex) = false;
+    absl::Mutex mutex;
 };
 
 class MetricsInterceptorTest : public Test {
