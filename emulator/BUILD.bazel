@@ -841,6 +841,7 @@ build_test(
 test_suite(
     name = "qtest",
     tests = [
+        "//emulator/plugin/audio:virtio_snd_inject_qtest",
         "@qemu//:qtest",
     ],
 )
