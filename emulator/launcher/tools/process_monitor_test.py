@@ -50,6 +50,23 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
             time.sleep(interval)
         self.fail(f"{msg} (timed out after {timeout}s)")
 
+    async def async_assert_eventually(
+        self,
+        predicate: Callable[[], bool],
+        timeout: float = 5.0,
+        interval: float = 0.02,
+        msg: str = "Condition not met before timeout",
+    ) -> None:
+        """Asynchronously polls predicate until it returns True, or fails after timeout."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            await asyncio.sleep(interval)
+        if predicate():
+            return
+        self.fail(f"{msg} (timed out after {timeout}s)")
+
     def _wait_for_child(
         self,
         child_pid: int,
@@ -87,8 +104,13 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
         """Verify starting, sampling asynchronously, and stopping the monitor."""
         monitor = ProcessTreeMonitor(os.getpid(), sample_interval_sec=0.05)
         await monitor.start()
-        await asyncio.sleep(0.15)
-        summary = await monitor.stop()
+        try:
+            await self.async_assert_eventually(
+                lambda: monitor._sample_count > 0,
+                msg="Monitor failed to collect at least one async sample",
+            )
+        finally:
+            summary = await monitor.stop()
 
         self.assertIsInstance(summary, ProcessMetricsSummary)
         self.assertGreater(summary.sample_count, 0)
