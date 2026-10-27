@@ -104,9 +104,29 @@ cc_library(
     hdrs = ["audio_device.h"],
     deps = [
         ":device",
-        "//emulator/libs/base",
+        "//emulator/libs/file",
         "//emulator/libs/system",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "audio_device_test",
+    size = "small",
+    srcs = ["audio_device_test.cc"],
+    deps = [
+        ":audio_device",
+        ":device",
+        ":fake_emulator",
+        "//emulator/libs/file",
+        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/system:test-headers",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/status:status_matchers",
         "@abseil-cpp//absl/strings",
     ],
 )

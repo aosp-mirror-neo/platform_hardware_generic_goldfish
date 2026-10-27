@@ -19,6 +19,7 @@ load("@rules_cc//cc:defs.bzl", "cc_binary")
                 "-framework Foundation",
             ],
             "@platforms//os:windows": [
+                "avrt.lib",
                 "strmiids.lib",
                 "uuid.lib",
                 "ole32.lib",
@@ -75,6 +76,7 @@ load("@rules_cc//cc:defs.bzl", "cc_binary")
             "@platforms//os:windows": [
                 "@qemu//:qemu-system-" + arch + ".if",
                 "//emulator/crashreport:breadcrumb",
+                "//emulator/plugin/wasapi",
             ],
             "//conditions:default": [
                 "//emulator/crashreport:breadcrumb",

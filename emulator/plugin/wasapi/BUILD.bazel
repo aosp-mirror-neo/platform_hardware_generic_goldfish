@@ -1,0 +1,79 @@
+load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+cc_library(
+    name = "pcm_converter",
+    srcs = ["pcm_converter.cc"],
+    hdrs = ["pcm_converter.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "pcm_converter_test",
+    size = "small",
+    srcs = ["pcm_converter_test.cc"],
+    deps = [
+        ":pcm_converter",
+        "//emulator/libs/test:googletest_main",
+    ],
+)
+
+cc_library(
+    name = "wasapi_win32",
+    hdrs = ["wasapi_win32.h"],
+    linkopts = select({
+        "@platforms//os:windows": [
+            "-DEFAULTLIB:avrt.lib",
+            "-DEFAULTLIB:ole32.lib",
+            "-DEFAULTLIB:uuid.lib",
+        ],
+        "//conditions:default": [],
+    }),
+    target_compatible_with = ["@platforms//os:windows"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pcm_converter",
+        "//emulator/libs/base",
+        "//emulator/libs/windows:scoped_file_handle",
+        "//emulator/libs/windows:win32_utils",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "audio_wasapi_win32_test",
+    size = "small",
+    srcs = ["audio_wasapi_win32_test.cc"],
+    target_compatible_with = ["@platforms//os:windows"],
+    deps = [
+        ":wasapi_win32",
+        "//emulator/libs/test:googletest_main",
+    ],
+)
+
+cc_library(
+    name = "wasapi",
+    srcs = ["audio_wasapi.cc"],
+    hdrs = ["include/goldfish/wasapi/audio_wasapi.h"],
+    includes = ["include"],
+    target_compatible_with = ["@platforms//os:windows"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pcm_converter",
+        ":wasapi_win32",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/strings:str_format",
+        "@glib//glib:glib_import",
+        "@qemu//:qemu-headers-exported",
+    ],
+    alwayslink = True,
+)
+
+clang_tidy_test(
+    name = "tidy",
+    targets = [
+        ":pcm_converter",
+        ":pcm_converter_test",
+    ],
+    tidy_config_file = "//:clang_tidy_config",
+)

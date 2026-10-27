@@ -54,6 +54,9 @@
 #include "goldfish/tools/aemu_version.h"
 #include "goldfish/vsock/vsock_low_level.h"
 #include "goldfish/vsock/vsock_port_fwd.h"
+#if defined(_WIN32)
+#include "goldfish/wasapi/audio_wasapi.h"
+#endif
 
 // library and initialize the crashpad crash engine upon launch.
 #include "google/system/aemu_func_defs.h"
@@ -222,6 +225,9 @@ extern "C" void GF_REGISTER_TYPES_FUNC(void) {
     goldfish_pipe_register_types();
     goldfish_sync_register_types();
     goldfish_address_space_register_types();
+#if defined(_WIN32)
+    goldfish::wasapi::WasapiRegisterTypes();
+#endif
     VLOG(1) << "Exit GF_REGISTER_TYPES";
 }
 
