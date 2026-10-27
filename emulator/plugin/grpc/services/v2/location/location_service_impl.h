@@ -186,6 +186,8 @@ class LocationServiceImpl final : public LocationServiceBase {
 
     void PopulateLocationState(LocationState* state) const ABSL_LOCKS_EXCLUDED(state_mutex_);
     void OnLocationUpdated(const Location& location) ABSL_LOCKS_EXCLUDED(state_mutex_);
+    // Returns OK if GPS is enabled and location state is writable.
+    ::grpc::Status CheckMutationAllowed(absl::string_view operation) const;
 
     ObservableLocation& observable_location_;
     const Options options_;
