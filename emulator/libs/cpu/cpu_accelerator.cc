@@ -37,12 +37,14 @@
 #include <filesystem>
 #include <string_view>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/log/log.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_split.h"
 
 #include "android/base/system.h"
+#include "cpu_accelerator_internal.h"
 #include "goldfish/base/unique_handle.h"
 #include "goldfish/file/file.h"
 #include "x86_cpuid.h"
@@ -143,70 +145,65 @@ static bool isOkToTryWHPX() {
     return true;  // featurecontrol::isEnabled(featurecontrol::WindowsHypervisorPlatform);
 }
 
-AndroidCpuAcceleration ProbeWHPX(std::string* status) {
-    HRESULT hr;
-    WHV_CAPABILITY whpx_cap;
-    UINT32 whpx_cap_size;
-    bool acc_available = true;
-    HMODULE hWinHvPlatform;
-
-    typedef HRESULT(WINAPI * WHvGetCapability_t)(WHV_CAPABILITY_CODE, VOID*, UINT32, UINT32*);
+AndroidCpuAcceleration ProbeWHPX(std::string* status, const internal::WhpxOps& ops) {
+    status->clear();
 
     WHPX_DBG(
             "Checking whether Windows Hypervisor Platform (WHPX) is "
             "available.");
 
-    hWinHvPlatform = LoadLibraryW(L"WinHvPlatform.dll");
-    if (hWinHvPlatform) {
-        WHPX_DBG("WinHvPlatform.dll found. Looking for WHvGetCapability...");
-        WHvGetCapability_t f_WHvGetCapability =
-                (WHvGetCapability_t)GetProcAddress(hWinHvPlatform, "WHvGetCapability");
-        if (f_WHvGetCapability) {
-            WHPX_DBG("WHvGetCapability found. Querying WHPX capabilities...");
-            hr = f_WHvGetCapability(WHvCapabilityCodeHypervisorPresent, &whpx_cap, sizeof(whpx_cap),
-                                    &whpx_cap_size);
-            if (FAILED(hr) || !whpx_cap.HypervisorPresent) {
-                WHPX_DBG(
-                        "WHvGetCapability failed. hr=0x%08lx "
-                        "whpx_cap.HypervisorPresent? %d\n",
-                        hr, whpx_cap.HypervisorPresent);
-                absl::StrAppendFormat(status, "WHPX: No accelerator found, hr=%08lx.", hr);
-                acc_available = false;
-            }
-        } else {
-            WHPX_DBG("Could not load library function 'WHvGetCapability'.");
-            status->assign("Could not load library function 'WHvGetCapability'.");
-            acc_available = false;
-        }
-    } else {
+    HMODULE win_hv_platform = ops.load_library(L"WinHvPlatform.dll");
+    if (win_hv_platform == nullptr) {
         WHPX_DBG("Could not load library WinHvPlatform.dll");
         status->assign("Could not load library 'WinHvPlatform.dll'.");
-        acc_available = false;
+        return ANDROID_CPU_ACCELERATION_ACCEL_NOT_INSTALLED;
     }
+    const auto free_win_hv =
+            absl::MakeCleanup([&ops, win_hv_platform] { ops.free_library(win_hv_platform); });
 
-    if (hWinHvPlatform) FreeLibrary(hWinHvPlatform);
-
-    if (!acc_available) {
-        WHPX_DBG("WHPX is either not available or not installed.");
+    WHPX_DBG("WinHvPlatform.dll found. Looking for WHvGetCapability...");
+    using WhvGetCapabilityFn = HRESULT(WINAPI*)(WHV_CAPABILITY_CODE, VOID*, UINT32, UINT32*);
+    auto get_capability = reinterpret_cast<WhvGetCapabilityFn>(
+            ops.get_proc_address(win_hv_platform, "WHvGetCapability"));
+    if (get_capability == nullptr) {
+        WHPX_DBG("Could not load library function 'WHvGetCapability'.");
+        status->assign("Could not load library function 'WHvGetCapability'.");
         return ANDROID_CPU_ACCELERATION_ACCEL_NOT_INSTALLED;
     }
 
-    auto ver = android::base::Win32Utils::getWindowsVersion();
+    WHPX_DBG("WHvGetCapability found. Querying WHPX capabilities...");
+    WHV_CAPABILITY whpx_cap = {};
+    UINT32 whpx_cap_size = 0;
+    HRESULT hr = get_capability(WHvCapabilityCodeHypervisorPresent, &whpx_cap, sizeof(whpx_cap),
+                                &whpx_cap_size);
+    if (FAILED(hr) || !whpx_cap.HypervisorPresent) {
+        WHPX_DBG(
+                "WHvGetCapability failed. hr=0x%08lx "
+                "whpx_cap.HypervisorPresent? %d\n",
+                hr, whpx_cap.HypervisorPresent);
+        status->assign(absl::StrFormat("WHPX: No accelerator found, hr=%08lx.", hr));
+        return ANDROID_CPU_ACCELERATION_ACCEL_NOT_INSTALLED;
+    }
+
+    auto ver = ops.get_windows_version();
     if (!ver) {
         WHPX_DBG("Could not extract Windows version.");
         status->assign("Could not extract Windows version.");
         return ANDROID_CPU_ACCELERATION_ERROR;
     }
 
-    char version_str[32];
-    snprintf(version_str, sizeof(version_str), "%lu.%lu.%lu", ver->dwMajorVersion,
-             ver->dwMinorVersion, ver->dwBuildNumber);
+    const std::string version_str = absl::StrFormat("%lu.%lu.%lu", ver->dwMajorVersion,
+                                                    ver->dwMinorVersion, ver->dwBuildNumber);
 
-    WHPX_DBG("WHPX (%s) is installed and usable.", version_str);
-    absl::StrAppendFormat(status, "WHPX (%s) is installed and usable.", version_str);
+    WHPX_DBG("WHPX (%s) is installed and usable.", version_str.c_str());
+    status->assign(absl::StrFormat("WHPX (%s) is installed and usable.", version_str));
     GlobalState* g = &gGlobals;
-    ::snprintf(g->version, sizeof(g->version), "%s", version_str);
+    ::snprintf(g->version, sizeof(g->version), "%s", version_str.c_str());
     return ANDROID_CPU_ACCELERATION_READY;
+}
+
+AndroidCpuAcceleration ProbeWHPX(std::string* status) {
+    return ProbeWHPX(status, internal::WhpxOps{});
 }
 
 #endif  // HAVE_WHPX
@@ -229,6 +226,8 @@ AndroidCpuAcceleration ProbeWHPX(std::string* status) {
 // |*status| will be set to a small status string explaining the
 // status of KVM on success or failure.
 AndroidCpuAcceleration ProbeKVM(std::string* status) {
+    status->clear();
+
     const char* kvm_device = getenv(KVM_DEVICE_NAME_ENV);
     if (nullptr == kvm_device) {
         kvm_device = "/dev/kvm";
@@ -313,8 +312,6 @@ AndroidCpuAcceleration ProbeKVM(std::string* status) {
     }
 
     // Compare to minimum supported version
-    status->clear();
-
     if (version < KVM_API_VERSION) {
         absl::StrAppendFormat(status, "KVM version too old: %d (expected at least %d)\n", version,
                               KVM_API_VERSION);

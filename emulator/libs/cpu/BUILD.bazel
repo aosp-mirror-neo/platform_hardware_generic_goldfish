@@ -40,6 +40,7 @@ cc_library(
     srcs = [
         "apple_cpu_accelerator.h",
         "cpu_accelerator.cc",
+        "cpu_accelerator_internal.h",
         "version.cc",
         "x86_cpuid.cc",
         "x86_cpuid.h",
@@ -66,6 +67,7 @@ cc_library(
         "//emulator/libs/base",
         "//emulator/libs/file",
         "//emulator/libs/system",
+        "@abseil-cpp//absl/cleanup",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
@@ -73,6 +75,33 @@ cc_library(
         "@platforms//os:windows": [
             "//emulator/libs/windows:scoped_file_handle",
             "//emulator/libs/windows:scoped_reg_key",
+            "//emulator/libs/windows:win32_utils",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+cc_test(
+    name = "cpu_accelerator_test",
+    size = "small",
+    srcs = [
+        "cpu_accelerator_internal.h",
+        "cpu_accelerator_test.cc",
+    ],
+    linkopts = select({
+        "@platforms//os:macos": ["-undefined error"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":cpu",
+        "//emulator/libs/file",
+        "//emulator/libs/system",
+        "//emulator/libs/system:test-headers",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/cleanup",
+        "@abseil-cpp//absl/strings",
+    ] + select({
+        "@platforms//os:windows": [
             "//emulator/libs/windows:win32_utils",
         ],
         "//conditions:default": [],
