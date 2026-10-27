@@ -229,8 +229,8 @@ OPT_PARAM(shared_net_id, "<number>", "join the shared network, using IP address 
 OPT_PARAM_OBSOLETE(nand_limits, "<nlimits>")
 
 OPT_PARAM(gpu, "<mode>", "set hardware OpenGLES emulation mode")
-OPT_PARAM(virtio_gpu_device, "<rutabaga|gfxstream>",
-          "select the virtio-gpu device that drives gfxstream (default: rutabaga)")
+OPT_PARAM(virtio_gpu_device, "<gfxstream|rutabaga>",
+          "select the virtio-gpu device that drives gfxstream (default: gfxstream)")
 OPT_PARAM(vulkan_validation, "<mode>", "Vulkan validation mode (off|print|fail|crash)")
 OPT_PARAM(vulkan_validation_include_filter, "<filters>",
           "Comma-separated list of app/engine filters to include for Vulkan validation")

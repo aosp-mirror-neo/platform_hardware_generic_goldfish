@@ -100,9 +100,27 @@ std::string SnapshotDevice::describe_incompatibility(const SnapshotStore& store,
     if (!found.ok()) {
         return absl::StrCat("snapshot version missing: ", found.status().message());
     }
-    return absl::StrCat(
+    std::string reason = absl::StrCat(
             "snapshot version ", *found, " != ", store.Version(), ": ",
             ::goldfish::snapshot::DescribeSnapshotVersionMismatch(*found, store.Version()));
+    // When only the virtio-gpu device differs, the snapshot is still loadable
+    // by selecting the device it was saved with: say so, since this is what
+    // every pre-existing snapshot hits after the default device changes.
+    using ::goldfish::snapshot::SnapshotGpuDevice;
+    using ::goldfish::snapshot::SnapshotVersionGpuDevice;
+    const SnapshotGpuDevice saved_with = SnapshotVersionGpuDevice(*found);
+    const bool known_device = saved_with == SnapshotGpuDevice::kRutabaga ||
+                              saved_with == SnapshotGpuDevice::kGfxstream;
+    if (known_device && saved_with != SnapshotVersionGpuDevice(store.Version()) &&
+        ::goldfish::snapshot::SnapshotVersionBase(*found) ==
+                ::goldfish::snapshot::SnapshotVersionBase(store.Version()) &&
+        ::goldfish::snapshot::SnapshotVersionGfxstream(*found) ==
+                ::goldfish::snapshot::SnapshotVersionGfxstream(store.Version())) {
+        absl::StrAppend(&reason, " (pass '-virtio-gpu-device ",
+                        saved_with == SnapshotGpuDevice::kGfxstream ? "gfxstream" : "rutabaga",
+                        "' to load it)");
+    }
+    return reason;
 }
 
 absl::StatusOr<bool> SnapshotDevice::prepare_vmstate_image(const SnapshotStore& store) {

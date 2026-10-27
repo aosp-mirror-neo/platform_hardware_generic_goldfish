@@ -1154,9 +1154,12 @@ static void help_virtio_gpu_device(stralloc_t* out) {
     PRINTF("  Use -virtio-gpu-device <device> to select which virtio-gpu device the\n"
            "  emulator instantiates for the guest (API 37 and newer system images).\n"
            "  Both render through gfxstream; they differ in how the renderer is reached:\n\n"
-           "     rutabaga (default)   -> QEMU's virtio-gpu-rutabaga, through librutabaga_ffi.\n"
-           "     gfxstream            -> the emulator plugin's virtio-gpu-gfxstream, which\n"
-           "                             calls libgfxstream_backend directly.\n\n"
+           "     gfxstream (default)  -> the emulator plugin's virtio-gpu-gfxstream, which\n"
+           "                             calls libgfxstream_backend directly.\n"
+           "     rutabaga             -> QEMU's virtio-gpu-rutabaga, through librutabaga_ffi.\n"
+           "                             Deprecated; kept as a fallback and will be removed.\n"
+           "                             Please report problems with gfxstream at\n"
+           "                             https://issuetracker.google.com/issues/new?component=192727\n\n"
            "  Snapshots record the device they were saved with; starting with the other\n"
            "  device performs a cold boot instead of loading them.\n\n");
 }
