@@ -312,6 +312,9 @@ AvdExtendedUniverse::~AvdExtendedUniverse() {
     if (input_dispatcher_) {
         input_dispatcher_->Shutdown();
     }
+    if (metrics_reporter) {
+        metrics_reporter->Shutdown();
+    }
 }
 
 void AvdExtendedUniverse::WaitUntilEventLoopsIdle() {

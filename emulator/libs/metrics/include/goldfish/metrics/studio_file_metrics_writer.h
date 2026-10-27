@@ -15,8 +15,10 @@
 
 #pragma once
 
+#include <cstdint>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "absl/synchronization/mutex.h"
@@ -39,6 +41,11 @@ class StudioFileMetricsWriter : public MetricsWriter {
     // Finalizes any abandoned .open files in `spool_dir` and returns the unique session IDs
     // that had at least one abandoned file.
     static std::vector<std::string> FinalizeAbandonedSessionFiles(const fs::path& spool_dir);
+
+    // Finalizes all .open files in `spool_dir` written by `(session_id, pid)` after
+    // that child process has exited, without touching other processes' .open files.
+    static void FinalizeProcessFiles(const fs::path& spool_dir, std::string_view session_id,
+                                     uint32_t pid);
 
   private:
     void OpenNextFile();

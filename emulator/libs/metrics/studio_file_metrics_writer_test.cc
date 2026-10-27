@@ -25,6 +25,7 @@
 
 #include "android/base/system.h"
 #include "android/base/testing/test_temp_dir.h"
+#include "android/process/process.h"
 #include "goldfish/async/testing/test_event_loop.h"
 #include "google_logs_publishing.pb.h"
 
@@ -238,10 +239,17 @@ TEST_F(StudioFileMetricsWriterTest, FinalizeAbandonedFiles) {
 }
 
 TEST_F(StudioFileMetricsWriterTest, FinalizeAbandonedFilesWithDeadPid) {
-    // 1. Create a file with a PID that is likely not running (e.g., a very large PID)
-    // and a lock file that is "live" (recent).
-    // The new implementation should see that the PID is dead and finalize anyway.
-    uint32_t dead_pid = 999999;
+    // 1. Find a PID confirmed not to be running on this machine, paired with a
+    // fresh lock file. FinalizeAbandonedSessionFiles should detect the dead PID
+    // and finalize immediately.
+    uint32_t dead_pid = 900000;
+    for (; dead_pid < 910000; ++dead_pid) {
+        auto proc = android::base::Process::FromPid(static_cast<android::base::Pid>(dead_pid));
+        if (!proc || !proc->IsAlive()) {
+            break;
+        }
+    }
+    ASSERT_LT(dead_pid, 910000U);
     fs::path dead_pid_file =
             temp_path() / absl::StrFormat("emulator-metrics2-dead-pid-session-%d-0.open", dead_pid);
     {
@@ -383,6 +391,51 @@ TEST_F(StudioFileMetricsWriterTest, LockFileManagement) {
 
     // 3. Check deletion on finalization (destructor)
     EXPECT_FALSE(fs::exists(lock_path));
+}
+
+TEST_F(StudioFileMetricsWriterTest, FinalizeProcessFilesOnlyTouchesTargetChildPidInUnicodeDir) {
+    const fs::path spool_dir = temp_path() / "测试_🚀_é";
+    ASSERT_TRUE(android::base::file::mkdir_recursive(spool_dir, 0755).ok());
+
+    constexpr std::string_view kSessionId = "shared-session-uuid";
+    constexpr uint32_t kLauncherPid = 10001;
+    constexpr uint32_t kQemuPid = 10002;
+
+    const fs::path launcher_open =
+            spool_dir / absl::StrFormat("emulator-metrics2-%s-%d-0.open", kSessionId, kLauncherPid);
+    const fs::path launcher_lock =
+            spool_dir /
+            absl::StrFormat("emulator-metrics2-%s-%d-0.open.lock", kSessionId, kLauncherPid);
+    const fs::path qemu_open_0 =
+            spool_dir / absl::StrFormat("emulator-metrics2-%s-%d-0.open", kSessionId, kQemuPid);
+    const fs::path qemu_lock_0 = spool_dir / absl::StrFormat("emulator-metrics2-%s-%d-0.open.lock",
+                                                             kSessionId, kQemuPid);
+    const fs::path qemu_open_1 =
+            spool_dir / absl::StrFormat("emulator-metrics2-%s-%d-1.open", kSessionId, kQemuPid);
+    const fs::path other_session_open =
+            spool_dir / absl::StrFormat("emulator-metrics2-other-%d-0.open", kQemuPid);
+
+    std::ofstream{launcher_open};
+    std::ofstream{launcher_lock};
+    std::ofstream{qemu_open_0};
+    std::ofstream{qemu_lock_0};
+    std::ofstream{qemu_open_1};
+    std::ofstream{other_session_open};
+
+    StudioFileMetricsWriter::FinalizeProcessFiles(spool_dir, kSessionId, kQemuPid);
+
+    EXPECT_FALSE(fs::exists(qemu_open_0));
+    EXPECT_FALSE(fs::exists(qemu_lock_0));
+    EXPECT_FALSE(fs::exists(qemu_open_1));
+    EXPECT_TRUE(fs::exists(spool_dir /
+                           absl::StrFormat("emulator-metrics2-%s-%d-0.trk", kSessionId, kQemuPid)));
+    EXPECT_TRUE(fs::exists(spool_dir /
+                           absl::StrFormat("emulator-metrics2-%s-%d-1.trk", kSessionId, kQemuPid)));
+
+    // Live launcher's .open/.lock and other sessions remain untouched.
+    EXPECT_TRUE(fs::exists(launcher_open));
+    EXPECT_TRUE(fs::exists(launcher_lock));
+    EXPECT_TRUE(fs::exists(other_session_open));
 }
 
 }  // namespace goldfish::metrics

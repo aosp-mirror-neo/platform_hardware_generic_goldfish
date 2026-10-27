@@ -565,8 +565,9 @@ int main(int argc, char** argv) {
     }
 
     if (android::goldfish::ShouldTrampolineToQemu2(avd, feature_flags)) {
-        auto s = android::goldfish::TrampolineToQemu2(emulator_paths->launcher_directory,
-                                                      std::move(args_copy));
+        auto s = android::goldfish::TrampolineToQemu2(
+                emulator_paths->launcher_directory, std::move(args_copy),
+                [&] { reporter->Shutdown(); });
         LOG(ERROR) << s;
         return 1;
     }

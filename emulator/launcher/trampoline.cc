@@ -111,7 +111,8 @@ bool ShouldTrampolineToQemu2(const absl::StatusOr<std::unique_ptr<android::goldf
     return false;
 }
 
-absl::Status TrampolineToQemu2(const fs::path& launcher_directory, std::vector<std::string> args) {
+absl::Status TrampolineToQemu2(const fs::path& launcher_directory, std::vector<std::string> args,
+                               absl::FunctionRef<void()> before_exec) {
 #ifdef _WIN32
     constexpr std::string_view emulator_binary = "emulator.exe";
 #else
@@ -138,6 +139,7 @@ absl::Status TrampolineToQemu2(const fs::path& launcher_directory, std::vector<s
 
     qemu2_args.push_back(qemu2_binary_path.string());
     qemu2_args.insert(qemu2_args.end(), args.begin(), args.end());
+    before_exec();
     android::base::System::Get()->EnvSet(std::string(kNoTrampolineEnvVar), "1");
     android::base::Command::Create(qemu2_args).Replace().Execute();
     return absl::InternalError("Trampoline to legacy emulator failed for unknown reason");

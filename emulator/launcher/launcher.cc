@@ -46,6 +46,7 @@
 #include "goldfish/file/file.h"
 #include "goldfish/metrics/metrics_reporter.h"
 #include "goldfish/metrics/snapshot_metrics.h"
+#include "goldfish/metrics/studio_file_metrics_writer.h"
 #include "goldfish/modem_simulator/modem_simulator_service.h"
 #include "goldfish/network/endpoint.h"
 #include "goldfish/timezone/host_timezone.h"
@@ -399,11 +400,23 @@ class Launcher {
     void emulator_exit(int64_t exit_status, int term_signal) {
         LOG(INFO) << "emulator exited with status " << exit_status << ", signal " << term_signal;
         qemu_shutdown_timeout_.reset();
-        emulator_exit_status_ = exit_status;
+        emulator_exit_status_ = static_cast<int>(exit_status);
         emulator_process_.reset();
 
-        // Send a final ping with the crash status.
-        if (exit_status == 0 && term_signal == 0) {
+        // Send a final ping with the crash status and finalize QEMU's .open
+        // spool files on clean exit.
+        // NOTE(b/476380758): Temporarily gate FinalizeProcessFiles on clean
+        // QEMU exits here so crashed QEMU .open spool files stay on disk for
+        // next-launch crash recovery until live crash classification lands in a
+        // follow-up CL in this stack.
+        if (exit_status == 0 && term_signal == 0 && config_.metrics_reporter) {
+            if (config_.metrics_writer_config.type ==
+                        ::goldfish::metrics::MetricsWriterType::kStudio &&
+                qemu_pid_ > 0 && !config_.metrics_writer_config.studio_spool_dir.empty()) {
+                ::goldfish::metrics::StudioFileMetricsWriter::FinalizeProcessFiles(
+                        config_.metrics_writer_config.studio_spool_dir,
+                        config_.metrics_reporter->session_id(), static_cast<uint32_t>(qemu_pid_));
+            }
             config_.metrics_reporter->Report([](android_studio::AndroidStudioEvent& event) {
                 event.mutable_emulator_details()->set_crashes(kMetricsCrashesNone);
             });
@@ -448,7 +461,8 @@ class Launcher {
                         [this](int64_t status, int signal) { emulator_exit(status, signal); });
                 s.ok()) {
                 emulator_process_ = *std::move(s);
-                LOG(INFO) << "Running emulator as pid: " << emulator_process_->GetPid();
+                qemu_pid_ = emulator_process_->GetPid();
+                LOG(INFO) << "Running emulator as pid: " << qemu_pid_;
                 report_host_info_metrics(emulator);
                 report_quickboot_metrics(emulator);
             } else {
@@ -509,6 +523,10 @@ class Launcher {
             console_controller_.reset();
         }
 
+        if (config_.metrics_reporter) {
+            config_.metrics_reporter->Shutdown();
+        }
+
         if (netsimd_connection_) {
             netsimd_connection_->Disconnect();
             netsimd_connection_.reset();
@@ -548,6 +566,7 @@ class Launcher {
     std::shared_ptr<ModemSimulatorService> modem_simulator_service_;
 
     int emulator_exit_status_ = 0;
+    int64_t qemu_pid_ = 0;
     absl::Status startup_status_ = absl::OkStatus();
 
     std::thread shutdown_thread_;

@@ -17,7 +17,12 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <thread>
+#include <vector>
+
 #include "absl/synchronization/mutex.h"
+#include "absl/synchronization/notification.h"
 #include "absl/time/time.h"
 
 #include "goldfish/metrics/testing/fake_metrics_writer.h"
@@ -122,5 +127,129 @@ TEST(MetricsReporterTest, SetWriter) {
         EXPECT_EQ(writer2_ptr->events.size(), 1);
     }
 }
+
+namespace {
+
+class LifecycleTrackingWriter final : public MetricsWriter {
+  public:
+    LifecycleTrackingWriter(absl::Notification* first_write_entered,
+                            absl::Notification* allow_writes,
+                            std::vector<int>* delivered_boot_times, std::atomic<bool>* destroyed)
+            : first_write_entered_(first_write_entered)
+            , allow_writes_(allow_writes)
+            , delivered_boot_times_(delivered_boot_times)
+            , destroyed_(destroyed) {}
+
+    ~LifecycleTrackingWriter() override { destroyed_->store(true, std::memory_order_release); }
+
+    void Write(MetricsEvent event) override {
+        if (!first_write_entered_->HasBeenNotified()) {
+            first_write_entered_->Notify();
+        }
+        allow_writes_->WaitForNotificationWithTimeout(absl::Seconds(5));
+        delivered_boot_times_->push_back(
+                static_cast<int>(event.as_event.emulator_details().wall_time()));
+    }
+
+  private:
+    absl::Notification* first_write_entered_;
+    absl::Notification* allow_writes_;
+    std::vector<int>* delivered_boot_times_;
+    std::atomic<bool>* destroyed_;
+};
+
+}  // namespace
+
+TEST(MetricsReporterTest, ShutdownDrainsPendingEventsAndDestroysWriterSynchronously) {
+    MetricsReporter reporter;
+    absl::Notification first_write_entered;
+    absl::Notification allow_writes;
+    std::vector<int> delivered_values;
+    std::atomic<bool> writer_destroyed{false};
+
+    reporter.SetWriter(std::make_unique<LifecycleTrackingWriter>(
+            &first_write_entered, &allow_writes, &delivered_values, &writer_destroyed));
+
+    reporter.Report([](android_studio::AndroidStudioEvent& event) {
+        event.mutable_emulator_details()->set_wall_time(101);
+    });
+    ASSERT_TRUE(first_write_entered.WaitForNotificationWithTimeout(absl::Seconds(5)));
+
+    // Queue two more events while the worker thread is mid-Write() on event 1.
+    // This also verifies Report() does not deadlock on a slow writer->Write().
+    absl::Notification queued_during_write;
+    std::thread producer([&]() {
+        reporter.Report([](android_studio::AndroidStudioEvent& event) {
+            event.mutable_emulator_details()->set_wall_time(202);
+        });
+        reporter.Report([](android_studio::AndroidStudioEvent& event) {
+            event.mutable_emulator_details()->set_wall_time(303);
+        });
+        queued_during_write.Notify();
+    });
+    EXPECT_TRUE(queued_during_write.WaitForNotificationWithTimeout(absl::Seconds(2)));
+    producer.join();
+
+    absl::Notification shutdown_finished;
+    std::thread shutdown_thread([&]() {
+        reporter.Shutdown();
+        shutdown_finished.Notify();
+    });
+
+    // Shutdown must wait for in-flight and queued events to finish writing.
+    EXPECT_FALSE(shutdown_finished.WaitForNotificationWithTimeout(absl::Milliseconds(50)));
+    allow_writes.Notify();
+    ASSERT_TRUE(shutdown_finished.WaitForNotificationWithTimeout(absl::Seconds(5)));
+    shutdown_thread.join();
+
+    // Immediately after Shutdown() returns (while `reporter` is still alive),
+    // all queued events must have been written and the writer must be destroyed.
+    EXPECT_TRUE(writer_destroyed.load(std::memory_order_acquire));
+    ASSERT_EQ(delivered_values.size(), 3U);
+    EXPECT_EQ(delivered_values[0], 101);
+    EXPECT_EQ(delivered_values[1], 202);
+    EXPECT_EQ(delivered_values[2], 303);
+
+    // Post-Shutdown Report() drops events, SetWriter() destroys the new writer
+    // immediately, and repeated Shutdown() calls are safe no-ops.
+    std::atomic<bool> late_writer_destroyed{false};
+    reporter.SetWriter(std::make_unique<LifecycleTrackingWriter>(
+            &first_write_entered, &allow_writes, &delivered_values, &late_writer_destroyed));
+    EXPECT_TRUE(late_writer_destroyed.load(std::memory_order_acquire));
+
+    reporter.Report([](android_studio::AndroidStudioEvent& event) {
+        event.mutable_emulator_details()->set_wall_time(404);
+    });
+    reporter.Shutdown();
+    EXPECT_EQ(delivered_values.size(), 3U);
+}
+
+#if defined(GTEST_HAS_DEATH_TEST) && !defined(NDEBUG)
+namespace {
+
+class SelfShuttingDownWriter final : public MetricsWriter {
+  public:
+    explicit SelfShuttingDownWriter(MetricsReporter* reporter) : reporter_(reporter) {}
+
+    void Write(MetricsEvent /*event*/) override { reporter_->Shutdown(); }
+
+  private:
+    MetricsReporter* reporter_;
+};
+
+}  // namespace
+
+TEST(MetricsReporterDeathTest, ShutdownFromWorkerThreadDiesInDebugBuilds) {
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_DEATH(
+            {
+                MetricsReporter reporter;
+                reporter.SetWriter(std::make_unique<SelfShuttingDownWriter>(&reporter));
+                reporter.Report([](android_studio::AndroidStudioEvent& /*event*/) {});
+                reporter.Shutdown();
+            },
+            "must not be called from its worker thread");
+}
+#endif
 
 }  // namespace goldfish::metrics
