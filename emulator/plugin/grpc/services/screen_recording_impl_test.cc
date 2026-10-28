@@ -28,6 +28,7 @@
 
 #include "goldfish/async/libuv_event_loop.h"
 #include "goldfish/async/threaded_event_loop.h"
+#include "goldfish/display/test/display_test_peer.h"
 #include "goldfish/display/test/fake_multi_display.h"
 #include "goldfish/display/test/fake_pixman_display.h"
 #include "goldfish/file/file.h"
@@ -56,6 +57,42 @@ class ExpiredDisplayMultiDisplay : public FakeMultiDisplay {
             ::goldfish::display::DisplayId /*display_id*/) const override {
         return ::goldfish::display::DisplayPtr{};
     }
+};
+
+class TestRgbSlot final : public ::goldfish::display::Slot {
+  public:
+    TestRgbSlot(::goldfish::display::Dimensions size, uint8_t fill_byte, int* read_count = nullptr,
+                absl::Status status = absl::OkStatus())
+            : size_(size)
+            , fill_byte_(fill_byte)
+            , read_count_(read_count)
+            , status_(std::move(status)) {}
+
+    ::goldfish::display::Dimensions size() const override { return size_; }
+
+  protected:
+    absl::Status DoReadInto(const ::goldfish::display::ReadRequest& read,
+                            const ::goldfish::display::ReadTarget& dst) const override {
+        if (read_count_ != nullptr) {
+            ++(*read_count_);
+        }
+        if (!status_.ok()) {
+            return status_;
+        }
+        const auto& rgb = std::get<::goldfish::display::Rgb888Target>(dst);
+        const size_t row_bytes = static_cast<size_t>(read.output.width) * 3;
+        const size_t stride = rgb.plane.stride == 0 ? row_bytes : rgb.plane.stride;
+        for (uint32_t row = 0; row < read.output.height; ++row) {
+            std::memset(rgb.plane.data.data() + row * stride, fill_byte_, row_bytes);
+        }
+        return absl::OkStatus();
+    }
+
+  private:
+    ::goldfish::display::Dimensions size_;
+    uint8_t fill_byte_;
+    int* read_count_;
+    absl::Status status_;
 };
 
 }  // namespace
@@ -460,6 +497,141 @@ TEST_F(ScreenRecordingServiceImplTest, StartRecordingSucceedsOnSecondAttempt) {
 
     // Clean up
     std::remove(test_file.c_str());
+}
+
+TEST_F(ScreenRecordingServiceImplTest, FrameGeneratorAvoidsDuplicateFullFrameBuffer) {
+    constexpr int kWidth = 1080;
+    constexpr int kHeight = 2400;
+    constexpr size_t kFrameBytes = static_cast<size_t>(kWidth) * kHeight * 3;
+    constexpr uint8_t kInitialGarbage = 0xEE;
+    constexpr uint8_t kFrame1Fill = 0x5A;
+    constexpr int kRepeatedTicks = 60;
+
+    auto display = std::make_shared<::goldfish::display::test::FakePixmanDisplay>(
+            loop.get(), 1, static_cast<::pixman_image_t*>(nullptr));
+    const auto& frames = ::goldfish::display::DisplayTestPeer::frames(*display);
+    ASSERT_NE(frames, nullptr);
+
+    ScreenRecordingFrameGenerator generator(display);
+    std::vector<uint8_t> frame_buffer(kFrameBytes, kInitialGarbage);
+
+    // Before any frame is published, the first tick clears the buffer once without allocating.
+    generator(frame_buffer.data(), kWidth, kHeight, 0, 0.0);
+    EXPECT_EQ(generator.LastFrameId(), 0U);
+    EXPECT_EQ(generator.BufferedBytes(), 0U);
+    EXPECT_EQ(frame_buffer.front(), 0U);
+    EXPECT_EQ(frame_buffer.back(), 0U);
+
+    // Publish a 1080x2400 frame (7.78 MB RGB888) and verify 0 bytes are buffered in the generator.
+    int read_count = 0;
+    frames->PublishFrame(
+            ::goldfish::display::SlotLease(std::make_unique<TestRgbSlot>(
+                    ::goldfish::display::Dimensions{kWidth, kHeight}, kFrame1Fill, &read_count)),
+            absl::Now());
+
+    generator(frame_buffer.data(), kWidth, kHeight, 1, 0.04);
+    const auto first_frame_id = generator.LastFrameId();
+    EXPECT_GT(first_frame_id, 0U);
+    EXPECT_EQ(read_count, 1);
+    EXPECT_EQ(generator.BufferedBytes(), 0U);
+    EXPECT_EQ(frame_buffer.front(), kFrame1Fill);
+    EXPECT_EQ(frame_buffer.back(), kFrame1Fill);
+
+    // Repeated ticks with the same frame_id reuse frame_buffer in place without re-reading or
+    // copying a duplicate last_encoded buffer.
+    for (int i = 0; i < kRepeatedTicks; ++i) {
+        generator(frame_buffer.data(), kWidth, kHeight, 2 + i, 0.08 + i * 0.04);
+    }
+    EXPECT_EQ(read_count, 1);
+    EXPECT_EQ(generator.BufferedBytes(), 0U);
+    EXPECT_EQ(frame_buffer.front(), kFrame1Fill);
+    EXPECT_EQ(frame_buffer.back(), kFrame1Fill);
+
+    // If a subsequent frame read fails, the previous frame in frame_buffer is preserved intact.
+    int failed_read_count = 0;
+    frames->PublishFrame(::goldfish::display::SlotLease(std::make_unique<TestRgbSlot>(
+                                 ::goldfish::display::Dimensions{kWidth, kHeight}, 0x99,
+                                 &failed_read_count, absl::UnavailableError("Producer reset"))),
+                         absl::Now());
+    generator(frame_buffer.data(), kWidth, kHeight, 100, 4.0);
+    EXPECT_EQ(failed_read_count, 1);
+    EXPECT_EQ(generator.BufferedBytes(), 0U);
+    EXPECT_EQ(frame_buffer.front(), kFrame1Fill);
+    EXPECT_EQ(frame_buffer.back(), kFrame1Fill);
+}
+
+TEST_F(ScreenRecordingServiceImplTest,
+       FrameGeneratorReusesResizeScratchAndReleasesWhenDimensionsMatch) {
+    constexpr int kRecordWidth = 1080;
+    constexpr int kRecordHeight = 2400;
+    constexpr size_t kRecordBytes = static_cast<size_t>(kRecordWidth) * kRecordHeight * 3;
+    constexpr uint32_t kSmallWidth = 640;
+    constexpr uint32_t kSmallHeight = 480;
+    constexpr size_t kSmallBytes = static_cast<size_t>(kSmallWidth) * kSmallHeight * 3;
+    constexpr uint8_t kSmallFill = 0x3C;
+    constexpr uint8_t kFullFill = 0xA5;
+
+    auto display = std::make_shared<::goldfish::display::test::FakePixmanDisplay>(
+            loop.get(), 1, static_cast<::pixman_image_t*>(nullptr));
+    const auto& frames = ::goldfish::display::DisplayTestPeer::frames(*display);
+    ASSERT_NE(frames, nullptr);
+
+    ScreenRecordingFrameGenerator generator(display);
+    std::vector<uint8_t> frame_buffer(kRecordBytes, 0xFF);
+
+    int small_reads = 0;
+    frames->PublishFrame(::goldfish::display::SlotLease(std::make_unique<TestRgbSlot>(
+                                 ::goldfish::display::Dimensions{kSmallWidth, kSmallHeight},
+                                 kSmallFill, &small_reads)),
+                         absl::Now());
+
+    generator(frame_buffer.data(), kRecordWidth, kRecordHeight, 0, 0.0);
+    EXPECT_EQ(small_reads, 1);
+    EXPECT_EQ(generator.BufferedBytes(), kSmallBytes);
+
+    // Top-left border pixel is black (0x00), while the centered pixel is kSmallFill.
+    EXPECT_EQ(frame_buffer[0], 0U);
+    const size_t center_offset =
+            ((static_cast<size_t>(kRecordHeight / 2) * kRecordWidth) + (kRecordWidth / 2)) * 3;
+    EXPECT_EQ(frame_buffer[center_offset], kSmallFill);
+
+    // A failed read on a mismatched-size frame preserves the previous frame in frame_buffer
+    // instead of wiping it with memset.
+    frames->PublishFrame(::goldfish::display::SlotLease(std::make_unique<TestRgbSlot>(
+                                 ::goldfish::display::Dimensions{kSmallWidth, kSmallHeight}, 0x77,
+                                 nullptr, absl::UnavailableError("Reset during resize"))),
+                         absl::Now());
+    generator(frame_buffer.data(), kRecordWidth, kRecordHeight, 1, 0.04);
+    EXPECT_EQ(frame_buffer[center_offset], kSmallFill);
+
+    // Once the display frame matches the recording dimensions again, resize_scratch_ is released.
+    frames->PublishFrame(
+            ::goldfish::display::SlotLease(std::make_unique<TestRgbSlot>(
+                    ::goldfish::display::Dimensions{kRecordWidth, kRecordHeight}, kFullFill)),
+            absl::Now());
+    generator(frame_buffer.data(), kRecordWidth, kRecordHeight, 2, 0.08);
+    EXPECT_EQ(generator.BufferedBytes(), 0U);
+    EXPECT_EQ(frame_buffer[0], kFullFill);
+    EXPECT_EQ(frame_buffer[center_offset], kFullFill);
+
+    // Invalid arguments and zero-sized frames preserve the initialized buffer intact.
+    generator(nullptr, kRecordWidth, kRecordHeight, 3, 0.12);
+    generator(frame_buffer.data(), 0, kRecordHeight, 4, 0.16);
+    generator(frame_buffer.data(), kRecordWidth, 0, 5, 0.20);
+    frames->PublishFrame(::goldfish::display::SlotLease(std::make_unique<TestRgbSlot>(
+                                 ::goldfish::display::Dimensions{0, kSmallHeight}, 0x11)),
+                         absl::Now());
+    generator(frame_buffer.data(), kRecordWidth, kRecordHeight, 6, 0.24);
+    EXPECT_EQ(frame_buffer[0], kFullFill);
+
+    // A generator with a null display clears an uninitialized buffer once and retains it on repeat.
+    ScreenRecordingFrameGenerator null_display_generator(nullptr);
+    std::vector<uint8_t> null_display_buffer(64, 0xCC);
+    null_display_generator(null_display_buffer.data(), 4, 4, 0, 0.0);
+    EXPECT_EQ(null_display_buffer.front(), 0U);
+    null_display_buffer.front() = 0x42;
+    null_display_generator(null_display_buffer.data(), 4, 4, 1, 0.04);
+    EXPECT_EQ(null_display_buffer.front(), 0x42);
 }
 
 }  // namespace android::emulation::control::incubating

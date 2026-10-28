@@ -1,6 +1,7 @@
 load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//emulator/tools:cc_binary_with_manifest.bzl", "cc_binary_with_manifest")
 load("//emulator/tools:plugins.bzl", "collect_plugins")
 
 package(default_visibility = ["//visibility:public"])
@@ -217,6 +218,25 @@ cc_test(
     ],
 )
 
+cc_binary_with_manifest(
+    name = "screen_recording_perf",
+    srcs = ["screen_recording_perf.cc"],
+    tags = ["benchmark"],
+    deps = [
+        ":screen_recorder",
+        "//emulator/libs/async:libuv_event_loop",
+        "//emulator/libs/display_pipeline:core",
+        "//emulator/libs/display_pipeline:cpu_pipeline",
+        "//emulator/plugin/display:base",
+        "//emulator/plugin/display:ev_dev_event",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/types:span",
+        "@google_benchmark//:benchmark",
+    ],
+)
+
 cc_library(
     name = "in_process_rtc_service",
     srcs = ["in_process_rtc_service.cc"],
@@ -302,6 +322,9 @@ clang_tidy_test(
     targets = [
         ":in_process_rtc_service",
         ":in_process_rtc_service_test",
+        ":screen_recorder",
+        ":screen_recording_impl_test",
+        ":screen_recording_perf",
         ":service_forwarder_impl_test",
         ":service_forwarder",
     ],
