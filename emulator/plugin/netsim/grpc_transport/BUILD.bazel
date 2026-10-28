@@ -14,7 +14,7 @@ cc_library(
         "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/synchronization",
+        "@goldfish_prebuilts_common//netsim:netsimd_cc_grpc",
         "@grpc//:grpc++",
-        "@netsim//:netsimd_cc_grpc",
     ],
 )
