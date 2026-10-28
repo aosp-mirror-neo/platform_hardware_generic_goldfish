@@ -22,6 +22,7 @@
 | **virtio-wifi** | Emulated WiFi device (Virtio). | [Architecture](virtio-wifi/ARCHITECTURE.md) |
 | **display** | Virtual display and Pixman framebuffer backend. | [Architecture](display/ARCHITECTURE.md) |
 | **audio** | QEMU guest audio capture and WebRTC audio bridge. | [Architecture](audio/ARCHITECTURE.md) |
+| **wasapi** | Windows WASAPI audio backend (`AudioMixengBackend`). | [Architecture](wasapi/ARCHITECTURE.md) |
 | **hal** | Hardware Abstraction Layer devices (GPS, Sensors, Camera, Vehicle, Multi-Display, virtio-gpu-gfxstream). | [Architecture](hal/ARCHITECTURE.md) |
 
 ### Control & Management
