@@ -37,7 +37,11 @@
 #define GUEST_BUFFER_BYTES (GUEST_PERIOD_BYTES * 4U)
 #define PERIOD_NS (10LL * 1000LL * 1000LL)
 
-/* Injector supplies 16 kHz mono S16 with constant sample amplitude 12000. */
+/*
+ * Injector supplies 48 kHz stereo S16 (L = 16000, R = 8000), which downmixes
+ * and resamples to 16 kHz mono S16 with steady-state amplitude (16000+8000)/2
+ * = 12000.
+ */
 #define EXPECTED_INJECTED_SAMPLE 12000
 #define INJECTED_TOLERANCE 250
 #define SILENCE_MAX_ABS 16
@@ -317,7 +321,7 @@ static void test_passthrough_playback(void) {
     virtio_snd_test_teardown(&ctx);
 }
 
-static void test_takeover_and_restore(void) {
+static void test_takeover_resample_and_restore(void) {
     VirtioSndTestCtx ctx = {0};
     int16_t samples[GUEST_PERIOD_FRAMES];
     uint32_t input_stream_id;
@@ -417,7 +421,8 @@ static void test_early_start_before_guest_prepare(void) {
 int main(int argc, char** argv) {
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("virtio-snd-inject/passthrough-playback", test_passthrough_playback);
-    qtest_add_func("virtio-snd-inject/takeover-and-restore", test_takeover_and_restore);
+    qtest_add_func("virtio-snd-inject/takeover-resample-and-restore",
+                   test_takeover_resample_and_restore);
     qtest_add_func("virtio-snd-inject/early-start-before-guest-prepare",
                    test_early_start_before_guest_prepare);
     return g_test_run();

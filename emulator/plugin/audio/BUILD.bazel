@@ -11,7 +11,10 @@ package(default_visibility = ["//visibility:public"])
 
 WEBRTC_COPTS = select({
     "@platforms//os:windows": ["/GR-"],
-    "//conditions:default": ["-fno-rtti"],
+    "//conditions:default": [
+        "-fno-rtti",
+        "-Wno-nullability-completeness",
+    ],
 })
 
 cc_library(
@@ -45,6 +48,31 @@ cc_library(
 )
 
 cc_library(
+    name = "pcm_pull_pipeline",
+    srcs = ["pcm_pull_pipeline.cc"],
+    hdrs = ["include/goldfish/audio/pcm_pull_pipeline.h"],
+    copts = WEBRTC_COPTS,
+    includes = ["include"],
+    deps = [
+        ":pcm_format",
+        "@abseil-cpp//absl/log:check",
+        "@webrtc//common_audio",
+    ],
+)
+
+cc_test(
+    name = "pcm_pull_pipeline_test",
+    size = "small",
+    srcs = ["pcm_pull_pipeline_test.cc"],
+    copts = WEBRTC_COPTS,
+    deps = [
+        ":pcm_format",
+        ":pcm_pull_pipeline",
+        "//emulator/libs/test:googletest_main",
+    ],
+)
+
+cc_library(
     name = "audio_input_mux",
     srcs = ["audio_input_mux.cc"],
     hdrs = ["include/goldfish/audio/audio_input_mux.h"],
@@ -52,6 +80,7 @@ cc_library(
     includes = ["include"],
     deps = [
         ":pcm_format",
+        ":pcm_pull_pipeline",
         ":virtual_audio_pacer",
         "//emulator/plugin/vminterface:vm_lock",
         "@abseil-cpp//absl/base:core_headers",
@@ -323,6 +352,8 @@ clang_tidy_test(
         ":goldfish_audio_mux",
         ":goldfish_audio_mux_hdrs",
         ":pcm_format",
+        ":pcm_pull_pipeline",
+        ":pcm_pull_pipeline_test",
         ":qemu_audio_capture",
         ":qemu_audio_capture_test",
         ":qemu_audio_inject",

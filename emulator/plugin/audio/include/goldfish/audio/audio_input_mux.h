@@ -156,6 +156,7 @@ class AudioInputMux {
 
     MuxVoiceHandle* FindVoice(const MuxVoiceHandle* handle) const;
     bool AnyGuestVoiceActive() const;
+    void RebuildPipeline(MuxVoiceHandle& voice) const;
     void OnHostDataAvailable(MuxVoiceHandle* voice, int avail_bytes);
     void ShutdownInternal();
 

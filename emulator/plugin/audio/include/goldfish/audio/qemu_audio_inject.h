@@ -64,8 +64,8 @@ class QemuAudioInject {
      * Constructs a microphone audio injector handle.
      *
      * @param read_cb Pull callback invoked on each paced audio read.
-     * @param config Caller's PCM stream configuration (must match the guest capture format;
-     * mismatched formats output silence).
+     * @param config Caller's PCM stream configuration (resampled and remixed to the guest capture
+     * format as needed).
      * @param active_cb Optional notification callback for guest capture stream state changes.
      * @param audio_backend Optional explicit QEMU `AudioBackend`; defaults to `"mainaudiodev"`.
      */

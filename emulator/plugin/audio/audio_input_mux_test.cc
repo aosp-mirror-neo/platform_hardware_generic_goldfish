@@ -676,5 +676,120 @@ TEST_F(AudioInputMuxTest, MutationsWithoutTheVmLockFailTheLockCheck) {
     EXPECT_FALSE(mux.IsShutdown());
 }
 
+TEST_F(AudioInputMuxTest, ReopeningVoiceAndUpdatingVolumeReconfiguresInjectedPipeline) {
+    FakeHostAudioInput host;
+    AudioInputMux mux(&host);
+
+    int owner = 1;
+    ASSERT_TRUE(
+            mux.RegisterInjector(
+                       &owner,
+                       AudioStreamConfig{
+                           .sample_rate_hz = 16000, .channels = 1, .format = SampleFormat::kS16},
+                       [](void* dst, size_t max_frames) -> size_t {
+                           auto* s = static_cast<int16_t*>(dst);
+                           std::fill(s, s + max_frames, static_cast<int16_t>(16384));
+                           return max_frames;
+                       },
+                       nullptr)
+                    .ok());
+
+    MuxVoiceHandle* voice = mux.OpenVoice(
+            nullptr, "virtio-sound.in",
+            GuestAudioConfig{
+                .sample_rate_hz = 16000, .channels = 1, .format = GuestPcmFormat::kS16},
+            [](int) {});
+    ASSERT_NE(voice, nullptr);
+    mux.SetVoiceActive(voice, true);
+
+    // Reopen existing voice as stereo F32 at 16 kHz and mute right channel via SetVoiceVolume.
+    std::vector<float> stereo_out;
+    MuxVoiceHandle* reopened = nullptr;
+    reopened = mux.OpenVoice(
+            voice, "virtio-sound.in",
+            GuestAudioConfig{
+                .sample_rate_hz = 16000, .channels = 2, .format = GuestPcmFormat::kF32},
+            [&mux, &reopened, &stereo_out](int avail_bytes) {
+                std::vector<float> buf(static_cast<size_t>(avail_bytes) / sizeof(float));
+                const size_t r = mux.ReadVoice(reopened, buf.data(), buf.size() * sizeof(float));
+                buf.resize(r / sizeof(float));
+                stereo_out.insert(stereo_out.end(), buf.begin(), buf.end());
+            });
+    EXPECT_EQ(reopened, voice);
+
+    GuestChannelVolume vol;
+    vol.channels = 2;
+    vol.gain[0] = 255;
+    vol.gain[1] = 0;
+    mux.SetVoiceVolume(reopened, vol);
+
+    host.AdvanceTime(absl::Milliseconds(10));
+    mux.OnTimerTick();
+    // 10 ms at 16 kHz stereo -> 160 frames * 2 channels = 320 floats.
+    ASSERT_EQ(stereo_out.size(), 320U);
+    EXPECT_NEAR(stereo_out[0], 0.5F, 0.01F);
+    EXPECT_FLOAT_EQ(stereo_out[1], 0.0F);
+
+    mux.UnregisterInjector(&owner);
+    mux.CloseVoice(reopened);
+}
+
+TEST_F(AudioInputMuxTest, ResetsResamplerDelayLineWhenGuestVoiceReactivates) {
+    FakeHostAudioInput host;
+    AudioInputMux mux(&host, /*vm_running=*/true);
+
+    float injected_value = 1.0F;
+    int owner = 1;
+    ASSERT_TRUE(
+            mux.RegisterInjector(
+                       &owner,
+                       AudioStreamConfig{
+                           .sample_rate_hz = 44100, .channels = 1, .format = SampleFormat::kF32},
+                       [&injected_value](void* dst, size_t max_frames) -> size_t {
+                           auto* out = static_cast<float*>(dst);
+                           std::fill(out, out + max_frames, injected_value);
+                           return max_frames;
+                       },
+                       nullptr)
+                    .ok());
+
+    std::vector<float> captured;
+    MuxVoiceHandle* voice = nullptr;
+    voice = mux.OpenVoice(
+            nullptr, "virtio-sound.in",
+            GuestAudioConfig{
+                .sample_rate_hz = 48000, .channels = 1, .format = GuestPcmFormat::kF32},
+            [&mux, &voice, &captured](int avail_bytes) {
+                std::vector<float> buf(static_cast<size_t>(avail_bytes) / sizeof(float));
+                const size_t r = mux.ReadVoice(voice, buf.data(), buf.size() * sizeof(float));
+                buf.resize(r / sizeof(float));
+                captured.insert(captured.end(), buf.begin(), buf.end());
+            });
+    ASSERT_NE(voice, nullptr);
+
+    // Session 1: saturate the sinc resampler delay line with +1.0F DC samples.
+    mux.SetVoiceActive(voice, true);
+    host.AdvanceTime(absl::Milliseconds(20));
+    mux.OnTimerTick();
+    ASSERT_EQ(captured.size(), 960U);
+    EXPECT_NEAR(captured.back(), 1.0F, 0.02F);
+
+    // Pause guest capture, switch source to silence, and reactivate guest capture.
+    mux.SetVoiceActive(voice, false);
+    injected_value = 0.0F;
+    captured.clear();
+
+    mux.SetVoiceActive(voice, true);
+    host.AdvanceTime(absl::Milliseconds(10));
+    mux.OnTimerTick();
+    ASSERT_EQ(captured.size(), 480U);
+    for (size_t i = 0; i < captured.size(); ++i) {
+        EXPECT_FLOAT_EQ(captured[i], 0.0F) << "Stale resampler bleed at frame " << i;
+    }
+
+    mux.UnregisterInjector(&owner);
+    mux.CloseVoice(voice);
+}
+
 }  // namespace
 }  // namespace goldfish::audio

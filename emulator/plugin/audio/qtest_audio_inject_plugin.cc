@@ -42,9 +42,10 @@ namespace goldfish::audio {
 namespace {
 
 constexpr char kTestCtrlDeviceType[] = "goldfish-audio-inject-test-ctrl";
-constexpr uint32_t kTestInputSampleRateHz = 16000;
-constexpr uint32_t kTestInputChannels = 1;
-constexpr int16_t kTestSample = 12000;
+constexpr uint32_t kTestInputSampleRateHz = 48000;
+constexpr uint32_t kTestInputChannels = 2;
+constexpr int16_t kTestLeftSample = 16000;
+constexpr int16_t kTestRightSample = 8000;
 
 struct TestCtrlState {
     std::atomic<bool> guest_active{false};
@@ -98,7 +99,8 @@ void ctrl_set_inject_enabled(Object* obj, bool enabled, Error** errp) {
             [state](void* dst, size_t max_frames) -> size_t {
                 auto* out = static_cast<int16_t*>(dst);
                 for (size_t i = 0; i < max_frames; ++i) {
-                    out[i] = kTestSample;
+                    out[2 * i] = kTestLeftSample;
+                    out[2 * i + 1] = kTestRightSample;
                 }
                 state->frames_pulled.fetch_add(max_frames, std::memory_order_release);
                 return max_frames;

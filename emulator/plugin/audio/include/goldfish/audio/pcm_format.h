@@ -141,4 +141,10 @@ void FillSourceSilence(SampleFormat format, void* dst, size_t byte_count);
  */
 void FillGuestSilence(GuestPcmFormat format, bool big_endian, void* dst, size_t byte_count);
 
+/**
+ * Quantizes and encodes a normalized `[-1.0, 1.0]` sample into @p dst in @p format, byte-swapping
+ * multi-byte values when @p swap_endian is true.
+ */
+void EncodeGuestSample(GuestPcmFormat format, bool swap_endian, double sample, uint8_t* dst);
+
 }  // namespace goldfish::audio

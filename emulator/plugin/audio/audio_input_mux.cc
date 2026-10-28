@@ -15,7 +15,6 @@
 #include "goldfish/audio/audio_input_mux.h"
 
 #include <algorithm>
-#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -35,6 +34,7 @@
 
 #include "emulator/plugin/vminterface/vm_lock.h"
 #include "goldfish/audio/pcm_format.h"
+#include "goldfish/audio/pcm_pull_pipeline.h"
 #include "goldfish/audio/virtual_audio_pacer.h"
 
 namespace goldfish::audio {
@@ -76,24 +76,6 @@ size_t GuestBytesPerFrame(const GuestAudioConfig& cfg) {
     return static_cast<size_t>(cfg.channels) * BytesPerGuestSample(cfg.format);
 }
 
-bool FormatsMatchForDirectPull(const AudioStreamConfig& src, const GuestAudioConfig& dst) {
-    if (src.sample_rate_hz != dst.sample_rate_hz || src.channels != dst.channels ||
-        dst.big_endian != (std::endian::native == std::endian::big)) {
-        return false;
-    }
-    switch (src.format) {
-    case SampleFormat::kU8:
-        return dst.format == GuestPcmFormat::kU8;
-    case SampleFormat::kS16:
-        return dst.format == GuestPcmFormat::kS16;
-    case SampleFormat::kS32:
-        return dst.format == GuestPcmFormat::kS32;
-    case SampleFormat::kF32:
-        return dst.format == GuestPcmFormat::kF32;
-    }
-    return false;
-}
-
 struct MuxRegistry {
     absl::Mutex registry_mutex;
     absl::flat_hash_map<const AudioBackend*, std::weak_ptr<AudioInputMux>> map
@@ -117,6 +99,7 @@ struct MuxVoiceHandle {
     bool host_voice_active = false;
     bool paced = false;  // Served by the pacer (injector or silence) instead of the host mic.
     VirtualAudioPacer pacer;
+    std::unique_ptr<PcmPullPipeline> pipeline;  // Non-null while an injector is registered.
 };
 
 AudioInputMux::AudioInputMux(HostAudioInputInterface* host, bool vm_running)
@@ -154,6 +137,7 @@ MuxVoiceHandle* AudioInputMux::OpenVoice(MuxVoiceHandle* existing, std::string_v
     voice->pacer.Configure(guest_config.sample_rate_hz,
                            static_cast<uint32_t>(GuestBytesPerFrame(guest_config)),
                            host_->NowVirtualTime());
+    RebuildPipeline(*voice);
     Commit(/*reset_paced_voices=*/existing != nullptr);
     return voice;
 }
@@ -195,6 +179,9 @@ void AudioInputMux::SetVoiceVolume(MuxVoiceHandle* voice, const GuestChannelVolu
         return;
     }
     found->volume = volume;
+    if (found->pipeline) {
+        found->pipeline->SetVolume(volume);
+    }
     if (found->host_voice != nullptr) {
         host_->SetHostVoiceVolume(found->host_voice, volume);
     }
@@ -223,15 +210,11 @@ size_t AudioInputMux::ReadVoice(MuxVoiceHandle* voice, void* dst, size_t byte_co
         return 0;
     }
     found->pacer.Consume(frames * bytes_per_frame);
-    // Injected audio is passed through only when it already matches the guest format.
-    size_t written = 0;
-    if (active_injector_.has_value() && !found->volume.mute &&
-        FormatsMatchForDirectPull(active_injector_->config, cfg)) {
-        written = std::min(frames, active_injector_->read_cb(dst, frames));
+    if (found->pipeline) {
+        found->pipeline->Pull(frames, dst, active_injector_->read_cb);
+    } else {
+        FillGuestSilence(cfg.format, cfg.big_endian, dst, frames * bytes_per_frame);
     }
-    FillGuestSilence(cfg.format, cfg.big_endian,
-                     static_cast<uint8_t*>(dst) + written * bytes_per_frame,
-                     (frames - written) * bytes_per_frame);
     return frames * bytes_per_frame;
 }
 
@@ -327,6 +310,9 @@ absl::Status AudioInputMux::RegisterInjector(const void* owner, const AudioStrea
         .read_cb = std::move(read_cb),
         .active_cb = std::move(active_cb),
     };
+    for (const auto& voice : voices_) {
+        RebuildPipeline(*voice);
+    }
     Commit(/*reset_paced_voices=*/true);
     return absl::OkStatus();
 }
@@ -337,6 +323,9 @@ void AudioInputMux::UnregisterInjector(const void* owner) {
         return;
     }
     active_injector_.reset();
+    for (const auto& voice : voices_) {
+        voice->pipeline.reset();
+    }
     Commit(/*reset_paced_voices=*/true);
 }
 
@@ -352,6 +341,14 @@ MuxVoiceHandle* AudioInputMux::FindVoice(const MuxVoiceHandle* handle) const {
 bool AudioInputMux::AnyGuestVoiceActive() const {
     return std::any_of(voices_.begin(), voices_.end(),
                        [](const auto& voice) { return voice->guest_active; });
+}
+
+void AudioInputMux::RebuildPipeline(MuxVoiceHandle& voice) const {
+    voice.pipeline.reset();
+    if (active_injector_.has_value()) {
+        voice.pipeline = std::make_unique<PcmPullPipeline>(active_injector_->config, voice.config);
+        voice.pipeline->SetVolume(voice.volume);
+    }
 }
 
 void AudioInputMux::Commit(bool reset_paced_voices) {
@@ -375,9 +372,12 @@ void AudioInputMux::ApplyRouting(bool reset_paced_voices) {
             voice->host_voice_active = want_host;
             host_changes.emplace_back(voice->host_voice, want_host);
         }
-        // Entering paced mode starts from a clean budget.
+        // Entering paced mode starts from a clean budget and an empty resampler delay line.
         if (want_paced && (!voice->paced || reset_paced_voices)) {
             voice->pacer.Reset(now);
+            if (voice->pipeline) {
+                voice->pipeline->Reset();
+            }
         }
         voice->paced = want_paced;
         any_paced = any_paced || want_paced;

@@ -14,12 +14,79 @@
 
 #include "goldfish/audio/pcm_format.h"
 
+#include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 
 namespace goldfish::audio {
+
+void EncodeGuestSample(GuestPcmFormat format, bool swap_endian, double sample, uint8_t* dst) {
+    const double clamped = std::clamp(sample, -1.0, 1.0);
+    switch (format) {
+    case GuestPcmFormat::kS8: {
+        const auto v = static_cast<int8_t>(std::clamp(std::lround(clamped * 128.0), -128L, 127L));
+        std::memcpy(dst, &v, sizeof(v));
+        return;
+    }
+    case GuestPcmFormat::kU8: {
+        const auto v =
+                static_cast<uint8_t>(std::clamp(std::lround(clamped * 128.0) + 128L, 0L, 255L));
+        std::memcpy(dst, &v, sizeof(v));
+        return;
+    }
+    case GuestPcmFormat::kS16: {
+        const auto s =
+                static_cast<int16_t>(std::clamp(std::lround(clamped * 32768.0), -32768L, 32767L));
+        uint16_t raw = std::bit_cast<uint16_t>(s);
+        if (swap_endian) {
+            raw = std::byteswap(raw);
+        }
+        std::memcpy(dst, &raw, sizeof(raw));
+        return;
+    }
+    case GuestPcmFormat::kU16: {
+        auto raw = static_cast<uint16_t>(
+                std::clamp(std::lround(clamped * 32768.0) + 32768L, 0L, 65535L));
+        if (swap_endian) {
+            raw = std::byteswap(raw);
+        }
+        std::memcpy(dst, &raw, sizeof(raw));
+        return;
+    }
+    case GuestPcmFormat::kS32: {
+        const auto s = static_cast<int32_t>(
+                std::clamp(std::llround(clamped * 2147483648.0), -2147483648LL, 2147483647LL));
+        uint32_t raw = std::bit_cast<uint32_t>(s);
+        if (swap_endian) {
+            raw = std::byteswap(raw);
+        }
+        std::memcpy(dst, &raw, sizeof(raw));
+        return;
+    }
+    case GuestPcmFormat::kU32: {
+        auto raw = static_cast<uint32_t>(
+                std::clamp(std::llround(clamped * 2147483648.0) + 2147483648LL, 0LL, 4294967295LL));
+        if (swap_endian) {
+            raw = std::byteswap(raw);
+        }
+        std::memcpy(dst, &raw, sizeof(raw));
+        return;
+    }
+    case GuestPcmFormat::kF32: {
+        const auto clamped_f = static_cast<float>(clamped);
+        uint32_t raw = std::bit_cast<uint32_t>(clamped_f);
+        if (swap_endian) {
+            raw = std::byteswap(raw);
+        }
+        std::memcpy(dst, &raw, sizeof(raw));
+        return;
+    }
+    }
+}
 
 void FillSourceSilence(SampleFormat format, void* dst, size_t byte_count) {
     if (byte_count == 0) {
