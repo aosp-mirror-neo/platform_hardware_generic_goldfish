@@ -22,11 +22,13 @@
 #include "libqos/virtio-pci.h"
 #include "libqtest.h"
 #include "qemu/bswap.h"
+#include "qobject/qdict.h"
 #include "standard-headers/linux/virtio_config.h"
 #include "standard-headers/linux/virtio_ring.h"
 #include "standard-headers/linux/virtio_snd.h"
 
 #define VIRTIO_SND_PCI_SLOT 0x09
+#define TEST_CTRL_QOM_PATH "/machine/peripheral/injctrl"
 #define VIRTIO_QUEUE_TIMEOUT_US (5 * 1000 * 1000)
 
 /* 16 kHz mono S16: 160 frames = 320 bytes per 10 ms period. */
@@ -34,6 +36,10 @@
 #define GUEST_PERIOD_BYTES (GUEST_PERIOD_FRAMES * sizeof(int16_t))
 #define GUEST_BUFFER_BYTES (GUEST_PERIOD_BYTES * 4U)
 #define PERIOD_NS (10LL * 1000LL * 1000LL)
+
+/* Injector supplies 16 kHz mono S16 with constant sample amplitude 12000. */
+#define EXPECTED_INJECTED_SAMPLE 12000
+#define INJECTED_TOLERANCE 250
 #define SILENCE_MAX_ABS 16
 
 typedef struct VirtioSndTestCtx {
@@ -45,6 +51,25 @@ typedef struct VirtioSndTestCtx {
     QVirtQueue* txq;
     QVirtQueue* rxq;
 } VirtioSndTestCtx;
+
+static bool qom_get_bool_prop(QTestState* qts, const char* prop) {
+    QDict* rsp = qtest_qmp(qts,
+                           "{ 'execute': 'qom-get', 'arguments': "
+                           "{ 'path': %s, 'property': %s } }",
+                           TEST_CTRL_QOM_PATH, prop);
+    g_assert_nonnull(rsp);
+    g_assert_true(qdict_haskey(rsp, "return"));
+    bool val = qdict_get_bool(rsp, "return");
+    qobject_unref(rsp);
+    return val;
+}
+
+static void qom_set_bool_prop(QTestState* qts, const char* prop, bool value) {
+    qtest_qmp_assert_success(qts,
+                             "{ 'execute': 'qom-set', 'arguments': "
+                             "{ 'path': %s, 'property': %s, 'value': %i } }",
+                             TEST_CTRL_QOM_PATH, prop, value);
+}
 
 static void virtio_snd_ctrl_cmd(VirtioSndTestCtx* ctx, const void* req, size_t req_len, void* resp,
                                 size_t resp_len) {
@@ -165,6 +190,9 @@ static void virtio_snd_capture_one_period(VirtioSndTestCtx* ctx, uint32_t stream
                    /*write=*/true, /*next=*/false);
     qvirtqueue_kick(ctx->qts, &ctx->vpci->vdev, ctx->rxq, head);
 
+    /* Advance QEMU virtual clock by one 10 ms period so both the audio mux
+     * pacer/host backend and virtio-snd's period_timer fire deterministically.
+     */
     qtest_clock_step(ctx->qts, PERIOD_NS);
 
     qvirtio_wait_used_elem(ctx->qts, &ctx->vpci->vdev, ctx->rxq, head, &used_len,
@@ -192,6 +220,16 @@ static bool period_is_silent(const int16_t* samples) {
     return true;
 }
 
+static bool period_matches_injected(const int16_t* samples) {
+    for (size_t i = 0; i < GUEST_PERIOD_FRAMES; ++i) {
+        int diff = (int)samples[i] - EXPECTED_INJECTED_SAMPLE;
+        if (diff < -INJECTED_TOLERANCE || diff > INJECTED_TOLERANCE) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void virtio_snd_test_init(VirtioSndTestCtx* ctx) {
     ctx->qts = qtest_init(
             "-M pc -nodefaults "
@@ -202,7 +240,8 @@ static void virtio_snd_test_init(VirtioSndTestCtx* ctx) {
             "in.frequency=48000,in.format=s16,in.channels=1 "
             "-device goldfish-audio-mux,"
             "host-audiodev=hostaudiodev,audiodev-id=mainaudiodev "
-            "-device virtio-sound-pci,audiodev=mainaudiodev,addr=09.0");
+            "-device virtio-sound-pci,audiodev=mainaudiodev,addr=09.0 "
+            "-device goldfish-audio-inject-test-ctrl,id=injctrl");
 
     pc_alloc_init(&ctx->alloc, ctx->qts, ALLOC_NO_FLAGS);
     ctx->pcibus = qpci_new_pc(ctx->qts, &ctx->alloc);
@@ -278,7 +317,7 @@ static void test_passthrough_playback(void) {
     virtio_snd_test_teardown(&ctx);
 }
 
-static void test_passthrough_capture(void) {
+static void test_takeover_and_restore(void) {
     VirtioSndTestCtx ctx = {0};
     int16_t samples[GUEST_PERIOD_FRAMES];
     uint32_t input_stream_id;
@@ -290,19 +329,96 @@ static void test_passthrough_capture(void) {
     virtio_snd_simple_pcm_cmd(&ctx, VIRTIO_SND_R_PCM_PREPARE, input_stream_id);
     virtio_snd_simple_pcm_cmd(&ctx, VIRTIO_SND_R_PCM_START, input_stream_id);
 
+    /* Phase 1: Baseline host '-audiodev none' produces silence. */
     for (int i = 0; i < 3; ++i) {
         virtio_snd_capture_one_period(&ctx, input_stream_id, samples);
         g_assert_true(period_is_silent(samples));
     }
 
+    /* Phase 2: Enable injection while guest mic is already open & active. */
+    qom_set_bool_prop(ctx.qts, "inject-enabled", true);
+    g_assert_true(qom_get_bool_prop(ctx.qts, "guest-active"));
+    g_assert_true(qom_get_bool_prop(ctx.qts, "conflict-rejected"));
+
+    bool saw_steady_injected_period = false;
+    for (int i = 0; i < 8; ++i) {
+        virtio_snd_capture_one_period(&ctx, input_stream_id, samples);
+        if (period_matches_injected(samples)) {
+            saw_steady_injected_period = true;
+        }
+    }
+    g_assert_true(qom_get_bool_prop(ctx.qts, "has-pulled-frames"));
+    g_assert_true(saw_steady_injected_period);
+
+    /* Phase 3: Stop injection; after draining virtio-snd's 4-period ring
+     * buffer, RX buffers must return cleanly to host silence.
+     */
+    qom_set_bool_prop(ctx.qts, "inject-enabled", false);
+    bool returned_to_silence = false;
+    for (int i = 0; i < 8; ++i) {
+        virtio_snd_capture_one_period(&ctx, input_stream_id, samples);
+        if (i >= 4 && period_is_silent(samples)) {
+            returned_to_silence = true;
+        }
+    }
+    g_assert_true(returned_to_silence);
+
+    /* Phase 4: Re-enable injection, then release guest stream; verify
+     * ActiveCallback(false) fires and QEMU shuts down cleanly while injector
+     * remains registered (exercising audio_cleanup() before GF_SHUTDOWN_FUNC).
+     */
+    qom_set_bool_prop(ctx.qts, "inject-enabled", true);
+    g_assert_true(qom_get_bool_prop(ctx.qts, "guest-active"));
+
     virtio_snd_simple_pcm_cmd(&ctx, VIRTIO_SND_R_PCM_STOP, input_stream_id);
     virtio_snd_simple_pcm_cmd(&ctx, VIRTIO_SND_R_PCM_RELEASE, input_stream_id);
+    g_assert_false(qom_get_bool_prop(ctx.qts, "guest-active"));
+
+    virtio_snd_test_teardown(&ctx);
+}
+
+static void test_early_start_before_guest_prepare(void) {
+    VirtioSndTestCtx ctx = {0};
+    int16_t samples[GUEST_PERIOD_FRAMES];
+    uint32_t input_stream_id;
+
+    virtio_snd_test_init(&ctx);
+
+    /* Enable injection BEFORE the guest opens any virtio-snd capture stream. */
+    qom_set_bool_prop(ctx.qts, "inject-enabled", true);
+    g_assert_false(qom_get_bool_prop(ctx.qts, "guest-active"));
+    g_assert_false(qom_get_bool_prop(ctx.qts, "has-pulled-frames"));
+
+    input_stream_id = virtio_snd_find_stream(&ctx, VIRTIO_SND_D_INPUT);
+    virtio_snd_configure_16k_mono_s16(&ctx, input_stream_id);
+    virtio_snd_simple_pcm_cmd(&ctx, VIRTIO_SND_R_PCM_PREPARE, input_stream_id);
+    g_assert_true(qom_get_bool_prop(ctx.qts, "guest-active"));
+
+    virtio_snd_simple_pcm_cmd(&ctx, VIRTIO_SND_R_PCM_START, input_stream_id);
+
+    bool saw_steady_injected_period = false;
+    for (int i = 0; i < 6; ++i) {
+        virtio_snd_capture_one_period(&ctx, input_stream_id, samples);
+        if (period_matches_injected(samples)) {
+            saw_steady_injected_period = true;
+        }
+    }
+    g_assert_true(qom_get_bool_prop(ctx.qts, "has-pulled-frames"));
+    g_assert_true(saw_steady_injected_period);
+
+    virtio_snd_simple_pcm_cmd(&ctx, VIRTIO_SND_R_PCM_STOP, input_stream_id);
+    virtio_snd_simple_pcm_cmd(&ctx, VIRTIO_SND_R_PCM_RELEASE, input_stream_id);
+    g_assert_false(qom_get_bool_prop(ctx.qts, "guest-active"));
+
+    qom_set_bool_prop(ctx.qts, "inject-enabled", false);
     virtio_snd_test_teardown(&ctx);
 }
 
 int main(int argc, char** argv) {
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("virtio-snd-inject/passthrough-playback", test_passthrough_playback);
-    qtest_add_func("virtio-snd-inject/passthrough-capture", test_passthrough_capture);
+    qtest_add_func("virtio-snd-inject/takeover-and-restore", test_takeover_and_restore);
+    qtest_add_func("virtio-snd-inject/early-start-before-guest-prepare",
+                   test_early_start_before_guest_prepare);
     return g_test_run();
 }

@@ -110,6 +110,45 @@ cc_library(
 )
 
 cc_library(
+    name = "qemu_audio_inject",
+    srcs = ["qemu_audio_inject.cc"],
+    hdrs = ["include/goldfish/audio/qemu_audio_inject.h"],
+    copts = WEBRTC_COPTS,
+    includes = ["include"],
+    deps = [
+        ":audio_input_mux",
+        ":goldfish_audio_mux_hdrs",
+        ":pcm_format",
+        "//emulator/plugin/vminterface:vm_lock",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/synchronization",
+        "@qemu//:aemu_func_defs",
+        "@qemu//:qemu-headers-exported",
+    ],
+)
+
+cc_test(
+    name = "qemu_audio_inject_test",
+    size = "small",
+    srcs = ["qemu_audio_inject_test.cc"],
+    copts = WEBRTC_COPTS,
+    deps = [
+        ":audio_input_mux",
+        ":pcm_format",
+        ":qemu_audio_inject",
+        ":test_bql",
+        ":test_qemu_audio_stub",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/vminterface:vm_lock",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_library(
     name = "qemu_audio_capture",
     srcs = ["qemu_audio_capture.cc"],
     hdrs = ["include/goldfish/audio/qemu_audio_capture.h"],
@@ -209,6 +248,9 @@ cc_binary(
     }),
     deps = [
         ":goldfish_audio_mux",
+        ":pcm_format",
+        ":qemu_audio_inject",
+        "@abseil-cpp//absl/status",
         "@glib//glib:glib_import",
         "@glib//gmodule:gmodule_import",
         "@qemu//:aemu_func_defs",
@@ -283,6 +325,8 @@ clang_tidy_test(
         ":pcm_format",
         ":qemu_audio_capture",
         ":qemu_audio_capture_test",
+        ":qemu_audio_inject",
+        ":qemu_audio_inject_test",
         ":qemu_audio_source",
         ":qemu_audio_source_test",
         ":qtest_audio_inject_plugin",
