@@ -424,8 +424,8 @@ int main(int argc, char** argv) {
     // launcher's own environment to locate the crashpad_handler executable.
     android::base::System::SetEnvironmentVariable("AEMU_CRASHPAD_HANDLER",
                                                   emulator_paths->crashpad_handler_binary.string());
-    if (!android::crashreport::CrashSystem::get().initialize()) {
-        LOG(WARNING) << "Failed to initialize crashreporting.";
+    if (auto status = android::crashreport::CrashSystem::get().initialize(); !status.ok()) {
+        LOG(WARNING) << "Failed to initialize crashreporting: " << status.message();
     }
 
     absl::FailureSignalHandlerOptions options;
