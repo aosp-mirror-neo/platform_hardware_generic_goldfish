@@ -1,6 +1,21 @@
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 cc_library(
+    name = "scoped_com_initializer",
+    hdrs = ["include/android/base/scoped_com_initializer.h"],
+    includes = ["include"],
+    linkopts = select({
+        "@platforms//os:windows": [
+            "-DEFAULTLIB:ole32.lib",
+        ],
+        "//conditions:default": [],
+    }),
+    target_compatible_with = ["@platforms//os:windows"],
+    visibility = ["//visibility:public"],
+    deps = ["//emulator/libs/base"],
+)
+
+cc_library(
     name = "scoped_file_handle",
     hdrs = ["include/android/base/scoped_file_handle.h"],
     includes = ["include"],
@@ -66,6 +81,18 @@ cc_library(
         ":win32_utils",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "scoped_com_initializer_test",
+    size = "small",
+    srcs = ["scoped_com_initializer_test.cc"],
+    target_compatible_with = ["@platforms//os:windows"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":scoped_com_initializer",
+        "//emulator/libs/test:googletest_main",
     ],
 )
 

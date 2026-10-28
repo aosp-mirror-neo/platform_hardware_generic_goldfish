@@ -34,6 +34,7 @@ cc_library(
     deps = [
         ":pcm_converter",
         "//emulator/libs/base",
+        "//emulator/libs/windows:scoped_com_initializer",
         "//emulator/libs/windows:scoped_file_handle",
         "//emulator/libs/windows:win32_utils",
         "@abseil-cpp//absl/strings:str_format",

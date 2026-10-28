@@ -121,6 +121,7 @@ cc_library(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     deps = [
+        "//emulator/libs/windows:scoped_com_initializer",
         "@abseil-cpp//absl/synchronization",
         "@libyuv",
         "@webrtc//api:scoped_refptr",
@@ -475,6 +476,7 @@ cc_library(
         "@platforms//os:macos": [":videobridge_codecs_objc"],
         "@platforms//os:windows": [
             ":videobridge_codecs_win",
+            "//emulator/libs/windows:scoped_com_initializer",
             "@webrtc//api/video_codecs:builtin_video_decoder_factory",
             "@webrtc//api/video_codecs:builtin_video_encoder_factory",
         ],
@@ -766,6 +768,7 @@ cc_test(
         ":videobridge_codecs",
         ":videobridge_codecs_win",
         "//emulator/libs/test:googletest_main",
+        "//emulator/libs/windows:scoped_com_initializer",
         "@ffmpeg",
         "@ffmpeg//:ffmpeg_headers",
         "@libyuv",

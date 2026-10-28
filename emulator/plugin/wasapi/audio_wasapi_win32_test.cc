@@ -43,11 +43,11 @@ TEST(WasapiWin32Test, ScopedCoTaskMemAllocAndRelease) {
 }
 
 TEST(WasapiWin32Test, ScopedComInitializerIsUsableWhenNested) {
-    ScopedComInitializer outer(COINIT_MULTITHREADED);
-    EXPECT_TRUE(outer.Usable());
+    const android::base::ScopedComInitializer outer(COINIT_MULTITHREADED);
+    EXPECT_TRUE(outer.ok());
 
-    ScopedComInitializer inner(COINIT_MULTITHREADED);
-    EXPECT_TRUE(inner.Usable());
+    const android::base::ScopedComInitializer inner(COINIT_MULTITHREADED);
+    EXPECT_TRUE(inner.ok());
 }
 
 TEST(WasapiWin32Test, ExtractAndConfigureWaveFormatExtensibleAndStandard) {

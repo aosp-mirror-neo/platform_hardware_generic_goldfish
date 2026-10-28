@@ -46,6 +46,7 @@
 
 #include "absl/strings/str_format.h"
 
+#include "android/base/scoped_com_initializer.h"
 #include "android/base/scoped_file_handle.h"
 #include "android/base/win32_utils.h"
 #include "goldfish/base/intrusive_ptr.h"
@@ -92,34 +93,6 @@ struct AvrtHandleDeleter {
 };
 
 using ScopedAvrtHandle = goldfish::base::UniqueHandle<HANDLE, nullptr, AvrtHandleDeleter>;
-
-// RAII wrapper for per-thread COM initialization. Treats RPC_E_CHANGED_MODE as
-// usable (the calling thread already initialized COM in another apartment)
-// without calling CoUninitialize on destruction.
-class ScopedComInitializer {
-  public:
-    explicit ScopedComInitializer(DWORD coinit = COINIT_MULTITHREADED)
-            : hr_(::CoInitializeEx(nullptr, coinit))
-            , should_uninitialize_(hr_ == S_OK || hr_ == S_FALSE) {}
-
-    ~ScopedComInitializer() {
-        if (should_uninitialize_) {
-            ::CoUninitialize();
-        }
-    }
-
-    ScopedComInitializer(const ScopedComInitializer&) = delete;
-    ScopedComInitializer& operator=(const ScopedComInitializer&) = delete;
-    ScopedComInitializer(ScopedComInitializer&&) = delete;
-    ScopedComInitializer& operator=(ScopedComInitializer&&) = delete;
-
-    bool Usable() const noexcept { return SUCCEEDED(hr_) || hr_ == RPC_E_CHANGED_MODE; }
-    HRESULT Result() const noexcept { return hr_; }
-
-  private:
-    HRESULT hr_;
-    bool should_uninitialize_;
-};
 
 // Adopts a newly returned COM interface pointer (refcount already incremented
 // by the COM callee) into a goldfish::base::IntrusivePtr<Interface>.

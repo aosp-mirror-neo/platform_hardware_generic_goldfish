@@ -32,7 +32,12 @@ cc_library(
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
-    deps = [":x86_cpuid"],
+    deps = [":x86_cpuid"] + select({
+        "@platforms//os:windows": [
+            "//emulator/libs/windows:scoped_com_initializer",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 cc_library(

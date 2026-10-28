@@ -586,7 +586,7 @@ class WasapiStream {
     }
 
     void WorkerMain(std::promise<void> init_done) {
-        ScopedComInitializer com_init(COINIT_MULTITHREADED);
+        const android::base::ScopedComInitializer com_init(COINIT_MULTITHREADED);
         DWORD avrt_task_index = 0U;
         ScopedAvrtHandle avrt_handle(
                 ::AvSetMmThreadCharacteristicsW(L"Pro Audio", &avrt_task_index));
@@ -595,10 +595,9 @@ class WasapiStream {
         goldfish::base::IntrusivePtr<WasapiNotificationClient> notification_client;
         bool notification_registered = false;
 
-        if (!com_init.Usable()) {
+        if (!com_init.ok()) {
             LOG(ERROR) << "Windows WASAPI audio " << DirectionName()
-                       << " is unavailable: CoInitializeEx failed: "
-                       << FormatHresult(com_init.Result())
+                       << " is unavailable: CoInitializeEx failed: " << FormatHresult(com_init.hr())
                        << ". Emulator will continue without host audio " << DirectionName() << ".";
         } else {
             const HRESULT enum_hr = QueryComOutPtr(&enumerator, [&](IMMDeviceEnumerator** raw) {

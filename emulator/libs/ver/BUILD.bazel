@@ -203,6 +203,7 @@ cc_library(
         "@vulkan-headers//:vulkan_headers",
     ] + select({
         "@platforms//os:macos": [":webcam_source_darwin"],
+        "@platforms//os:windows": ["//emulator/libs/windows:scoped_com_initializer"],
         "//conditions:default": [],
     }),
     alwayslink = True,
