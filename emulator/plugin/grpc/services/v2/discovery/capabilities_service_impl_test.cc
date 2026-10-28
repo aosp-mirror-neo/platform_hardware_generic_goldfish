@@ -92,6 +92,7 @@ class CapabilitiesServiceTest : public ::testing::Test {
         props->hw_config.hw_lcd_width = 1080;
         props->hw_config.hw_lcd_height = 2424;
         props->hw_config.hw_lcd_density = 428;
+        props->hw_config.hw_rotaryInput = true;
 
         universe_ = std::make_unique<TestUniverse>(std::move(props));
         service_ = std::make_unique<CapabilitiesServiceImpl>(*universe_);
@@ -186,6 +187,8 @@ TEST_F(CapabilitiesServiceTest, ReturnsSubsystemsCapabilities) {
                 Not(Contains(InputFeature::INPUT_FEATURE_MOUSE_POINTER)));
     EXPECT_THAT(reply.input().supported_features(),
                 Not(Contains(InputFeature::INPUT_FEATURE_RELATIVE_MOUSE)));
+    EXPECT_THAT(reply.input().supported_features(),
+                Not(Contains(InputFeature::INPUT_FEATURE_ROTARY_ENCODER)));
 }
 
 TEST_F(CapabilitiesServiceTest, ReturnsPostureCapabilitiesWhenConfigured) {

@@ -15,7 +15,6 @@
 #include "input/input_service_impl.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -36,7 +35,6 @@
 #include "absl/time/time.h"
 
 #include "android/emulation/control/absl_status_translate.h"
-#include "android/emulation/control/keyboard/key_conversion.h"
 #include "android/emulation/control/simple_async_grpc.h"
 
 namespace goldfish::grpc::v2 {
@@ -44,11 +42,7 @@ namespace goldfish::grpc::v2 {
 namespace {
 
 using ::android::emulation::control::AbslStatusToGrpcStatus;
-using ::android::emulation::control::keyboard::android_keycode_to_evdev;
-using ::android::emulation::v2::AxisType;
 using ::android::emulation::v2::InputEvent;
-using ::android::emulation::v2::KeyEvent;
-using ::android::emulation::v2::PointerEvent;
 using ::android::emulation::v2::SendInputEventsResponse;
 using DispatchResult = IInputDispatcher::DispatchResult;
 
@@ -269,48 +263,17 @@ class DispatchedEvents : public std::enable_shared_from_this<DispatchedEvents> {
                             rpc)};
 }
 
-absl::Status ValidateKeyIdentifier(const KeyEvent& key) {
-    switch (key.key_identifier_case()) {
-    case KeyEvent::kDomCode:
-        if (key.dom_code().empty()) {
-            return absl::InvalidArgumentError(
-                    "Invalid KeyEvent.dom_code '': must be a non-empty W3C UI Events "
-                    "KeyboardEvent.code string (e.g., 'KeyA', 'Enter', 'ArrowUp').");
-        }
-        return absl::OkStatus();
-    case KeyEvent::kAndroidKeycode:
-        if (android_keycode_to_evdev(key.android_keycode()) == 0) {
-            return absl::InvalidArgumentError(absl::StrFormat(
-                    "Invalid KeyEvent.android_keycode '%d': must be a supported Android "
-                    "system keycode (3=HOME, 4=BACK, 24=VOLUME_UP, 25=VOLUME_DOWN, 26=POWER, "
-                    "27=CAMERA, 82=MENU, 84=SEARCH, 187=APP_SWITCH). Use KeyEvent.dom_code "
-                    "(e.g., 'KeyA') or KeyEvent.evdev_code for general keyboard keys.",
-                    key.android_keycode()));
-        }
-        return absl::OkStatus();
-    case KeyEvent::kEvdevCode:
-        if (key.evdev_code() <= 0) {
-            return absl::InvalidArgumentError(absl::StrFormat(
-                    "Invalid KeyEvent.evdev_code '%d': must be a positive Linux evdev KEY_* "
-                    "code (e.g., 30 for KEY_A, 116 for KEY_POWER).",
-                    key.evdev_code()));
-        }
-        return absl::OkStatus();
-    case KeyEvent::KEY_IDENTIFIER_NOT_SET:
-        break;
-    }
-    return absl::InvalidArgumentError(
-            "Missing KeyEvent.key_identifier: set one of 'dom_code' (e.g., 'KeyA'), "
-            "'android_keycode' (e.g., 3 for HOME), or 'evdev_code' (e.g., 30 for KEY_A).");
-}
-
 }  // namespace
 
 InputServiceImpl::InputServiceImpl(std::shared_ptr<IInputDispatcher> dispatcher,
                                    IMultiDisplay& multi_display, Options options)
         : dispatcher_(std::move(dispatcher))
-        , multi_display_(multi_display)
-        , options_(std::move(options)) {
+        , options_(std::move(options))
+        , validator_(multi_display,
+                     V2InputValidator::Options{.hw_sensor_hinge = options_.hw_sensor_hinge,
+                                               .hw_keyboard = options_.hw_keyboard,
+                                               .hw_rotary_input = options_.hw_rotary_input,
+                                               .max_touch_points = options_.max_touch_points}) {
     DCHECK(dispatcher_ != nullptr);
 }
 
@@ -321,117 +284,7 @@ int32_t InputServiceImpl::DeriveSourceIdFromClientId(absl::string_view client_id
 }
 
 absl::Status InputServiceImpl::ValidateInputEvent(const InputEvent& event) const {
-    if (event.timestamp_nanos() < 0) {
-        return absl::InvalidArgumentError(absl::StrFormat(
-                "Invalid InputEvent.timestamp_nanos '%d': must be >= 0 (or omit timestamp_nanos "
-                "for immediate dispatch).",
-                event.timestamp_nanos()));
-    }
-
-    switch (event.event_case()) {
-    case InputEvent::kPointer:
-        return ValidatePointerEvent(event.pointer());
-    case InputEvent::kKey:
-        if (!options_.hw_keyboard) {
-            return absl::FailedPreconditionError(
-                    "Cannot dispatch KeyEvent: hardware keyboard support (hw.keyboard) is disabled "
-                    "on this device. Enable hw.keyboard in the device hardware configuration or "
-                    "check that CapabilitiesService reports INPUT_FEATURE_KEYBOARD.");
-        }
-        return ValidateKeyIdentifier(event.key());
-    case InputEvent::kAxis: {
-        const auto& axis = event.axis();
-        if (axis.axis() == AxisType::AXIS_TYPE_UNSPECIFIED) {
-            return absl::InvalidArgumentError(
-                    "Invalid AxisEvent.axis 'AXIS_TYPE_UNSPECIFIED': must specify a valid "
-                    "AxisType such as 'AXIS_TYPE_ROTARY_ENCODER'.");
-        }
-        if (!std::isfinite(axis.value())) {
-            return absl::InvalidArgumentError(absl::StrFormat(
-                    "Invalid AxisEvent.value '%g': must be a finite number.", axis.value()));
-        }
-        if (axis.axis() == AxisType::AXIS_TYPE_ROTARY_ENCODER && !options_.hw_rotary_input) {
-            return absl::FailedPreconditionError(
-                    "Cannot dispatch AxisEvent for 'AXIS_TYPE_ROTARY_ENCODER': rotary encoder "
-                    "input (hw.rotaryInput) is disabled on this device. Enable hw.rotaryInput in "
-                    "the device hardware configuration or check that CapabilitiesService reports "
-                    "INPUT_FEATURE_ROTARY_ENCODER.");
-        }
-        return absl::OkStatus();
-    }
-    case InputEvent::kText:
-        if (!options_.hw_keyboard) {
-            return absl::FailedPreconditionError(
-                    "Cannot dispatch TextEvent: keyboard/IME text input (hw.keyboard) is disabled "
-                    "on this device. Enable hw.keyboard in the device hardware configuration or "
-                    "check that CapabilitiesService reports INPUT_FEATURE_KEYBOARD.");
-        }
-        return absl::OkStatus();
-    case InputEvent::EVENT_NOT_SET:
-        break;
-    }
-    return absl::InvalidArgumentError(
-            "Missing InputEvent.event payload: set one of 'pointer', 'key', 'axis', or 'text'.");
-}
-
-absl::Status InputServiceImpl::ValidatePointerEvent(const PointerEvent& pointer) const {
-    if (pointer.display_id() < 0) {
-        return absl::InvalidArgumentError(absl::StrFormat(
-                "Invalid PointerEvent.display_id '%d': must be >= 0 (use '0' for the primary "
-                "display).",
-                pointer.display_id()));
-    }
-    if (static_cast<size_t>(pointer.display_id()) >= IMultiDisplay::kMaxDisplays) {
-        return absl::InvalidArgumentError(absl::StrFormat(
-                "Cannot dispatch PointerEvent to display_id '%d': exceeds maximum supported "
-                "display_id '%d'. Specify '0' for the primary display, or query "
-                "CapabilitiesService for active secondary display IDs.",
-                pointer.display_id(), IMultiDisplay::kMaxDisplays - 1));
-    }
-    const auto display = multi_display_.GetActiveDisplay(
-            static_cast<uint32_t>(pointer.display_id()), options_.hw_sensor_hinge);
-    if (!display.ok()) {
-        return absl::InvalidArgumentError(absl::StrFormat(
-                "Cannot dispatch PointerEvent to display_id '%d': %s. Specify '0' for the primary "
-                "display, or query CapabilitiesService for active secondary display IDs.",
-                pointer.display_id(), display.status().message()));
-    }
-
-    // NaN and infinity have no evdev representation.
-    if (!std::isfinite(pointer.scroll_x()) || !std::isfinite(pointer.scroll_y())) {
-        return absl::InvalidArgumentError(absl::StrFormat(
-                "Invalid PointerEvent scroll (scroll_x='%g', scroll_y='%g'): must be finite "
-                "numbers.",
-                pointer.scroll_x(), pointer.scroll_y()));
-    }
-    const int32_t max_touch_points = std::min(options_.max_touch_points, kDefaultMaxTouchPoints);
-    for (int i = 0; i < pointer.pointers_size(); ++i) {
-        const PointerEvent::Pointer& p = pointer.pointers(i);
-        if (p.pointer_id() < 0 || p.pointer_id() >= max_touch_points) {
-            return absl::InvalidArgumentError(absl::StrFormat(
-                    "Invalid Pointer.pointer_id '%d' at pointers[%d]: must be in range [0, %d].",
-                    p.pointer_id(), i, max_touch_points - 1));
-        }
-        const std::pair<absl::string_view, float> fields[] = {
-            {"x", p.x()},
-            {"y", p.y()},
-            {"pressure", p.pressure()},
-            {"size", p.size()},
-            {"orientation_radians", p.orientation_radians()},
-            {"tilt_radians", p.tilt_radians()},
-            {"delta_x", p.delta_x()},
-            {"delta_y", p.delta_y()},
-        };
-        for (const auto& [field, value] : fields) {
-            if (!std::isfinite(value)) {
-                return absl::InvalidArgumentError(absl::StrFormat(
-                        "Invalid Pointer.%s '%g' for pointer_id '%d' at pointers[%d]: must be a "
-                        "finite number.",
-                        field, value, p.pointer_id(), i));
-            }
-        }
-    }
-    return absl::OkStatus();
+    return validator_.Validate(event);
 }
 
 absl::Status InputServiceImpl::ValidateBatchRequest(const SendInputEventsRequest& request) const {

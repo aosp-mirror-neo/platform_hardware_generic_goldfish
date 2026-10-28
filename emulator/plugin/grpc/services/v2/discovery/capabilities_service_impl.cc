@@ -140,23 +140,23 @@ void PopulatePostureCapabilities(const HardwareConfig& hw, PostureCapabilities* 
 void PopulateSensorsCapabilities(const HardwareConfig& hw, SensorsCapabilities* sensor_caps) {
     sensor_caps->set_access_mode(AccessMode::ACCESS_MODE_READ_WRITE);
     const std::pair<bool, SensorType> sensor_flags[] = {
-            {hw.hw_accelerometer, SensorType::SENSOR_TYPE_ACCELEROMETER},
-            {hw.hw_gyroscope, SensorType::SENSOR_TYPE_GYROSCOPE},
-            {hw.hw_sensors_magnetic_field, SensorType::SENSOR_TYPE_MAGNETOMETER},
-            {hw.hw_sensors_orientation, SensorType::SENSOR_TYPE_ORIENTATION},
-            {hw.hw_sensors_temperature, SensorType::SENSOR_TYPE_AMBIENT_TEMPERATURE},
-            {hw.hw_sensors_proximity, SensorType::SENSOR_TYPE_PROXIMITY},
-            {hw.hw_sensors_light, SensorType::SENSOR_TYPE_LIGHT},
-            {hw.hw_sensors_pressure, SensorType::SENSOR_TYPE_PRESSURE},
-            {hw.hw_sensors_humidity, SensorType::SENSOR_TYPE_RELATIVE_HUMIDITY},
-            {hw.hw_sensors_heart_rate, SensorType::SENSOR_TYPE_HEART_RATE},
-            {hw.hw_sensors_rgbclight, SensorType::SENSOR_TYPE_RGBC_LIGHT},
-            {hw.hw_sensors_wrist_tilt, SensorType::SENSOR_TYPE_WRIST_TILT},
-            {hw.hw_accelerometer_uncalibrated, SensorType::SENSOR_TYPE_ACCELEROMETER_UNCALIBRATED},
-            {hw.hw_sensors_gyroscope_uncalibrated, SensorType::SENSOR_TYPE_GYROSCOPE_UNCALIBRATED},
-            {hw.hw_sensors_magnetic_field_uncalibrated,
-             SensorType::SENSOR_TYPE_MAGNETOMETER_UNCALIBRATED},
-            {hw.hw_sensor_hinge, SensorType::SENSOR_TYPE_HINGE_ANGLE},
+        {hw.hw_accelerometer, SensorType::SENSOR_TYPE_ACCELEROMETER},
+        {hw.hw_gyroscope, SensorType::SENSOR_TYPE_GYROSCOPE},
+        {hw.hw_sensors_magnetic_field, SensorType::SENSOR_TYPE_MAGNETOMETER},
+        {hw.hw_sensors_orientation, SensorType::SENSOR_TYPE_ORIENTATION},
+        {hw.hw_sensors_temperature, SensorType::SENSOR_TYPE_AMBIENT_TEMPERATURE},
+        {hw.hw_sensors_proximity, SensorType::SENSOR_TYPE_PROXIMITY},
+        {hw.hw_sensors_light, SensorType::SENSOR_TYPE_LIGHT},
+        {hw.hw_sensors_pressure, SensorType::SENSOR_TYPE_PRESSURE},
+        {hw.hw_sensors_humidity, SensorType::SENSOR_TYPE_RELATIVE_HUMIDITY},
+        {hw.hw_sensors_heart_rate, SensorType::SENSOR_TYPE_HEART_RATE},
+        {hw.hw_sensors_rgbclight, SensorType::SENSOR_TYPE_RGBC_LIGHT},
+        {hw.hw_sensors_wrist_tilt, SensorType::SENSOR_TYPE_WRIST_TILT},
+        {hw.hw_accelerometer_uncalibrated, SensorType::SENSOR_TYPE_ACCELEROMETER_UNCALIBRATED},
+        {hw.hw_sensors_gyroscope_uncalibrated, SensorType::SENSOR_TYPE_GYROSCOPE_UNCALIBRATED},
+        {hw.hw_sensors_magnetic_field_uncalibrated,
+         SensorType::SENSOR_TYPE_MAGNETOMETER_UNCALIBRATED},
+        {hw.hw_sensor_hinge, SensorType::SENSOR_TYPE_HINGE_ANGLE},
     };
     for (const auto& [enabled, sensor_type] : sensor_flags) {
         if (enabled) {
@@ -180,10 +180,8 @@ void PopulateInputCapabilities(const HardwareConfig& hw, InputCapabilities* inpu
     }
     // TODO(jansene): These should align with what we tell the system image.
     // i.e. features: VirtioMouse, VirtioDualModeMouse
-    // Mouse pointer and relative mouse are intentionally not advertised yet.
-    if (hw.hw_rotaryInput) {
-        input_caps->add_supported_features(InputFeature::INPUT_FEATURE_ROTARY_ENCODER);
-    }
+    // Mouse pointer, relative mouse, and rotary encoder are intentionally not
+    // advertised until their guest sinks are wired.
 }
 
 void PopulateVmCapabilities(VmCapabilities* vm_caps) {

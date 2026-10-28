@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "android/emulation/control/keyboard/key_event_sender.h"
+#include "emulator/plugin/grpc/input/v2_input_validator.h"
 #include "goldfish/display/display.h"
 #include "goldfish/videobridge/input_sender.h"
 
@@ -69,7 +70,8 @@ using keyboard::IKeyEventSender;
 InputSenderFactory CreateInProcessInputSenderFactory(
         IMultiDisplay& multidisplay, std::shared_ptr<IKeyEventSender> key_event_sender,
         std::shared_ptr<::goldfish::grpc::v2::IInputDispatcher> input_dispatcher = nullptr,
-        ::goldfish::sensors::PhysicalModel* physical_model = nullptr);
+        ::goldfish::sensors::PhysicalModel* physical_model = nullptr,
+        ::goldfish::grpc::v2::V2InputValidator::Options v2_validator_options = {});
 
 /**
  * Instantiates the in-process WebRTC RtcServices (v1 and v2) bound to AvdUniverse.
