@@ -122,6 +122,8 @@ cc_test(
         ":audio_device",
         ":device",
         ":fake_emulator",
+        "//emulator/launcher:avd",
+        "//emulator/launcher/cmdline",
         "//emulator/libs/file",
         "//emulator/libs/status_macros:status_matcher_macros",
         "//emulator/libs/system:test-headers",

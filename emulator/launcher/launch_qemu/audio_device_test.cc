@@ -22,6 +22,7 @@
 #include <utility>
 
 #include "absl/status/status_matchers.h"
+#include "absl/strings/str_cat.h"
 
 #include "android/base/testing/test_system.h"
 #include "android/cmdline_definitions.h"
@@ -38,22 +39,17 @@ using ::testing::Eq;
 using ::testing::IsEmpty;
 using ::testing::Return;
 
-TEST(AudioDeviceTest, NoAudioFlagUsesNoneBackendWithMixingEngineOff) {
-    std::string audio_opt = "wav";
-    AndroidOptions opts{.noaudio = 1, .audio = audio_opt.data()};
-    FakeEmulator emu(std::move(opts));
-    EXPECT_CALL(emu.mock_avd(), Arch()).WillRepeatedly(Return(Avd::CpuArchitecture::kX86));
+constexpr std::string_view kMixingEngineOnSettings =
+        "out.mixing-engine=on,out.fixed-settings=on,"
+        "out.frequency=48000,out.format=s16,out.channels=2,"
+        "in.mixing-engine=on,in.fixed-settings=on,"
+        "in.frequency=48000,in.format=s16,in.channels=1";
 
-    AudioDevice dev("05.0");
-    EXPECT_OK(dev.initialize(emu.config()));
-    EXPECT_EQ(AudioDevice::getAudioBackend(emu.config().opts()), "");
-    EXPECT_THAT(dev.getQemuParameters(emu.config()),
-                ElementsAre(Eq("-audiodev"),
-                            Eq("none,id=mainaudiodev,out.mixing-engine=off,in.mixing-engine=off"),
-                            Eq("-device"), Eq("virtio-sound-pci,audiodev=mainaudiodev,addr=05.0")));
-}
+constexpr std::string_view kAudioMuxDeviceArg =
+        "goldfish-audio-mux,host-audiodev=hostaudiodev,audiodev-id=mainaudiodev";
 
 TEST(AudioDeviceTest, ExplicitAudioOptionUsesFixed48kHzS16SettingsOnX86AndArm) {
+    base::TestSystem sys("");
     std::string audio_opt = "wav";
     AndroidOptions opts{.audio = audio_opt.data()};
     FakeEmulator emu(std::move(opts));
@@ -65,34 +61,45 @@ TEST(AudioDeviceTest, ExplicitAudioOptionUsesFixed48kHzS16SettingsOnX86AndArm) {
     EXPECT_CALL(emu.mock_avd(), Arch()).WillOnce(Return(Avd::CpuArchitecture::kX86));
     EXPECT_THAT(dev.getQemuParameters(emu.config()),
                 ElementsAre(Eq("-audiodev"),
-                            Eq("wav,id=mainaudiodev,"
-                               "out.mixing-engine=on,out.fixed-settings=on,"
-                               "out.frequency=48000,out.format=s16,out.channels=2,"
-                               "in.mixing-engine=on,in.fixed-settings=on,"
-                               "in.frequency=48000,in.format=s16,in.channels=1"),
+                            Eq(absl::StrCat("wav,id=hostaudiodev,", kMixingEngineOnSettings)),
+                            Eq("-device"), Eq(kAudioMuxDeviceArg),
                             Eq("-device"), Eq("virtio-sound-pci,audiodev=mainaudiodev,addr=06.0")));
 
     EXPECT_CALL(emu.mock_avd(), Arch()).WillOnce(Return(Avd::CpuArchitecture::kArm));
     EXPECT_THAT(dev.getQemuParameters(emu.config()),
                 ElementsAre(Eq("-audiodev"),
-                            Eq("wav,id=mainaudiodev,"
-                               "out.mixing-engine=on,out.fixed-settings=on,"
-                               "out.frequency=48000,out.format=s16,out.channels=2,"
-                               "in.mixing-engine=on,in.fixed-settings=on,"
-                               "in.frequency=48000,in.format=s16,in.channels=1"),
+                            Eq(absl::StrCat("wav,id=hostaudiodev,", kMixingEngineOnSettings)),
+                            Eq("-device"), Eq(kAudioMuxDeviceArg),
                             Eq("-device"), Eq("virtio-sound-pci,audiodev=mainaudiodev,addr=06.0")));
 }
 
-TEST(AudioDeviceTest, UnsupportedArchitectureReturnsEmptyParameters) {
+TEST(AudioDeviceTest, NoAudioFlagUsesNoneBackendWithMixingEngineOff) {
+    base::TestSystem sys("");
     std::string audio_opt = "wav";
-    AndroidOptions opts{.audio = audio_opt.data()};
+    AndroidOptions opts{.noaudio = 1, .audio = audio_opt.data()};
     FakeEmulator emu(std::move(opts));
+    EXPECT_CALL(emu.mock_avd(), Arch()).WillRepeatedly(Return(Avd::CpuArchitecture::kX86));
 
-    AudioDevice dev("06.0");
-    EXPECT_CALL(emu.mock_avd(), Arch()).WillOnce(Return(Avd::CpuArchitecture::kRiscV));
+    AudioDevice dev("05.0");
+    EXPECT_OK(dev.initialize(emu.config()));
+    EXPECT_EQ(AudioDevice::getAudioBackend(emu.config().opts()), "");
+    EXPECT_THAT(dev.getQemuParameters(emu.config()),
+                ElementsAre(Eq("-audiodev"),
+                            Eq("none,id=hostaudiodev,out.mixing-engine=off,in.mixing-engine=off"),
+                            Eq("-device"), Eq(kAudioMuxDeviceArg),
+                            Eq("-device"), Eq("virtio-sound-pci,audiodev=mainaudiodev,addr=05.0")));
+}
+
+TEST(AudioDeviceTest, UnsupportedArchReturnsEmptyParameters) {
+    base::TestSystem sys("");
+    FakeEmulator emu;
+    EXPECT_CALL(emu.mock_avd(), Arch()).WillRepeatedly(Return(Avd::CpuArchitecture::kRiscV));
+
+    AudioDevice dev("09.0");
+    EXPECT_OK(dev.initialize(emu.config()));
     EXPECT_THAT(dev.getQemuParameters(emu.config()), IsEmpty());
 
-    EXPECT_CALL(emu.mock_avd(), Arch()).WillOnce(Return(Avd::CpuArchitecture::kUnknown));
+    EXPECT_CALL(emu.mock_avd(), Arch()).WillRepeatedly(Return(Avd::CpuArchitecture::kUnknown));
     EXPECT_THAT(dev.getQemuParameters(emu.config()), IsEmpty());
 }
 
@@ -119,6 +126,28 @@ TEST(AudioDeviceTest, DetectHostAudioBackendPlatformBehavior) {
     EXPECT_OK(base::file::rm_recursive(unicode_runtime));
 #endif
 }
+
+#ifdef __linux__
+TEST(AudioDeviceTest, DetectsPulseAudioInNonAsciiRuntimeDirectory) {
+    base::TestSystem sys("");
+    const std::filesystem::path runtime_dir = sys.GetTempRoot()->Path() / "测试_🚀_é_xdg";
+    const std::filesystem::path pulse_pid = runtime_dir / "pulse" / "pid";
+    ASSERT_OK(base::file::mkdir_recursive(pulse_pid.parent_path(), 0755));
+    ASSERT_OK(base::file::touch(pulse_pid));
+    sys.EnvSet("XDG_RUNTIME_DIR", runtime_dir.string());
+
+    FakeEmulator emu;
+    EXPECT_CALL(emu.mock_avd(), Arch()).WillRepeatedly(Return(Avd::CpuArchitecture::kX86));
+
+    AudioDevice dev("09.0");
+    EXPECT_OK(dev.initialize(emu.config()));
+    EXPECT_THAT(dev.getQemuParameters(emu.config()),
+                ElementsAre(Eq("-audiodev"),
+                            Eq(absl::StrCat("pa,id=hostaudiodev,", kMixingEngineOnSettings)),
+                            Eq("-device"), Eq(kAudioMuxDeviceArg), Eq("-device"),
+                            Eq("virtio-sound-pci,audiodev=mainaudiodev,addr=09.0")));
+}
+#endif
 
 }  // namespace
 }  // namespace android::goldfish::test

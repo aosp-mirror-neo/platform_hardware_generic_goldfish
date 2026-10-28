@@ -38,7 +38,7 @@ absl::Status AudioDevice::initialize(const EmulatorConfig& emulator) {
 
 std::vector<std::string> AudioDevice::getQemuParameters(const EmulatorConfig& emulator) const {
     using namespace std::literals;
-    const std::string_view kID = "id=mainaudiodev"sv;
+    const std::string_view kHostId = "id=hostaudiodev"sv;
 
     std::string audioBackend = getAudioBackend(emulator.opts());
     std::string_view audioSettings;
@@ -57,10 +57,9 @@ std::vector<std::string> AudioDevice::getQemuParameters(const EmulatorConfig& em
     case Avd::CpuArchitecture::kArm:
     case Avd::CpuArchitecture::kX86:
         return {
-            "-audiodev"s,
-            absl::StrFormat("%s,%s,%s", audioBackend, kID, audioSettings),
-            "-device"s,
-            absl::StrCat("virtio-sound-pci,audiodev=mainaudiodev,addr="sv, addr()),
+            "-audiodev"s, absl::StrFormat("%s,%s,%s", audioBackend, kHostId, audioSettings),
+            "-device"s,   "goldfish-audio-mux,host-audiodev=hostaudiodev,audiodev-id=mainaudiodev"s,
+            "-device"s,   absl::StrCat("virtio-sound-pci,audiodev=mainaudiodev,addr="sv, addr()),
         };
 
     case Avd::CpuArchitecture::kRiscV:
