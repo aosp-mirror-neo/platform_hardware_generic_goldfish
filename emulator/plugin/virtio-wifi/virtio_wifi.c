@@ -30,6 +30,8 @@
 // IWYU pragma: end_keep
 // clang-format on
 
+// NOLINTBEGIN(readability-identifier-naming)
+
 #define __packed
 typedef int8_t s8;
 typedef uint8_t u8;
@@ -79,14 +81,6 @@ struct VirtIOWifi {
 
 #define TYPE_VIRTIO_WIFI "virtio-wifi-device"
 DECLARE_INSTANCE_CHECKER(VirtIOWifi, VIRTIO_WIFI, TYPE_VIRTIO_WIFI);
-
-static VMStateField virtio_wifi_vmstate_fields[2];
-static const VMStateDescription virtio_wifi_vmstate = {
-    .name = TYPE_VIRTIO_WIFI,
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .fields = virtio_wifi_vmstate_fields,
-};
 
 static bool virtio_wifi_started(VirtIOWifi* wifi, uint8_t status) {
     VirtIODevice* vdev = VIRTIO_DEVICE(wifi);
@@ -159,6 +153,56 @@ static void virtio_wifi_nic_link_status_changed(NetClientState* nc) {
 
     virtio_wifi_set_status(vdev, vdev->status);
 }
+
+static int virtio_wifi_post_load(void* opaque, int version_id) {
+    (void)version_id;
+    VirtIOWifi* wifi = VIRTIO_WIFI(opaque);
+    VirtIODevice* vdev = VIRTIO_DEVICE(wifi);
+
+    for (size_t i = 0; i < kQueueSize; i++) {
+        VirtIOWifiQueue* q = &wifi->vqs[i];
+        qemu_bh_cancel(q->tx_bh);
+        q->tx_waiting = 0;
+        if (q->async_tx.elem) {
+            g_free(q->async_tx.elem);
+            q->async_tx.elem = NULL;
+        }
+        if (virtio_queue_ready(q->tx)) {
+            virtio_wifi_drop_tx_queue_data(vdev, q);
+            virtio_queue_set_notification(q->tx, 1);
+        }
+        if (virtio_queue_ready(q->rx)) {
+            virtio_queue_set_notification(q->rx, 1);
+        }
+    }
+
+    NetClientState* nc = qemu_get_queue(wifi->nic);
+    bool backend_link_up = (nc == NULL || !nc->link_down) &&
+                           (nc == NULL || nc->peer == NULL || !nc->peer->link_down);
+
+    if (wifi->status & VIRTIO_WIFI_LINK_UP) {
+        wifi->status &= ~VIRTIO_WIFI_LINK_UP;
+        virtio_notify_config(vdev);
+        virtio_wifi_set_status(vdev, vdev->status);
+    }
+
+    if (backend_link_up) {
+        wifi->status |= VIRTIO_WIFI_LINK_UP;
+        virtio_notify_config(vdev);
+        virtio_wifi_set_status(vdev, vdev->status);
+    }
+
+    return 0;
+}
+
+static VMStateField virtio_wifi_vmstate_fields[2];
+static const VMStateDescription virtio_wifi_vmstate = {
+    .name = TYPE_VIRTIO_WIFI,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = virtio_wifi_post_load,
+    .fields = virtio_wifi_vmstate_fields,
+};
 
 static bool virtio_wifi_nic_can_rx(NetClientState* nc) {
     VirtIOWifi* wifi = qemu_get_nic_opaque(nc);
@@ -424,7 +468,6 @@ static void virtio_wifi_device_realize(DeviceState* dev, Error** errp) {
     qemu_format_nic_info_str(qemu_get_queue(wifi->nic), wifi->nic_conf.macaddr.a);
 
     wifi->tx_burst = kTXBurst;
-
 }
 
 static void virtio_wifi_device_unrealize(DeviceState* dev) {
@@ -653,3 +696,5 @@ void virtio_wifi_register_types(void) {
     type_register_static(&virtio_wifi_info);
     virtio_pci_types_register(&virtio_wifi_pci_info);
 }
+
+// NOLINTEND(readability-identifier-naming)
