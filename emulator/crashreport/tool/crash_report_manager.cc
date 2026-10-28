@@ -30,16 +30,22 @@ namespace crashreport {
 bool CrashReportManager::Initialize() {
     if (mDb) return true;  // Already initialized
 
-    auto database_path = android::crashreport::CrashSystem::databaseDirectory();
+    auto database_path = android::crashreport::CrashSystem::ensureDatabaseDirectory(
+            android::crashreport::CrashSystem::databaseDirectory());
+    if (!database_path.ok()) {
+        LOG(ERROR) << "Failed to prepare crash database directory: " << database_path.status();
+        return false;
+    }
     for (int i = 0; !mDb && i < 5; i++) {
-        mDb = crashpad::CrashReportDatabase::Initialize(::base::FilePath(database_path));
+        mDb = crashpad::CrashReportDatabase::Initialize(::base::FilePath(*database_path));
         if (!mDb) {
             LOG(ERROR) << "Failed to initialize crash database, retrying in 1 second...";
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     }
     if (!mDb) {
-        LOG(ERROR) << "Failed to initialize crash database after multiple retries.";
+        LOG(ERROR) << "Failed to initialize crash database " << database_path->string()
+                   << " after multiple retries.";
         return false;
     }
     return true;

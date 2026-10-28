@@ -20,6 +20,8 @@
 #include <thread>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 
 #include "android/base/system.h"
@@ -31,6 +33,7 @@
 #include "client/crashpad_client.h"
 #include "client/crashpad_info.h"
 #include "client/settings.h"
+#include "goldfish/file/file.h"
 #include "goldfish/tools/aemu_version.h"
 #include "util/misc/uuid.h"
 
@@ -54,23 +57,27 @@ class CrashSystemImpl : public CrashSystem {
 
     bool active() const override { return initialized_; }
 
-    bool initialize() override {
+    absl::Status initialize() override {
         if (initialized_) {
-            LOG(INFO) << "Crash reporter already initialized";
-            return false;
+            return absl::FailedPreconditionError("Crash reporting is already initialized.");
         }
 
         if (!System::Get()->GetEnableCrashReporting()) {
-            LOG(INFO) << "Crashreporting disabled, not reporting crashes.";
-            return false;
+            LOG(INFO) << "Crash reporting is disabled, not reporting crashes.";
+            return absl::OkStatus();
         }
 
         auto handler_path = handlerExe();
         if (handler_path.empty()) {
-            LOG(WARNING) << "Crash handler not found, crash reporting disabled.";
-            return false;
+            return absl::NotFoundError(
+                    "Crash handler not found. Set AEMU_CRASHPAD_HANDLER to the crashpad_handler "
+                    "executable.");
         }
-        database_path_ = databaseDirectory();
+        auto database_path = ensureDatabaseDirectory(databaseDirectory());
+        if (!database_path.ok()) {
+            return database_path.status();
+        }
+        database_path_ = *std::move(database_path);
         auto metrics_path = ::base::FilePath();
         auto annotations = std::map<std::string, std::string>{
             {"prod", "AndroidEmulator"},
@@ -103,7 +110,20 @@ class CrashSystemImpl : public CrashSystem {
         }
 
         VLOG(1) << "Using database: " << database_path_;
-        return initialized_;
+        // StartHandler() and CrashReportDatabase::Initialize() do not say why they failed.
+        if (!active) {
+            return absl::UnknownError(absl::StrCat(
+                    "crashpad_handler '", handler_path.string(),
+                    "' did not start for crash report database '", database_path_.string(),
+                    "'. Verify that the executable exists, has execute permissions, and its "
+                    "dependencies can be resolved."));
+        }
+        if (!database_) {
+            return absl::UnknownError(absl::StrCat(
+                    "Cannot open crash report database '", database_path_.string(),
+                    "'. Check directory permissions and remove any stale database lock files."));
+        }
+        return absl::OkStatus();
     }
 
     void uploadEntries(const Consent consent) override {
@@ -204,13 +224,43 @@ class CrashSystemImpl : public CrashSystem {
 };
 
 const constexpr std::string_view kCrashpadDatabase = "emu-dev-crash-" VERSION ".db";
+constexpr char kDatabaseEnvVar[] = "ANDROID_EMU_CRASH_REPORTING_DATABASE";
+// Owner-only, because minidumps contain process memory.
+constexpr unsigned kDatabaseDirectoryMode = 0700;
 
 fs::path CrashSystem::databaseDirectory() {
-    if (auto database_directory = System::Get()->EnvGet("ANDROID_EMU_CRASH_REPORTING_DATABASE");
+    if (auto database_directory = System::Get()->EnvGet(kDatabaseEnvVar);
         !database_directory.empty()) {
         return {database_directory};
     }
     return System::Get()->GetTempDir() / kCrashpadDatabase;
+}
+
+absl::StatusOr<fs::path> CrashSystem::ensureDatabaseDirectory(const fs::path& database_path) {
+    namespace file = android::base::file;
+    // mkdir_recursive() does not create the first component of a relative path.
+    auto absolute_path = file::make_absolute(database_path);
+    if (!absolute_path.ok()) {
+        return absl::Status(
+                absolute_path.status().code(),
+                absl::StrCat("Cannot resolve crash report database path '", database_path.string(),
+                             "': ", absolute_path.status().message()));
+    }
+    const absl::Status created = file::mkdir_recursive(*absolute_path, kDatabaseDirectoryMode);
+    // Checked even if mkdir_recursive() failed, in case another emulator created it first.
+    if (file::is_dir(*absolute_path)) {
+        return *std::move(absolute_path);
+    }
+    if (!created.ok()) {
+        return absl::Status(created.code(),
+                            absl::StrCat("Cannot create crash report database directory '",
+                                         absolute_path->string(), "': ", created.message(),
+                                         ". Set ", kDatabaseEnvVar, " to a writable directory."));
+    }
+    return absl::FailedPreconditionError(
+            absl::StrCat("Crash report database path '", absolute_path->string(),
+                         "' exists but is not a directory. Remove it or set ", kDatabaseEnvVar,
+                         " to a directory."));
 }
 
 fs::path CrashSystem::handlerExe() {
