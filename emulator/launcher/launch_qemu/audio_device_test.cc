@@ -34,6 +34,7 @@
 namespace android::goldfish::test {
 namespace {
 
+using ::testing::Contains;
 using ::testing::ElementsAre;
 using ::testing::Eq;
 using ::testing::IsEmpty;
@@ -88,6 +89,20 @@ TEST(AudioDeviceTest, NoAudioFlagUsesNoneBackendWithMixingEngineOff) {
                             Eq("none,id=hostaudiodev,out.mixing-engine=off,in.mixing-engine=off"),
                             Eq("-device"), Eq(kAudioMuxDeviceArg),
                             Eq("-device"), Eq("virtio-sound-pci,audiodev=mainaudiodev,addr=05.0")));
+}
+
+TEST(AudioDeviceTest, HostMicrophoneStaysOffUnlessAllowHostAudioIsSet) {
+    base::TestSystem sys("");
+    AndroidOptions opts{.allow_host_audio = 1};
+    FakeEmulator emu(std::move(opts));
+    EXPECT_CALL(emu.mock_avd(), Arch()).WillRepeatedly(Return(Avd::CpuArchitecture::kX86));
+
+    // Without the flag the mux device gets no allow-host-audio=on (the other tests pin that
+    // exact argument), so its "host" input starts muted.
+    AudioDevice dev("09.0");
+    EXPECT_OK(dev.initialize(emu.config()));
+    EXPECT_THAT(dev.getQemuParameters(emu.config()),
+                Contains(Eq(absl::StrCat(kAudioMuxDeviceArg, ",allow-host-audio=on"))));
 }
 
 TEST(AudioDeviceTest, UnsupportedArchReturnsEmptyParameters) {

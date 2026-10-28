@@ -570,6 +570,8 @@ const TypeInfo goldfish_audio_backend_type_info = {
 struct GoldfishAudioMuxConfig {
     std::string host_audiodev = kDefaultHostAudiodevId;
     std::string audiodev_id = kDefaultMainAudiodevId;
+    // The host microphone reaches the guest only when the user opts in (-allow-host-audio).
+    bool allow_host_audio = false;
 };
 
 struct GoldfishAudioMuxDev {
@@ -602,6 +604,14 @@ void mux_set_audiodev_id(Object* obj, const char* value, Error** /*errp*/) {
     if (value) {
         dev->config->audiodev_id = value;
     }
+}
+
+bool mux_get_allow_host_audio(Object* obj, Error** /*errp*/) {
+    return GOLDFISH_AUDIO_MUX_DEV(obj)->config->allow_host_audio;
+}
+
+void mux_set_allow_host_audio(Object* obj, bool value, Error** /*errp*/) {
+    GOLDFISH_AUDIO_MUX_DEV(obj)->config->allow_host_audio = value;
 }
 
 void goldfish_audio_mux_dev_instance_init(Object* obj) {
@@ -662,6 +672,14 @@ void goldfish_audio_mux_dev_realize(DeviceState* qdev, Error** errp) {
                                                  runstate_get() == RUN_STATE_RUNNING);
     state->vm_state_entry =
             qemu_add_vm_change_state_handler(&goldfish_audio_backend_on_vm_state, state);
+    if (!dev->config->allow_host_audio) {
+        // Start with the "host" input muted. Injection still works, and clients may unmute the
+        // host microphone at runtime through the mixer state.
+        (void)state->mux->UpdateState(AudioInputStateMutation{
+            .input_updates = {MicrophoneInputChannelUpdate{
+                .source_id = std::string(kHostMicrophoneSourceId), .muted = true}},
+        });
+    }
 
     RegisterAudioInputMux(AUDIO_BACKEND(mux_be), state->mux);
 
@@ -686,6 +704,13 @@ void goldfish_audio_mux_dev_class_init(ObjectClass* oc, const void* /*data*/) {
     object_class_property_add_str(oc, "audiodev-id", mux_get_audiodev_id, mux_set_audiodev_id);
     object_class_property_set_description(oc, "audiodev-id",
                                           "ID under /audiodevs exposed to guest audio devices.");
+
+    object_class_property_add_bool(oc, "allow-host-audio", mux_get_allow_host_audio,
+                                   mux_set_allow_host_audio);
+    object_class_property_set_description(
+            oc, "allow-host-audio",
+            "Pass the host microphone to the guest. When off (default), the \"host\" mixer input "
+            "starts muted.");
 
     DeviceClass* dc = DEVICE_CLASS(oc);
     dc->realize = goldfish_audio_mux_dev_realize;

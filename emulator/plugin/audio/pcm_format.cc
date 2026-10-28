@@ -140,4 +140,86 @@ void FillGuestSilence(GuestPcmFormat format, bool big_endian, void* dst, size_t 
     }
 }
 
+void ScaleGuestPcmBuffer(GuestPcmFormat format, bool big_endian, float gain, void* buffer,
+                         size_t byte_count) {
+    if (byte_count == 0 || buffer == nullptr || gain == 1.0F) {
+        return;
+    }
+    if (!std::isfinite(gain) || gain <= 0.0F) {
+        FillGuestSilence(format, big_endian, buffer, byte_count);
+        return;
+    }
+
+    auto* bytes = static_cast<uint8_t*>(buffer);
+    const size_t bps = BytesPerGuestSample(format);
+    const size_t sample_count = byte_count / bps;
+    const bool swap_endian = big_endian != (std::endian::native == std::endian::big);
+
+    const double gain_d = static_cast<double>(gain);
+
+    for (size_t i = 0; i < sample_count; ++i) {
+        uint8_t* sample_ptr = bytes + i * bps;
+        double decoded = 0.0;
+        switch (format) {
+        case GuestPcmFormat::kS8: {
+            int8_t s = 0;
+            std::memcpy(&s, sample_ptr, sizeof(s));
+            decoded = static_cast<double>(s) * (1.0 / 128.0);
+            break;
+        }
+        case GuestPcmFormat::kU8: {
+            decoded = static_cast<double>(static_cast<int>(*sample_ptr) - 128) * (1.0 / 128.0);
+            break;
+        }
+        case GuestPcmFormat::kS16: {
+            uint16_t raw = 0;
+            std::memcpy(&raw, sample_ptr, sizeof(raw));
+            if (swap_endian) {
+                raw = std::byteswap(raw);
+            }
+            decoded = static_cast<double>(std::bit_cast<int16_t>(raw)) * (1.0 / 32768.0);
+            break;
+        }
+        case GuestPcmFormat::kU16: {
+            uint16_t raw = 0;
+            std::memcpy(&raw, sample_ptr, sizeof(raw));
+            if (swap_endian) {
+                raw = std::byteswap(raw);
+            }
+            decoded = static_cast<double>(static_cast<int32_t>(raw) - 32768) * (1.0 / 32768.0);
+            break;
+        }
+        case GuestPcmFormat::kS32: {
+            uint32_t raw = 0;
+            std::memcpy(&raw, sample_ptr, sizeof(raw));
+            if (swap_endian) {
+                raw = std::byteswap(raw);
+            }
+            decoded = static_cast<double>(std::bit_cast<int32_t>(raw)) * (1.0 / 2147483648.0);
+            break;
+        }
+        case GuestPcmFormat::kU32: {
+            uint32_t raw = 0;
+            std::memcpy(&raw, sample_ptr, sizeof(raw));
+            if (swap_endian) {
+                raw = std::byteswap(raw);
+            }
+            decoded = (static_cast<double>(raw) - 2147483648.0) * (1.0 / 2147483648.0);
+            break;
+        }
+        case GuestPcmFormat::kF32: {
+            uint32_t raw = 0;
+            std::memcpy(&raw, sample_ptr, sizeof(raw));
+            if (swap_endian) {
+                raw = std::byteswap(raw);
+            }
+            const float f = std::bit_cast<float>(raw);
+            decoded = std::isnan(f) ? 0.0 : static_cast<double>(f);
+            break;
+        }
+        }
+        EncodeGuestSample(format, swap_endian, decoded * gain_d, sample_ptr);
+    }
+}
+
 }  // namespace goldfish::audio

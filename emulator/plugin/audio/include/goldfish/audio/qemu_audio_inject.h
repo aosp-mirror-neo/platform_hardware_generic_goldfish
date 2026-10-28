@@ -16,9 +16,12 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <string_view>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 
 #include "goldfish/audio/pcm_format.h"
@@ -30,15 +33,17 @@ typedef struct AudioBackend AudioBackend;
 namespace goldfish::audio {
 
 class AudioInputMux;
+struct AudioInputStateMutation;
+struct AudioInputStateSnapshot;
 
 /**
  * Injects external PCM microphone audio into QEMU's `AudioBackend` via pull callbacks.
  *
- * @note **Threading Model:** `Start()` and `Stop()` take the QEMU BQL, so they are serialized with
- * each other and with guest audio reads. `ReadCallback` is invoked synchronously on QEMU's
- * main-loop / vCPU thread while holding the BQL. Callbacks must not perform blocking I/O, heavy CPU
- * work, wait on anything that needs the BQL, or call `Start()` / `Stop()` on their owning
- * `QemuAudioInject` instance.
+ * @note **Threading Model:** `Start()`, `Reconfigure()`, and `Stop()` take the QEMU BQL, so they
+ * are serialized with each other and with guest audio reads. `ReadCallback` is invoked
+ * synchronously on QEMU's main-loop / vCPU thread while holding the BQL. Callbacks must not
+ * perform blocking I/O, heavy CPU work, wait on anything that needs the BQL, or call
+ * `Start()` / `Stop()` on their owning `QemuAudioInject` instance.
  */
 class QemuAudioInject {
   public:
@@ -68,9 +73,11 @@ class QemuAudioInject {
      * format as needed).
      * @param active_cb Optional notification callback for guest capture stream state changes.
      * @param audio_backend Optional explicit QEMU `AudioBackend`; defaults to `"mainaudiodev"`.
+     * @param metadata Optional virtual microphone mixer `source_id` and `kind`.
      */
     QemuAudioInject(ReadCallback read_cb, AudioStreamConfig config,
-                    ActiveCallback active_cb = nullptr, AudioBackend* audio_backend = nullptr);
+                    ActiveCallback active_cb = nullptr, AudioBackend* audio_backend = nullptr,
+                    MicrophoneSourceMetadata metadata = {});
     ~QemuAudioInject();
 
     QemuAudioInject(const QemuAudioInject&) = delete;
@@ -82,12 +89,20 @@ class QemuAudioInject {
      * @return
      * - `absl::OkStatus()` when registered (or idempotent no-op if `this` is already running).
      * - `absl::InvalidArgumentError` if `config()` has invalid parameters (`sample_rate_hz == 0`,
-     *   `channels == 0` or `> 16`), or `read_cb` is empty.
+     *   `channels == 0` or `> 16`), `metadata().source_id == "host"`, or `read_cb` is empty.
      * - `absl::UnavailableError` if no `goldfish-audio-mux` is configured (e.g., RISC-V AVDs).
      * - `absl::FailedPreconditionError` if the target `GoldfishAudioBackend` has already shut down.
      * - `absl::AlreadyExistsError` if another `QemuAudioInject` instance currently owns the mic.
      */
     absl::Status Start() ABSL_LOCKS_EXCLUDED(mutex_);
+
+    /**
+     * Updates the PCM stream configuration (and optionally renames its mixer `source_id`) in-place.
+     * Mute and gain are preserved. When not running, the values are stored for the next `Start()`.
+     */
+    absl::Status Reconfigure(AudioStreamConfig new_config,
+                             std::optional<std::string_view> new_source_id = std::nullopt)
+            ABSL_LOCKS_EXCLUDED(mutex_);
 
     /**
      * Unregisters this injector and restores the host microphone (if guest capture is active).
@@ -103,18 +118,37 @@ class QemuAudioInject {
     /**
      * Returns the configured input stream format.
      */
-    const AudioStreamConfig& config() const { return config_; }
+    AudioStreamConfig config() const ABSL_LOCKS_EXCLUDED(mutex_);
+
+    /**
+     * Returns the mixer channel metadata, including the `source_id` assigned by `Start()`.
+     */
+    MicrophoneSourceMetadata metadata() const ABSL_LOCKS_EXCLUDED(mutex_);
 
   private:
     const ReadCallback read_cb_;
-    const AudioStreamConfig config_;
     const ActiveCallback active_cb_;
     AudioBackend* const explicit_backend_;
 
-    // Lets IsRunning() run on any thread. mux_ only changes under the BQL, and mutex_ is never held
-    // while calling into the mux, so mux callbacks may call IsRunning() or Stop().
+    // Lets the getters run on any thread. Fields only change under the BQL, and mutex_ is never
+    // held while calling into the mux, so mux callbacks may call the getters or Stop().
     mutable absl::Mutex mutex_;
+    AudioStreamConfig config_ ABSL_GUARDED_BY(mutex_);
+    MicrophoneSourceMetadata metadata_ ABSL_GUARDED_BY(mutex_);
     std::shared_ptr<AudioInputMux> mux_ ABSL_GUARDED_BY(mutex_);  // Non-null while running.
 };
+
+/**
+ * Resolves the shared `AudioInputMux` bound to @p explicit_backend (or QEMU's `"mainaudiodev"` /
+ * default `AudioBackend` when @p explicit_backend is null). Returns `nullptr` if no
+ * `GoldfishAudioBackend` is registered.
+ */
+std::shared_ptr<AudioInputMux> ResolveTargetAudioInputMux(AudioBackend* explicit_backend = nullptr);
+
+/**
+ * Applies @p mutation to @p mux while holding the QEMU BQL (`RecursiveScopedVmLock`).
+ */
+absl::StatusOr<AudioInputStateSnapshot> UpdateAudioInputMuxState(
+        AudioInputMux& mux, const AudioInputStateMutation& mutation);
 
 }  // namespace goldfish::audio

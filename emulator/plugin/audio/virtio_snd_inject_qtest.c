@@ -234,8 +234,8 @@ static bool period_matches_injected(const int16_t* samples) {
     return true;
 }
 
-static void virtio_snd_test_init(VirtioSndTestCtx* ctx) {
-    ctx->qts = qtest_init(
+static void virtio_snd_test_init_with_mux_opts(VirtioSndTestCtx* ctx, const char* mux_opts) {
+    ctx->qts = qtest_initf(
             "-M pc -nodefaults "
             "-audiodev none,id=hostaudiodev,"
             "out.mixing-engine=on,out.fixed-settings=on,"
@@ -243,9 +243,10 @@ static void virtio_snd_test_init(VirtioSndTestCtx* ctx) {
             "in.mixing-engine=on,in.fixed-settings=on,"
             "in.frequency=48000,in.format=s16,in.channels=1 "
             "-device goldfish-audio-mux,"
-            "host-audiodev=hostaudiodev,audiodev-id=mainaudiodev "
+            "host-audiodev=hostaudiodev,audiodev-id=mainaudiodev%s "
             "-device virtio-sound-pci,audiodev=mainaudiodev,addr=09.0 "
-            "-device goldfish-audio-inject-test-ctrl,id=injctrl");
+            "-device goldfish-audio-inject-test-ctrl,id=injctrl",
+            mux_opts);
 
     pc_alloc_init(&ctx->alloc, ctx->qts, ALLOC_NO_FLAGS);
     ctx->pcibus = qpci_new_pc(ctx->qts, &ctx->alloc);
@@ -267,6 +268,10 @@ static void virtio_snd_test_init(VirtioSndTestCtx* ctx) {
     ctx->txq = qvirtqueue_setup(&ctx->vpci->vdev, &ctx->alloc, VIRTIO_SND_VQ_TX);
     ctx->rxq = qvirtqueue_setup(&ctx->vpci->vdev, &ctx->alloc, VIRTIO_SND_VQ_RX);
     qvirtio_set_driver_ok(&ctx->vpci->vdev);
+}
+
+static void virtio_snd_test_init(VirtioSndTestCtx* ctx) {
+    virtio_snd_test_init_with_mux_opts(ctx, "");
 }
 
 static void virtio_snd_test_teardown(VirtioSndTestCtx* ctx) {
@@ -418,6 +423,20 @@ static void test_early_start_before_guest_prepare(void) {
     virtio_snd_test_teardown(&ctx);
 }
 
+static void test_host_mic_off_by_default(void) {
+    VirtioSndTestCtx ctx = {0};
+    virtio_snd_test_init(&ctx);
+    g_assert_true(qom_get_bool_prop(ctx.qts, "host-mic-muted"));
+    virtio_snd_test_teardown(&ctx);
+}
+
+static void test_allow_host_audio_unmutes_host_mic(void) {
+    VirtioSndTestCtx ctx = {0};
+    virtio_snd_test_init_with_mux_opts(&ctx, ",allow-host-audio=on");
+    g_assert_false(qom_get_bool_prop(ctx.qts, "host-mic-muted"));
+    virtio_snd_test_teardown(&ctx);
+}
+
 int main(int argc, char** argv) {
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("virtio-snd-inject/passthrough-playback", test_passthrough_playback);
@@ -425,5 +444,8 @@ int main(int argc, char** argv) {
                    test_takeover_resample_and_restore);
     qtest_add_func("virtio-snd-inject/early-start-before-guest-prepare",
                    test_early_start_before_guest_prepare);
+    qtest_add_func("virtio-snd-inject/host-mic-off-by-default", test_host_mic_off_by_default);
+    qtest_add_func("virtio-snd-inject/allow-host-audio-unmutes-host-mic",
+                   test_allow_host_audio_unmutes_host_mic);
     return g_test_run();
 }

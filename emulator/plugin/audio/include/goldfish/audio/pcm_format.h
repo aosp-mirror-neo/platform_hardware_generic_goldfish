@@ -16,6 +16,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 namespace goldfish::audio {
 
@@ -23,6 +25,46 @@ namespace goldfish::audio {
  * Maximum interleaved audio channel count supported by QEMU's audio subsystem.
  */
 inline constexpr uint32_t kMaxAudioChannels = 16;
+
+/**
+ * Reserved mixer channel identifier for the host machine's physical microphone.
+ */
+inline constexpr std::string_view kHostMicrophoneSourceId = "host";
+
+/**
+ * Minimum and maximum allowed linear gain multiplier for a virtual microphone input channel.
+ */
+inline constexpr float kMinMicrophoneInputGain = 0.0F;
+inline constexpr float kMaxMicrophoneInputGain = 4.0F;
+
+/**
+ * Maximum number of concurrent non-host microphone streams (`QemuAudioInject`) supported by the
+ * current `AudioInputMux` implementation (`1` until multi-source summing lands).
+ */
+inline constexpr int32_t kMaxConcurrentMicrophoneStreams = 1;
+
+/**
+ * Origin classification for a virtual microphone mix-bus input channel.
+ */
+enum class MicrophoneInputKind : uint8_t {
+    kUnspecified = 0,
+    kHost = 1,
+    kGrpcClip = 2,
+    kGrpcStream = 3,
+    kWebRtc = 4,
+};
+
+/**
+ * Optional mix-bus channel identity attached to a `QemuAudioInject` session.
+ */
+struct MicrophoneSourceMetadata {
+    /// Mixer channel identifier. When empty, `AudioInputMux` assigns `"stream-<id>"`.
+    /// Passing `"host"` is rejected with `absl::InvalidArgumentError`.
+    std::string source_id;
+    MicrophoneInputKind kind = MicrophoneInputKind::kUnspecified;
+
+    bool operator==(const MicrophoneSourceMetadata&) const = default;
+};
 
 /**
  * Supported interleaved PCM sample formats for external audio injection sources.
@@ -142,9 +184,16 @@ void FillSourceSilence(SampleFormat format, void* dst, size_t byte_count);
 void FillGuestSilence(GuestPcmFormat format, bool big_endian, void* dst, size_t byte_count);
 
 /**
- * Quantizes and encodes a normalized `[-1.0, 1.0]` sample into @p dst in @p format, byte-swapping
+ * Encodes a single normalized `[-1.0, 1.0]` sample into @p dst in @p format, byte-swapping
  * multi-byte values when @p swap_endian is true.
  */
 void EncodeGuestSample(GuestPcmFormat format, bool swap_endian, double sample, uint8_t* dst);
+
+/**
+ * Scales @p byte_count PCM bytes in @p buffer in-place by @p gain with saturation clamping,
+ * honoring @p format and @p big_endian.
+ */
+void ScaleGuestPcmBuffer(GuestPcmFormat format, bool big_endian, float gain, void* buffer,
+                         size_t byte_count);
 
 }  // namespace goldfish::audio

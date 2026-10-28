@@ -21,6 +21,7 @@
 
 #include "absl/status/status.h"
 
+#include "goldfish/audio/audio_input_mux.h"
 #include "goldfish/audio/goldfish_audio_mux.h"
 #include "goldfish/audio/pcm_format.h"
 #include "goldfish/audio/qemu_audio_inject.h"
@@ -142,6 +143,11 @@ bool ctrl_get_conflict_rejected(Object* /*obj*/, Error** /*errp*/) {
     return rejected;
 }
 
+bool ctrl_get_host_mic_muted(Object* /*obj*/, Error** /*errp*/) {
+    const std::shared_ptr<AudioInputMux> mux = ResolveTargetAudioInputMux();
+    return mux == nullptr || mux->GetStateSnapshot().microphone_inputs.at(0).muted;
+}
+
 void test_ctrl_instance_init(Object* obj) {
     auto* dev = AUDIO_INJECT_TEST_CTRL_DEV(obj);
     dev->state = new TestCtrlState();
@@ -163,6 +169,7 @@ void test_ctrl_class_init(ObjectClass* oc, const void* /*data*/) {
     object_class_property_add_bool(oc, "guest-active", ctrl_get_guest_active, nullptr);
     object_class_property_add_bool(oc, "has-pulled-frames", ctrl_get_has_pulled_frames, nullptr);
     object_class_property_add_bool(oc, "conflict-rejected", ctrl_get_conflict_rejected, nullptr);
+    object_class_property_add_bool(oc, "host-mic-muted", ctrl_get_host_mic_muted, nullptr);
 }
 
 const TypeInfo test_ctrl_type_info = {

@@ -19,12 +19,14 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <thread>
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/synchronization/notification.h"
 #include "absl/time/time.h"
 
 #include "emulator/plugin/vminterface/vm_lock.h"
@@ -282,6 +284,129 @@ TEST_F(QemuAudioInjectTest, ConcurrentStartAndStopIsThreadSafe) {
     }
     inject.Stop();
     EXPECT_FALSE(inject.IsRunning());
+}
+
+TEST_F(QemuAudioInjectTest, ReconfiguresFormatAndSourceIdInPlaceWhilePreservingMixerGain) {
+    ASSERT_EQ(ResolveTargetAudioInputMux(), mux_);
+
+    QemuAudioInject reserved_host([](void*, size_t n) -> size_t { return n; }, AudioStreamConfig{},
+                                  nullptr, nullptr, MicrophoneSourceMetadata{.source_id = "host"});
+    EXPECT_EQ(reserved_host.Start().code(), absl::StatusCode::kInvalidArgument);
+
+    std::vector<int16_t> guest_captured;
+    MuxVoiceHandle* voice = nullptr;
+    voice = mux_->OpenVoice(
+            nullptr, "virtio-sound.in",
+            GuestAudioConfig{
+                .sample_rate_hz = 48000, .channels = 1, .format = GuestPcmFormat::kS16},
+            [this, &voice, &guest_captured](int avail_bytes) {
+                std::vector<int16_t> buf(static_cast<size_t>(avail_bytes) / sizeof(int16_t));
+                const size_t r = mux_->ReadVoice(voice, buf.data(), buf.size() * sizeof(int16_t));
+                buf.resize(r / sizeof(int16_t));
+                guest_captured.insert(guest_captured.end(), buf.begin(), buf.end());
+            });
+    ASSERT_NE(voice, nullptr);
+    mux_->SetVoiceActive(voice, true);
+
+    QemuAudioInject inject(
+            [](void* dst, size_t max_frames) -> size_t {
+                auto* out = static_cast<int16_t*>(dst);
+                std::fill(out, out + max_frames, static_cast<int16_t>(8000));
+                return max_frames;
+            },
+            AudioStreamConfig{.sample_rate_hz = 16000, .channels = 1, .format = SampleFormat::kS16},
+            nullptr, nullptr, MicrophoneSourceMetadata{.kind = MicrophoneInputKind::kGrpcStream});
+    ASSERT_TRUE(inject.Start().ok());
+
+    auto initial_state = mux_->GetStateSnapshot();
+    ASSERT_EQ(initial_state.microphone_inputs.size(), 2U);
+    EXPECT_EQ(initial_state.microphone_inputs[1].source_id, "stream-1");
+    EXPECT_EQ(initial_state.microphone_inputs[1].kind, MicrophoneInputKind::kGrpcStream);
+
+    // Apply 2.0x gain on "stream-1" via BQL-serialized UpdateAudioInputMuxState, then reconfigure
+    // to 48 kHz and rename to "agent_测试_🚀_é".
+    ASSERT_TRUE(UpdateAudioInputMuxState(*mux_,
+                                         AudioInputStateMutation{
+                                             .input_updates = {MicrophoneInputChannelUpdate{
+                                                 .source_id = "stream-1", .gain = 2.0F}},
+                                         })
+                        .ok());
+    ASSERT_TRUE(inject.Reconfigure(AudioStreamConfig{.sample_rate_hz = 48000,
+                                                     .channels = 1,
+                                                     .format = SampleFormat::kS16},
+                                   "agent_测试_🚀_é")
+                        .ok());
+    EXPECT_EQ(inject.config().sample_rate_hz, 48000U);
+    EXPECT_EQ(inject.metadata().source_id, "agent_测试_🚀_é");
+
+    auto after_reconfig = mux_->GetStateSnapshot();
+    ASSERT_EQ(after_reconfig.microphone_inputs.size(), 2U);
+    EXPECT_EQ(after_reconfig.microphone_inputs[1].source_id, "agent_测试_🚀_é");
+    EXPECT_FLOAT_EQ(after_reconfig.microphone_inputs[1].gain, 2.0F);
+
+    host_.AdvanceMs(10);
+    mux_->OnTimerTick();
+    ASSERT_EQ(guest_captured.size(), 480U);
+    EXPECT_NEAR(guest_captured[0], 16000, 2);
+
+    inject.Stop();
+    mux_->CloseVoice(voice);
+}
+
+TEST_F(QemuAudioInjectTest, StateObserverCanInspectAndStopInjectorReentrantlyWithoutDeadlock) {
+    QemuAudioInject inject(
+            [](void* dst, size_t max_frames) -> size_t {
+                std::memset(dst, 0, max_frames * sizeof(int16_t));
+                return max_frames;
+            },
+            AudioStreamConfig{.sample_rate_hz = 16000, .channels = 1, .format = SampleFormat::kS16},
+            nullptr, nullptr,
+            MicrophoneSourceMetadata{
+                .source_id = "initial_测试_🚀_é",
+                .kind = MicrophoneInputKind::kGrpcStream,
+            });
+
+    std::atomic<int> observer_events{0};
+    const auto obs_id = mux_->AddStateObserver([&](const AudioInputStateSnapshot& state) {
+        const int idx = observer_events.fetch_add(1, std::memory_order_relaxed);
+        const AudioStreamConfig cfg = inject.config();
+        const MicrophoneSourceMetadata meta = inject.metadata();
+        if (idx == 0) {
+            EXPECT_TRUE(inject.IsRunning());
+            EXPECT_EQ(cfg.sample_rate_hz, 16000U);
+            EXPECT_EQ(meta.source_id, "initial_测试_🚀_é");
+        } else if (idx == 1) {
+            EXPECT_TRUE(inject.IsRunning());
+            EXPECT_EQ(cfg.sample_rate_hz, 48000U);
+            EXPECT_EQ(meta.source_id, "reconfigured_测试_🚀_é");
+            // Re-entrantly stop the injector from inside the state observer callback!
+            inject.Stop();
+        } else if (idx == 2) {
+            EXPECT_FALSE(inject.IsRunning());
+            EXPECT_EQ(state.microphone_inputs.size(), 1U);
+        }
+    });
+
+    ScopedVmUnlock unlock;
+    absl::Notification done;
+    std::thread runner([&]() {
+        ASSERT_TRUE(inject.Start().ok());
+        ASSERT_TRUE(inject.Reconfigure(AudioStreamConfig{.sample_rate_hz = 48000,
+                                                         .channels = 1,
+                                                         .format = SampleFormat::kS16},
+                                       "reconfigured_测试_🚀_é")
+                            .ok());
+        EXPECT_FALSE(inject.IsRunning());
+        done.Notify();
+    });
+
+    if (!done.WaitForNotificationWithTimeout(absl::Seconds(1))) {
+        ADD_FAILURE() << "Deadlocked on QemuAudioInject::mutex_ inside state observer";
+        std::_Exit(1);
+    }
+    runner.join();
+    EXPECT_EQ(observer_events.load(std::memory_order_relaxed), 3);
+    mux_->RemoveStateObserver(obs_id);
 }
 
 }  // namespace

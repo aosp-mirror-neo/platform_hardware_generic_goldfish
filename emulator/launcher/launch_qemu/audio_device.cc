@@ -56,12 +56,17 @@ std::vector<std::string> AudioDevice::getQemuParameters(const EmulatorConfig& em
                 "in.frequency=48000,in.format=s16,in.channels=1"sv;
     }
 
+    // The host microphone stays muted unless the user opts in with -allow-host-audio.
+    const std::string muxDevice =
+            absl::StrCat("goldfish-audio-mux,host-audiodev=hostaudiodev,audiodev-id=mainaudiodev"sv,
+                         emulator.opts().allow_host_audio ? ",allow-host-audio=on"sv : ""sv);
+
     switch (emulator.avd().Arch()) {
     case Avd::CpuArchitecture::kArm:
     case Avd::CpuArchitecture::kX86:
         return {
             "-audiodev"s, absl::StrFormat("%s,%s,%s", audioBackend, kHostId, audioSettings),
-            "-device"s,   "goldfish-audio-mux,host-audiodev=hostaudiodev,audiodev-id=mainaudiodev"s,
+            "-device"s,   muxDevice,
             "-device"s,   absl::StrCat("virtio-sound-pci,audiodev=mainaudiodev,addr="sv, addr()),
         };
 

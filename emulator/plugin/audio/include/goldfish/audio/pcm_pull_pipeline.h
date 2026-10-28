@@ -74,11 +74,18 @@ class PcmPullPipeline {
      * Produces exactly @p target_frames interleaved guest PCM frames into @p dst_buffer by pulling
      * from @p pull_source as needed and silence-padding any source underrun.
      *
+     * When @p input_muted is `true` (or @p input_gain `<= 0.0f`), `Pull()` still advances
+     * @p pull_source and any internal resamplers at `1.0x` so active streams never stall or
+     * accumulate lag, while outputting exact guest-format silence.
+     *
      * @param target_frames Number of guest frames to write into @p dst_buffer.
      * @param dst_buffer Output buffer of size `target_frames * target_bytes_per_frame()` bytes.
      * @param pull_source Callback supplying raw source frames on demand.
+     * @param input_muted When true, silences output after consuming source frames.
+     * @param input_gain Linear amplitude multiplier (`1.0f` = unity) applied before clamping.
      */
-    void Pull(size_t target_frames, void* dst_buffer, const PullSourceFn& pull_source);
+    void Pull(size_t target_frames, void* dst_buffer, const PullSourceFn& pull_source,
+              bool input_muted = false, float input_gain = 1.0F);
 
     const AudioStreamConfig& source_config() const { return source_config_; }
     const GuestAudioConfig& target_config() const { return target_config_; }
@@ -90,9 +97,9 @@ class PcmPullPipeline {
   private:
     class ChannelResamplerState;
 
-    bool CanUseDirectPassthrough() const;
+    bool CanUseDirectPassthrough(bool input_muted, float input_gain) const;
     void PullConvertedChunk(size_t chunk_frames, uint8_t* dst_bytes,
-                            const PullSourceFn& pull_source);
+                            const PullSourceFn& pull_source, bool input_muted, float input_gain);
     void PullSourceDecodedPlanar(size_t frames, const PullSourceFn& pull_source,
                                  std::vector<std::vector<float>>& planar_mid);
 

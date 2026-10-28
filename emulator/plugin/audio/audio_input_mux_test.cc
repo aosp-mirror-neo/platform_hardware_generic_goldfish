@@ -275,7 +275,7 @@ TEST_F(AudioInputMuxTest, HotSwapsMidStreamBetweenHostMicAndPacedInjector) {
 
     int owner_tag = 1;
     std::vector<bool> active_events;
-    absl::Status status = mux.RegisterInjector(
+    absl::StatusOr<std::string> source_id = mux.RegisterInjector(
             &owner_tag,
             AudioStreamConfig{.sample_rate_hz = 48000, .channels = 1, .format = SampleFormat::kS16},
             [](void* dst, size_t max_frames) -> size_t {
@@ -284,7 +284,8 @@ TEST_F(AudioInputMuxTest, HotSwapsMidStreamBetweenHostMicAndPacedInjector) {
                 return max_frames;
             },
             [&active_events](bool active) { active_events.push_back(active); });
-    ASSERT_TRUE(status.ok()) << status;
+    ASSERT_TRUE(source_id.ok()) << source_id.status();
+    EXPECT_EQ(*source_id, "stream-1");
     // The guest was already recording, so registration reports it immediately.
     EXPECT_EQ(active_events, std::vector<bool>{true});
     EXPECT_FALSE(host.IsFirstHostVoiceActive());
@@ -386,11 +387,11 @@ TEST_F(AudioInputMuxTest, RejectsSecondInjectorWithAlreadyExistsAndTracksActiveC
                        [&active_events](bool active) { active_events.push_back(active); })
                     .ok());
 
-    absl::Status conflict = mux.RegisterInjector(
+    absl::StatusOr<std::string> conflict = mux.RegisterInjector(
             &owner_b,
             AudioStreamConfig{.sample_rate_hz = 48000, .channels = 1, .format = SampleFormat::kS16},
             [](void*, size_t) -> size_t { return 0; }, nullptr);
-    EXPECT_EQ(conflict.code(), absl::StatusCode::kAlreadyExists);
+    EXPECT_EQ(conflict.status().code(), absl::StatusCode::kAlreadyExists);
 
     MuxVoiceHandle* voice = mux.OpenVoice(
             nullptr, "virtio-sound.in",
@@ -400,14 +401,13 @@ TEST_F(AudioInputMuxTest, RejectsSecondInjectorWithAlreadyExistsAndTracksActiveC
     ASSERT_NE(voice, nullptr);
 
     mux.SetVoiceActive(voice, true);
-    // Registering the same owner again is an idempotent no-op.
-    ASSERT_TRUE(
-            mux.RegisterInjector(
-                       &owner_a,
-                       AudioStreamConfig{
-                           .sample_rate_hz = 48000, .channels = 1, .format = SampleFormat::kS16},
-                       [](void*, size_t) -> size_t { return 0; }, nullptr)
-                    .ok());
+    // Registering the same owner again is an idempotent no-op that returns its source_id.
+    absl::StatusOr<std::string> again = mux.RegisterInjector(
+            &owner_a,
+            AudioStreamConfig{.sample_rate_hz = 48000, .channels = 1, .format = SampleFormat::kS16},
+            [](void*, size_t) -> size_t { return 0; }, nullptr);
+    ASSERT_TRUE(again.ok());
+    EXPECT_EQ(*again, "stream-1");
     mux.SetVoiceActive(voice, false);
     EXPECT_EQ(active_events, (std::vector<bool>{true, false}));
 
@@ -454,11 +454,11 @@ TEST_F(AudioInputMuxTest, VmRunStateAndShutdownHandleSnapshotJumpAndLateInjector
     // Late UnregisterInjector after Shutdown is a safe no-op, while RegisterInjector fails with
     // FAILED_PRECONDITION because Shutdown() is terminal.
     mux.UnregisterInjector(&owner);
-    absl::Status after_shutdown = mux.RegisterInjector(
+    absl::StatusOr<std::string> after_shutdown = mux.RegisterInjector(
             &owner,
             AudioStreamConfig{.sample_rate_hz = 48000, .channels = 1, .format = SampleFormat::kS16},
             [](void*, size_t) -> size_t { return 0; }, nullptr);
-    EXPECT_EQ(after_shutdown.code(), absl::StatusCode::kFailedPrecondition);
+    EXPECT_EQ(after_shutdown.status().code(), absl::StatusCode::kFailedPrecondition);
 }
 
 TEST_F(AudioInputMuxTest, ConcurrentInjectorChurnAndReadsNeverInvokeCallbackAfterUnregister) {
@@ -787,6 +787,556 @@ TEST_F(AudioInputMuxTest, ResetsResamplerDelayLineWhenGuestVoiceReactivates) {
         EXPECT_FLOAT_EQ(captured[i], 0.0F) << "Stale resampler bleed at frame " << i;
     }
 
+    mux.UnregisterInjector(&owner);
+    mux.CloseVoice(voice);
+}
+
+TEST_F(AudioInputMuxTest, MasterMicrophoneMuteDetachesHostAndAdvancesInjectorWhileFeedingSilence) {
+    FakeHostAudioInput host;
+    AudioInputMux mux(&host);
+
+    std::vector<int16_t> guest_received;
+    MuxVoiceHandle* voice = nullptr;
+    voice = mux.OpenVoice(
+            nullptr, "virtio-sound.in",
+            GuestAudioConfig{
+                .sample_rate_hz = 16000, .channels = 1, .format = GuestPcmFormat::kS16},
+            [&mux, &voice, &guest_received](int avail_bytes) {
+                std::vector<int16_t> buf(static_cast<size_t>(avail_bytes) / sizeof(int16_t), 99);
+                const size_t r = mux.ReadVoice(voice, buf.data(), static_cast<size_t>(avail_bytes));
+                buf.resize(r / sizeof(int16_t));
+                guest_received.insert(guest_received.end(), buf.begin(), buf.end());
+            });
+    ASSERT_NE(voice, nullptr);
+    mux.SetVoiceActive(voice, true);
+    EXPECT_TRUE(host.IsFirstHostVoiceActive());
+
+    // Mute master microphone -> detaches host voice and arms virtual silence pacer.
+    auto muted_state = mux.UpdateState(AudioInputStateMutation{.microphone_muted = true});
+    ASSERT_TRUE(muted_state.ok()) << muted_state.status();
+    EXPECT_TRUE(muted_state->microphone_muted);
+    EXPECT_TRUE(muted_state->microphone_in_use_by_guest);
+    EXPECT_FALSE(host.IsFirstHostVoiceActive());
+    EXPECT_TRUE(host.IsTimerArmed());
+
+    // Ambient host samples while muted must be ignored; virtual timer feeds silence at 1.0x.
+    host.EnqueueHostS16Samples({5555, -5555});
+    EXPECT_TRUE(guest_received.empty());
+
+    host.AdvanceTime(absl::Milliseconds(10));
+    mux.OnTimerTick();
+    EXPECT_EQ(guest_received, std::vector<int16_t>(160, 0));
+
+    // Attach active injector while master-muted -> injector still drains at 1.0x, guest gets 0s!
+    guest_received.clear();
+    size_t injector_pulled_frames = 0;
+    int owner = 1;
+    ASSERT_TRUE(
+            mux.RegisterInjector(
+                       &owner,
+                       AudioStreamConfig{
+                           .sample_rate_hz = 16000, .channels = 1, .format = SampleFormat::kS16},
+                       [&injector_pulled_frames](void* dst, size_t max_frames) -> size_t {
+                           injector_pulled_frames += max_frames;
+                           auto* out = static_cast<int16_t*>(dst);
+                           std::fill(out, out + max_frames, static_cast<int16_t>(9999));
+                           return max_frames;
+                       },
+                       nullptr,
+                       MicrophoneSourceMetadata{
+                           .source_id = "agent-clip",
+                           .kind = MicrophoneInputKind::kGrpcClip,
+                       })
+                    .ok());
+
+    host.AdvanceTime(absl::Milliseconds(10));
+    mux.OnTimerTick();
+    EXPECT_EQ(injector_pulled_frames, 160U);
+    EXPECT_EQ(guest_received, std::vector<int16_t>(160, 0));
+
+    // Unmute master -> injected audio immediately flows through.
+    guest_received.clear();
+    ASSERT_TRUE(mux.UpdateState(AudioInputStateMutation{.microphone_muted = false}).ok());
+    host.AdvanceTime(absl::Milliseconds(10));
+    mux.OnTimerTick();
+    ASSERT_EQ(guest_received.size(), 160U);
+    EXPECT_EQ(guest_received.front(), 9999);
+
+    mux.UnregisterInjector(&owner);
+    mux.CloseVoice(voice);
+}
+
+TEST_F(AudioInputMuxTest, HostMicrophoneDisabledFeedsPacedSilenceWhenIdleWhileAllowingInjection) {
+    FakeHostAudioInput host;
+    AudioInputMux mux(&host);
+
+    std::vector<int16_t> guest_received;
+    MuxVoiceHandle* voice = nullptr;
+    voice = mux.OpenVoice(
+            nullptr, "virtio-sound.in",
+            GuestAudioConfig{
+                .sample_rate_hz = 16000, .channels = 1, .format = GuestPcmFormat::kS16},
+            [&mux, &voice, &guest_received](int avail_bytes) {
+                std::vector<int16_t> buf(static_cast<size_t>(avail_bytes) / sizeof(int16_t), 77);
+                const size_t r = mux.ReadVoice(voice, buf.data(), static_cast<size_t>(avail_bytes));
+                buf.resize(r / sizeof(int16_t));
+                guest_received.insert(guest_received.end(), buf.begin(), buf.end());
+            });
+    ASSERT_NE(voice, nullptr);
+    mux.SetVoiceActive(voice, true);
+    EXPECT_TRUE(host.IsFirstHostVoiceActive());
+
+    // Disable host physical microphone -> detaches host mic and feeds paced silence when idle.
+    auto disabled = mux.UpdateState(AudioInputStateMutation{
+        .input_updates = {MicrophoneInputChannelUpdate{.source_id = "host", .muted = true}},
+    });
+    ASSERT_TRUE(disabled.ok()) << disabled.status();
+    ASSERT_EQ(disabled->microphone_inputs.size(), 1U);
+    EXPECT_EQ(disabled->microphone_inputs[0].source_id, "host");
+    EXPECT_TRUE(disabled->microphone_inputs[0].muted);
+    EXPECT_FALSE(host.IsFirstHostVoiceActive());
+    EXPECT_TRUE(host.IsTimerArmed());
+
+    host.AdvanceTime(absl::Milliseconds(10));
+    mux.OnTimerTick();
+    EXPECT_EQ(guest_received, std::vector<int16_t>(160, 0));
+
+    // Injecting audio via QemuAudioInject succeeds without ALREADY_EXISTS and delivers audio!
+    guest_received.clear();
+    int owner = 1;
+    ASSERT_TRUE(
+            mux.RegisterInjector(
+                       &owner,
+                       AudioStreamConfig{
+                           .sample_rate_hz = 16000, .channels = 1, .format = SampleFormat::kS16},
+                       [](void* dst, size_t max_frames) -> size_t {
+                           auto* out = static_cast<int16_t*>(dst);
+                           std::fill(out, out + max_frames, static_cast<int16_t>(6000));
+                           return max_frames;
+                       },
+                       nullptr)
+                    .ok());
+
+    host.AdvanceTime(absl::Milliseconds(10));
+    mux.OnTimerTick();
+    ASSERT_EQ(guest_received.size(), 160U);
+    EXPECT_EQ(guest_received.front(), 6000);
+
+    // Stopping injector returns to paced silence without reactivating host mic!
+    guest_received.clear();
+    mux.UnregisterInjector(&owner);
+    EXPECT_FALSE(host.IsFirstHostVoiceActive());
+    EXPECT_TRUE(host.IsTimerArmed());
+    host.AdvanceTime(absl::Milliseconds(10));
+    mux.OnTimerTick();
+    EXPECT_EQ(guest_received, std::vector<int16_t>(160, 0));
+
+    // Re-enabling host channel via microphone_inputs["host"].muted = false restores host mic!
+    auto reenabled = mux.UpdateState(AudioInputStateMutation{
+        .input_updates = {MicrophoneInputChannelUpdate{
+            .source_id = "host", .muted = false, .gain = 0.5F}},
+    });
+    ASSERT_TRUE(reenabled.ok()) << reenabled.status();
+    EXPECT_FALSE(reenabled->microphone_inputs[0].muted);
+    EXPECT_TRUE(host.IsFirstHostVoiceActive());
+    EXPECT_FALSE(host.IsTimerArmed());
+
+    guest_received.clear();
+    host.EnqueueHostS16Samples({4000, -8000});
+    ASSERT_EQ(guest_received.size(), 2U);
+    EXPECT_NEAR(guest_received[0], 2000, 2);
+    EXPECT_NEAR(guest_received[1], -4000, 2);
+
+    mux.CloseVoice(voice);
+}
+
+TEST_F(AudioInputMuxTest, StackedMasterMuteHostDisableAndInjectorLifecycleNeverLeakHostActivation) {
+    FakeHostAudioInput host;
+    AudioInputMux mux(&host);
+
+    MuxVoiceHandle* voice = mux.OpenVoice(
+            nullptr, "virtio-sound.in",
+            GuestAudioConfig{
+                .sample_rate_hz = 16000, .channels = 1, .format = GuestPcmFormat::kS16},
+            [](int) {});
+    ASSERT_NE(voice, nullptr);
+    mux.SetVoiceActive(voice, true);
+    EXPECT_TRUE(host.IsFirstHostVoiceActive());
+    EXPECT_FALSE(host.IsTimerArmed());
+
+    // 1. Both mute the host input AND enable master mute.
+    ASSERT_TRUE(mux.UpdateState(AudioInputStateMutation{
+                                    .microphone_muted = true,
+                                    .input_updates = {MicrophoneInputChannelUpdate{
+                                        .source_id = "host", .muted = true}},
+                                })
+                        .ok());
+    EXPECT_FALSE(host.IsFirstHostVoiceActive());
+    EXPECT_TRUE(host.IsTimerArmed());
+
+    // 2. Unmuting master while the host input is still muted must NOT reactivate the
+    //    physical host microphone.
+    ASSERT_TRUE(mux.UpdateState(AudioInputStateMutation{.microphone_muted = false}).ok());
+    EXPECT_FALSE(host.IsFirstHostVoiceActive());
+    EXPECT_TRUE(host.IsTimerArmed());
+
+    // 3. Unmuting the host input while master microphone_muted is true must also keep the
+    //    physical host microphone detached.
+    ASSERT_TRUE(mux.UpdateState(AudioInputStateMutation{
+                                    .microphone_muted = true,
+                                    .input_updates = {MicrophoneInputChannelUpdate{
+                                        .source_id = "host", .muted = false}},
+                                })
+                        .ok());
+    EXPECT_FALSE(host.IsFirstHostVoiceActive());
+    EXPECT_TRUE(host.IsTimerArmed());
+
+    // 4. Registering and unregistering an injector while master mute is active must NOT reactivate
+    //    the physical host microphone on unregister.
+    int owner = 1;
+    ASSERT_TRUE(
+            mux.RegisterInjector(
+                       &owner,
+                       AudioStreamConfig{
+                           .sample_rate_hz = 16000, .channels = 1, .format = SampleFormat::kS16},
+                       [](void*, size_t n) -> size_t { return n; }, nullptr)
+                    .ok());
+    mux.UnregisterInjector(&owner);
+    EXPECT_FALSE(host.IsFirstHostVoiceActive());
+    EXPECT_TRUE(host.IsTimerArmed());
+
+    // 5. Clearing master mute when the host input is unmuted and no injector is active
+    //    finally restores physical host microphone passthrough.
+    ASSERT_TRUE(mux.UpdateState(AudioInputStateMutation{.microphone_muted = false}).ok());
+    EXPECT_TRUE(host.IsFirstHostVoiceActive());
+    EXPECT_FALSE(host.IsTimerArmed());
+
+    mux.CloseVoice(voice);
+}
+
+TEST_F(AudioInputMuxTest, PerChannelControlsReconfigureValidationAndUnicodeSourceId) {
+    FakeHostAudioInput host;
+    AudioInputMux mux(&host);
+
+    std::vector<AudioInputStateSnapshot> observed;
+    const auto obs_id = mux.AddStateObserver(
+            [&observed](const AudioInputStateSnapshot& s) { observed.push_back(s); });
+
+    const std::string unicode_id = "agent_测试_🚀_é";
+    EXPECT_EQ(mux.RegisterInjector(
+                         &obs_id,
+                         AudioStreamConfig{
+                             .sample_rate_hz = 16000, .channels = 1, .format = SampleFormat::kS16},
+                         [](void*, size_t n) -> size_t { return n; }, nullptr,
+                         MicrophoneSourceMetadata{.source_id = "host"})
+                      .status()
+                      .code(),
+              absl::StatusCode::kInvalidArgument);
+
+    int owner = 1;
+    ASSERT_TRUE(
+            mux.RegisterInjector(
+                       &owner,
+                       AudioStreamConfig{
+                           .sample_rate_hz = 16000, .channels = 1, .format = SampleFormat::kS16},
+                       [](void* dst, size_t max_frames) -> size_t {
+                           auto* out = static_cast<int16_t*>(dst);
+                           std::fill(out, out + max_frames, static_cast<int16_t>(10000));
+                           return max_frames;
+                       },
+                       nullptr,
+                       MicrophoneSourceMetadata{
+                           .source_id = unicode_id,
+                           .kind = MicrophoneInputKind::kGrpcStream,
+                       })
+                    .ok());
+    ASSERT_EQ(observed.size(), 1U);
+    ASSERT_EQ(observed.back().microphone_inputs.size(), 2U);
+    EXPECT_EQ(observed.back().microphone_inputs[1].source_id, unicode_id);
+    EXPECT_EQ(observed.back().microphone_inputs[1].kind, MicrophoneInputKind::kGrpcStream);
+
+    // Validation errors leave state untouched.
+    EXPECT_EQ(mux.UpdateState(AudioInputStateMutation{
+                                  .input_updates = {MicrophoneInputChannelUpdate{.source_id = ""}},
+                              })
+                      .status()
+                      .code(),
+              absl::StatusCode::kInvalidArgument);
+    EXPECT_EQ(mux.UpdateState(AudioInputStateMutation{
+                                  .input_updates = {MicrophoneInputChannelUpdate{
+                                      .source_id = "host", .gain = -0.1F}},
+                              })
+                      .status()
+                      .code(),
+              absl::StatusCode::kInvalidArgument);
+    EXPECT_EQ(mux.UpdateState(AudioInputStateMutation{
+                                  .input_updates = {MicrophoneInputChannelUpdate{
+                                      .source_id = "host", .gain = 4.1F}},
+                              })
+                      .status()
+                      .code(),
+              absl::StatusCode::kInvalidArgument);
+    EXPECT_EQ(
+            mux
+                    .UpdateState(AudioInputStateMutation{
+                        .input_updates = {MicrophoneInputChannelUpdate{
+                            .source_id = "host", .gain = std::numeric_limits<float>::quiet_NaN()}},
+                    })
+                    .status()
+                    .code(),
+            absl::StatusCode::kInvalidArgument);
+    EXPECT_EQ(mux.UpdateState(AudioInputStateMutation{
+                                  .input_updates = {MicrophoneInputChannelUpdate{
+                                      .source_id = "nonexistent-stream", .muted = true}},
+                              })
+                      .status()
+                      .code(),
+              absl::StatusCode::kNotFound);
+
+    // Update active channel gain to 2.0x and verify ReconfigureInjector preserves it!
+    auto updated = mux.UpdateState(AudioInputStateMutation{
+        .input_updates = {MicrophoneInputChannelUpdate{.source_id = unicode_id, .gain = 2.0F}},
+    });
+    ASSERT_TRUE(updated.ok()) << updated.status();
+    EXPECT_FLOAT_EQ(updated->microphone_inputs[1].gain, 2.0F);
+
+    std::vector<int16_t> guest_received;
+    MuxVoiceHandle* voice = nullptr;
+    voice = mux.OpenVoice(
+            nullptr, "virtio-sound.in",
+            GuestAudioConfig{
+                .sample_rate_hz = 48000, .channels = 1, .format = GuestPcmFormat::kS16},
+            [&mux, &voice, &guest_received](int avail_bytes) {
+                std::vector<int16_t> buf(static_cast<size_t>(avail_bytes) / sizeof(int16_t));
+                const size_t r = mux.ReadVoice(voice, buf.data(), static_cast<size_t>(avail_bytes));
+                buf.resize(r / sizeof(int16_t));
+                guest_received.insert(guest_received.end(), buf.begin(), buf.end());
+            });
+    ASSERT_NE(voice, nullptr);
+    mux.SetVoiceActive(voice, true);
+
+    ASSERT_TRUE(mux.ReconfigureInjector(&owner, AudioStreamConfig{.sample_rate_hz = 48000,
+                                                                  .channels = 1,
+                                                                  .format = SampleFormat::kS16})
+                        .ok());
+
+    host.AdvanceTime(absl::Milliseconds(10));
+    mux.OnTimerTick();
+    ASSERT_EQ(guest_received.size(), 480U);
+    // 10000 * 2.0 gain = 20000!
+    EXPECT_NEAR(guest_received[0], 20000, 2);
+
+    // Renaming with the SAME AudioStreamConfig keeps the channel's gain and notifies observers.
+    guest_received.clear();
+    const size_t observed_before_rename = observed.size();
+    ASSERT_TRUE(mux.ReconfigureInjector(&owner,
+                                        AudioStreamConfig{.sample_rate_hz = 48000,
+                                                          .channels = 1,
+                                                          .format = SampleFormat::kS16},
+                                        "renamed_same_cfg_测试_🚀_é")
+                        .ok());
+    ASSERT_EQ(observed.size(), observed_before_rename + 1);
+    EXPECT_EQ(observed.back().microphone_inputs[1].source_id, "renamed_same_cfg_测试_🚀_é");
+    host.AdvanceTime(absl::Milliseconds(10));
+    mux.OnTimerTick();
+    ASSERT_EQ(guest_received.size(), 480U);
+    EXPECT_NEAR(guest_received[0], 20000, 2);
+
+    mux.RemoveStateObserver(obs_id);
+    mux.UnregisterInjector(&owner);
+    mux.CloseVoice(voice);
+}
+
+TEST_F(AudioInputMuxTest, ObserverCallbackCanRemoveSiblingObserverWithoutDeadlockOrStaleInvoke) {
+    FakeHostAudioInput host;
+    AudioInputMux mux(&host);
+
+    std::atomic<int> obs2_calls{0};
+    AudioInputMux::StateObserverId obs2_id = 0;
+
+    const auto obs1_id = mux.AddStateObserver(
+            [&](const AudioInputStateSnapshot& /*state*/) { mux.RemoveStateObserver(obs2_id); });
+    obs2_id = mux.AddStateObserver([&](const AudioInputStateSnapshot& /*state*/) {
+        obs2_calls.fetch_add(1, std::memory_order_relaxed);
+    });
+
+    ScopedVmUnlock unlock;
+    absl::Notification update_done;
+    std::thread updater([&]() {
+        ScopedVmLock lock;
+        ASSERT_TRUE(mux.UpdateState(AudioInputStateMutation{.microphone_muted = true}).ok());
+        update_done.Notify();
+    });
+
+    if (!update_done.WaitForNotificationWithTimeout(absl::Seconds(1))) {
+        ADD_FAILURE() << "Deadlocked when observer callback removed sibling observer";
+        std::_Exit(1);
+    }
+    updater.join();
+    EXPECT_EQ(obs2_calls.load(std::memory_order_relaxed), 0);
+    mux.RemoveStateObserver(obs1_id);
+}
+
+TEST_F(AudioInputMuxTest, ReentrantMutationNeverLeavesObserversOnAStaleSnapshot) {
+    FakeHostAudioInput host;
+    AudioInputMux mux(&host);
+
+    // The first observer mutes the microphone as soon as it sees it unmuted; the second observer
+    // only records what it is told.
+    const auto muter = mux.AddStateObserver([&mux](const AudioInputStateSnapshot& state) {
+        if (!state.microphone_muted) {
+            ASSERT_TRUE(mux.UpdateState(AudioInputStateMutation{.microphone_muted = true}).ok());
+        }
+    });
+    std::vector<bool> recorded_muted;
+    const auto recorder = mux.AddStateObserver([&recorded_muted](const AudioInputStateSnapshot& s) {
+        recorded_muted.push_back(s.microphone_muted);
+    });
+
+    // Start muted, then unmute: the muter immediately mutes again from inside its callback.
+    ASSERT_TRUE(mux.UpdateState(AudioInputStateMutation{.microphone_muted = true}).ok());
+    recorded_muted.clear();
+    ASSERT_TRUE(mux.UpdateState(AudioInputStateMutation{.microphone_muted = false}).ok());
+
+    EXPECT_TRUE(mux.GetStateSnapshot().microphone_muted);
+    ASSERT_FALSE(recorded_muted.empty());
+    EXPECT_TRUE(recorded_muted.back()) << "the last snapshot delivered must be the current one";
+
+    mux.RemoveStateObserver(recorder);
+    mux.RemoveStateObserver(muter);
+}
+
+TEST_F(AudioInputMuxTest, RemoveStateObserverBlocksUntilInFlightCallbackCompletes) {
+    FakeHostAudioInput host;
+    AudioInputMux mux(&host);
+
+    auto heap_canary = std::make_unique<int>(0x12345678);
+    absl::Notification callback_entered;
+    absl::Notification allow_callback_exit;
+    std::atomic<int> observed_canary{0};
+
+    const auto obs_id = mux.AddStateObserver([&](const AudioInputStateSnapshot& /*state*/) {
+        callback_entered.Notify();
+        allow_callback_exit.WaitForNotification();
+        observed_canary.store(*heap_canary, std::memory_order_relaxed);
+    });
+
+    ScopedVmUnlock unlock;
+    std::thread updater([&mux]() {
+        ScopedVmLock lock;
+        (void)mux.UpdateState(AudioInputStateMutation{.microphone_muted = true});
+    });
+
+    ASSERT_TRUE(callback_entered.WaitForNotificationWithTimeout(absl::Seconds(5)));
+
+    absl::Notification remover_finished;
+    std::thread remover([&]() {
+        mux.RemoveStateObserver(obs_id);
+        // Destroy heap_canary immediately after RemoveStateObserver returns: under ASAN this would
+        // trigger heap-use-after-free if RemoveStateObserver returned before the callback exited.
+        heap_canary.reset();
+        remover_finished.Notify();
+    });
+
+    EXPECT_FALSE(remover_finished.WaitForNotificationWithTimeout(absl::Milliseconds(25)));
+    allow_callback_exit.Notify();
+
+    remover.join();
+    updater.join();
+    EXPECT_EQ(observed_canary.load(std::memory_order_relaxed), 0x12345678);
+}
+
+TEST_F(AudioInputMuxTest, ConcurrentStateUpdatesObserverChurnAndReadsAreRaceFree) {
+    FakeHostAudioInput host;
+    AudioInputMux mux(&host);
+
+    MuxVoiceHandle* voice = nullptr;
+    voice = mux.OpenVoice(
+            nullptr, "virtio-sound.in",
+            GuestAudioConfig{
+                .sample_rate_hz = 16000, .channels = 1, .format = GuestPcmFormat::kS16},
+            [&mux, &voice](int avail_bytes) {
+                std::vector<uint8_t> buf(static_cast<size_t>(avail_bytes));
+                mux.ReadVoice(voice, buf.data(), buf.size());
+            });
+    ASSERT_NE(voice, nullptr);
+    mux.SetVoiceActive(voice, true);
+
+    int owner = 1;
+    ASSERT_TRUE(
+            mux.RegisterInjector(
+                       &owner,
+                       AudioStreamConfig{
+                           .sample_rate_hz = 16000, .channels = 1, .format = SampleFormat::kS16},
+                       [](void* dst, size_t max_frames) -> size_t {
+                           std::memset(dst, 0, max_frames * sizeof(int16_t));
+                           return max_frames;
+                       },
+                       nullptr,
+                       MicrophoneSourceMetadata{
+                           .source_id = "stress-stream",
+                           .kind = MicrophoneInputKind::kGrpcStream,
+                       })
+                    .ok());
+
+    ScopedVmUnlock unlock;
+    std::atomic<bool> start{false};
+    std::vector<std::thread> threads;
+
+    threads.emplace_back([&]() {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        for (int i = 0; i < 60; ++i) {
+            ScopedVmLock lock;
+            host.AdvanceTime(absl::Milliseconds(10));
+            mux.OnTimerTick();
+        }
+    });
+
+    for (int t = 0; t < 3; ++t) {
+        threads.emplace_back([&, t]() {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            for (int i = 0; i < 40; ++i) {
+                const bool flag = ((i + t) % 2 == 0);
+                {
+                    ScopedVmLock lock;
+                    (void)mux.UpdateState(AudioInputStateMutation{
+                        .microphone_muted = flag,
+                        .input_updates = {MicrophoneInputChannelUpdate{.source_id = "host",
+                                                                       .muted = flag},
+                                          MicrophoneInputChannelUpdate{
+                                              .source_id = "stress-stream",
+                                              .muted = !flag,
+                                              .gain = flag ? 0.75F : 1.25F,
+                                          }},
+                    });
+                }
+                (void)mux.GetStateSnapshot();
+            }
+        });
+    }
+
+    threads.emplace_back([&]() {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        for (int i = 0; i < 40; ++i) {
+            const auto id = mux.AddStateObserver(
+                    [&mux](const AudioInputStateSnapshot&) { (void)mux.GetStateSnapshot(); });
+            std::this_thread::yield();
+            mux.RemoveStateObserver(id);
+        }
+    });
+
+    start.store(true, std::memory_order_release);
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    ScopedVmLock lock;
     mux.UnregisterInjector(&owner);
     mux.CloseVoice(voice);
 }
