@@ -42,10 +42,13 @@ std::vector<std::string> AudioDevice::getQemuParameters(const EmulatorConfig& em
 
     std::string audioBackend = getAudioBackend(emulator.opts());
     std::string_view audioSettings;
-    if (audioBackend.empty()) {
+    if (emulator.opts().noaudio) {
         audioBackend = "none"s;
         audioSettings = "out.mixing-engine=off,in.mixing-engine=off"sv;
     } else {
+        if (audioBackend.empty()) {
+            audioBackend = "none"s;
+        }
         audioSettings =
                 "out.mixing-engine=on,out.fixed-settings=on,"
                 "out.frequency=48000,out.format=s16,out.channels=2,"
@@ -81,7 +84,10 @@ std::string AudioDevice::getAudioBackend(const AndroidOptions& opts) {
     } else {
         std::string backend = detectHostAudioBackend();
         if (backend.empty()) {
-            LOG(WARNING) << "No audio backend detected, there will be no audio.";
+            LOG(WARNING) << "No host audio backend detected; host audio playback/capture is "
+                            "disabled and QEMU is falling back to the 'none' driver with software "
+                            "mixing enabled (pass '-audio <backend>' to select a host driver, or "
+                            "'-no-audio' to disable audio and suppress this warning).";
         }
         return backend;
     }

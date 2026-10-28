@@ -128,6 +128,20 @@ TEST(AudioDeviceTest, DetectHostAudioBackendPlatformBehavior) {
 }
 
 #ifdef __linux__
+TEST(AudioDeviceTest, HeadlessFallbackWithoutPulseAudioKeepsMixingEngineEnabled) {
+    base::TestSystem sys("");
+    FakeEmulator emu;
+    EXPECT_CALL(emu.mock_avd(), Arch()).WillRepeatedly(Return(Avd::CpuArchitecture::kX86));
+
+    AudioDevice dev("09.0");
+    EXPECT_OK(dev.initialize(emu.config()));
+    EXPECT_THAT(dev.getQemuParameters(emu.config()),
+                ElementsAre(Eq("-audiodev"),
+                            Eq(absl::StrCat("none,id=hostaudiodev,", kMixingEngineOnSettings)),
+                            Eq("-device"), Eq(kAudioMuxDeviceArg), Eq("-device"),
+                            Eq("virtio-sound-pci,audiodev=mainaudiodev,addr=09.0")));
+}
+
 TEST(AudioDeviceTest, DetectsPulseAudioInNonAsciiRuntimeDirectory) {
     base::TestSystem sys("");
     const std::filesystem::path runtime_dir = sys.GetTempRoot()->Path() / "测试_🚀_é_xdg";
