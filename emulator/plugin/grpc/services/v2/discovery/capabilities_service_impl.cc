@@ -28,6 +28,7 @@
 namespace goldfish::grpc::v2 {
 
 using ::android::emulation::v2::AccessMode;
+using ::android::emulation::v2::AudioCapabilities;
 using ::android::emulation::v2::BatteryCapabilities;
 using ::android::emulation::v2::BiometricsCapabilities;
 using ::android::emulation::v2::ChargerSource;
@@ -44,6 +45,7 @@ using ::android::emulation::v2::InputCapabilities;
 using ::android::emulation::v2::InputFeature;
 using ::android::emulation::v2::LocationCapabilities;
 using ::android::emulation::v2::PostureCapabilities;
+using ::android::emulation::v2::SampleFormat;
 using ::android::emulation::v2::ScreenCaptureCapabilities;
 using ::android::emulation::v2::SensorsCapabilities;
 using ::android::emulation::v2::SensorType;
@@ -119,6 +121,24 @@ void PopulateLocationCapabilities(LocationCapabilities* loc_caps) {
     loc_caps->set_access_mode(AccessMode::ACCESS_MODE_READ_WRITE);
     // The emulated GNSS stack is a real HAL, not an Android framework override.
     loc_caps->set_fidelity(Fidelity::FIDELITY_HARDWARE);
+}
+
+void PopulateAudioCapabilities(const HardwareConfig& hw, AudioCapabilities* audio_caps) {
+    audio_caps->set_access_mode(AccessMode::ACCESS_MODE_READ_WRITE);
+    audio_caps->set_fidelity(Fidelity::FIDELITY_HARDWARE);
+
+    // Host-to-guest microphone PCM injection is not wired into QEMU's AudioBackend yet;
+    // omitting microphone_profile is the capability signal.
+    if (hw.hw_audioOutput) {
+        auto* speaker = audio_caps->mutable_speaker_profile();
+        speaker->add_supported_formats(SampleFormat::SAMPLE_FORMAT_PCM16_BIT);
+        speaker->add_supported_formats(SampleFormat::SAMPLE_FORMAT_F32_BIT);
+        for (int32_t rate_hz : {8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000}) {
+            speaker->add_supported_sample_rates_hz(rate_hz);
+        }
+        speaker->add_supported_channel_counts(1);
+        speaker->add_supported_channel_counts(2);
+    }
 }
 
 void PopulatePostureCapabilities(const HardwareConfig& hw, PostureCapabilities* posture_caps) {
@@ -232,6 +252,9 @@ Status CapabilitiesServiceImpl::GetDeviceCapabilities(
     }
     if (hw.hw_gps) {
         PopulateLocationCapabilities(reply->mutable_location());
+    }
+    if (hw.hw_audioOutput) {
+        PopulateAudioCapabilities(hw, reply->mutable_audio());
     }
     PopulateSensorsCapabilities(hw, reply->mutable_sensors());
     PopulateInputCapabilities(hw, reply->mutable_input());
