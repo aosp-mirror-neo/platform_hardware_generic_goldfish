@@ -21,6 +21,7 @@
 
 #include "capabilities_service.pb.h"
 #include "common.pb.h"
+#include "goldfish/audio/pcm_format.h"
 
 #ifdef DeviceCapabilities
 #undef DeviceCapabilities
@@ -146,6 +147,8 @@ void PopulateAudioCapabilities(const HardwareConfig& hw, AudioCapabilities* audi
 
     if (hw.hw_audioInput) {
         PopulateAudioFormatProfile(audio_caps->mutable_microphone_profile());
+        audio_caps->set_max_concurrent_microphone_streams(
+                ::goldfish::audio::kMaxConcurrentMicrophoneStreams);
     }
     if (hw.hw_audioOutput) {
         PopulateAudioFormatProfile(audio_caps->mutable_speaker_profile());

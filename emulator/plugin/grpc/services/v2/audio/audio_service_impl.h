@@ -26,19 +26,24 @@
 #include <type_traits>
 #include <utility>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/functional/any_invocable.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 
 #include "android/base/clock.h"
 #include "android/emulation/control/absl_status_translate.h"
+#include "android/emulation/control/grpc_event_stream_support.h"
 #include "android/emulation/control/simple_async_grpc.h"
 #include "audio_service.grpc.pb.h"
+#include "goldfish/audio/audio_input_mux.h"
 #include "goldfish/audio/qemu_audio_capture.h"
+#include "goldfish/eventing/event_sources.h"
 
 extern "C" {
 typedef struct AudioBackend AudioBackend;
@@ -47,14 +52,20 @@ typedef struct AudioBackend AudioBackend;
 namespace goldfish::grpc::v2 {
 
 using AudioServiceBase =
-        ::android::emulation::v2::AudioService::WithCallbackMethod_StreamMicrophoneAudio<
-                ::android::emulation::v2::AudioService::WithCallbackMethod_StreamSpeakerAudio<
-                        ::android::emulation::v2::AudioService::Service>>;
+        ::android::emulation::v2::AudioService::WithCallbackMethod_StreamAudioState<
+                ::android::emulation::v2::AudioService::WithCallbackMethod_StreamMicrophoneAudio<
+                        ::android::emulation::v2::AudioService::
+                                WithCallbackMethod_StreamSpeakerAudio<
+                                        ::android::emulation::v2::AudioService::Service>>>;
 
 /**
  * Implements the AEMU v2 `AudioService` gRPC interface (`android.emulation.v2.AudioService`).
  *
- * Bridges host gRPC clients to QEMU's speaker capture mixer and virtual microphone multiplexer:
+ * Bridges host gRPC clients to QEMU's speaker capture mixer and virtual microphone mix bus:
+ * - `GetAudioState`, `StreamAudioState`, and `UpdateAudioState` observe and mutate the virtual
+ *   microphone mix bus (`goldfish::audio::AudioInputMux`), covering master virtual microphone mute
+ *   (paced PCM silence across all inputs), built-in `"host"` physical microphone detach, guest
+ *   `AudioRecord` capture activity, and per-channel mute/gain controls.
  * - `StreamSpeakerAudio` registers a pull-free capture voice via
  *   `goldfish::audio::QemuAudioCapture` at the requested sample rate and channel count
  *   (defaulting to 48000 Hz, 2 channels, `SAMPLE_FORMAT_PCM16_BIT`), converts samples to
@@ -62,25 +73,37 @@ using AudioServiceBase =
  *   `CLOCK_MONOTONIC` nanosecond timestamp.
  * - `InjectAudioClip` and `StreamMicrophoneAudio` feed host PCM audio into QEMU's
  *   `GoldfishAudioBackend` via `goldfish::audio::QemuAudioInject` by default (or delegate to
- *   `Options::microphone_sink` when a custom sink is supplied). Only one microphone injection
- *   owner may be active at a time; concurrent callers fail with `ALREADY_EXISTS`.
+ *   `Options::microphone_sink` when a custom sink is supplied). Only one external microphone
+ *   injection owner may be active at a time (`max_concurrent_microphone_streams == 1`); concurrent
+ *   callers fail with `ALREADY_EXISTS`.
  *
  * ### Streaming & Backpressure:
+ * - `StreamAudioState` sends an initial `AudioState` snapshot immediately upon connection and
+ *   coalesces rapid intermediate state updates via `StateStreamWriter`.
  * - Speaker capture queues at most `kMaxPendingSpeakerChunks` unread chunks per client so slow
  *   readers cannot cause unbounded memory growth or stall the QEMU audio thread.
  * - Live microphone streaming buffers at most `kMaxBufferedMicrophoneSeconds` of whole PCM frames
  *   in a `goldfish::SocketBuffer`, dropping the oldest unread frames on overflow.
  *
  * ### Thread Safety:
- * - Thread-safe across concurrent gRPC calls and QEMU audio capture/pull callbacks.
+ * - Thread-safe across concurrent gRPC calls and QEMU audio capture/pull/state callbacks.
  */
 class AudioServiceImpl final : public AudioServiceBase {
   public:
+    struct AudioStateEvent {};
+    using AudioStateEventSource = ::android::base::eventing::CallbackEventSource<AudioStateEvent>;
+
     using AudioChunk = ::android::emulation::v2::AudioChunk;
+    using AudioState = ::android::emulation::v2::AudioState;
+    using GetAudioStateRequest = ::android::emulation::v2::GetAudioStateRequest;
     using InjectAudioClipResponse = ::android::emulation::v2::InjectAudioClipResponse;
+    using MicrophoneInput = ::android::emulation::v2::MicrophoneInput;
+    using MicrophoneInputUpdate = ::android::emulation::v2::MicrophoneInputUpdate;
     using SampleFormat = ::android::emulation::v2::SampleFormat;
+    using StreamAudioStateRequest = ::android::emulation::v2::StreamAudioStateRequest;
     using StreamMicrophoneAudioResponse = ::android::emulation::v2::StreamMicrophoneAudioResponse;
     using StreamSpeakerAudioRequest = ::android::emulation::v2::StreamSpeakerAudioRequest;
+    using UpdateAudioStateRequest = ::android::emulation::v2::UpdateAudioStateRequest;
 
     using MicrophoneSink = std::function<absl::Status(const AudioChunk&)>;
     using NowFn = std::function<absl::Time()>;
@@ -89,12 +112,19 @@ class AudioServiceImpl final : public AudioServiceBase {
     static constexpr int32_t kDefaultSpeakerSampleRateHz = 48000;
     static constexpr int32_t kDefaultSpeakerChannelCount = 2;
     static constexpr SampleFormat kDefaultSpeakerFormat = SampleFormat::SAMPLE_FORMAT_PCM16_BIT;
+    static constexpr size_t kMaxPendingStateUpdates = 1;
     static constexpr size_t kMaxPendingSpeakerChunks = 50;
     static constexpr size_t kMaxBufferedMicrophoneSeconds = 5;
 
     static constexpr std::array<int32_t, 8> kSupportedSampleRatesHz = {8000,  11025, 16000, 22050,
                                                                        24000, 32000, 44100, 48000};
     static constexpr std::array<int32_t, 2> kSupportedChannelCounts = {1, 2};
+
+    template <typename Reactor = ::grpc::ServerWriteReactor<AudioState>>
+    using AudioStateWriter =
+            ::android::emulation::control::StateStreamWriter<AudioState, AudioStateEvent,
+                                                             AudioStateEventSource,
+                                                             kMaxPendingStateUpdates, 0, Reactor>;
 
     struct Options {
         bool has_audio_output{true};
@@ -198,7 +228,28 @@ class AudioServiceImpl final : public AudioServiceBase {
 
     explicit AudioServiceImpl(Options options);
     AudioServiceImpl() : AudioServiceImpl(Options{}) {}
-    ~AudioServiceImpl() override = default;
+    ~AudioServiceImpl() override;
+
+    ::grpc::Status GetAudioState(::grpc::ServerContext* context,
+                                 const GetAudioStateRequest* request, AudioState* reply) override;
+
+    /**
+     * Constructs a `StateStreamWriter` for streaming `AudioState` snapshots (templated for tests).
+     */
+    template <typename Reactor = ::grpc::ServerWriteReactor<AudioState>>
+    auto* CreateAudioStateWriter() {
+        (void)BindActiveMux();
+        return new AudioStateWriter<Reactor>(
+                &state_events_, [this](AudioState* state) { PopulateAudioState(state); });
+    }
+
+    ::grpc::ServerWriteReactor<AudioState>* StreamAudioState(
+            ::grpc::CallbackServerContext* context,
+            const StreamAudioStateRequest* request) override;
+
+    ::grpc::Status UpdateAudioState(::grpc::ServerContext* context,
+                                    const UpdateAudioStateRequest* request,
+                                    AudioState* reply) override;
 
     ::grpc::Status InjectAudioClip(::grpc::ServerContext* context, const AudioChunk* request,
                                    InjectAudioClipResponse* reply) override;
@@ -210,8 +261,8 @@ class AudioServiceImpl final : public AudioServiceBase {
      * Constructs a client-streaming microphone reader reactor (templated for hermetic testing).
      */
     template <typename Reactor = ::grpc::ServerReadReactor<AudioChunk>>
-    Reactor* CreateMicrophoneAudioReader() {
-        MicrophoneStreamStart started = StartMicrophoneStream();
+    Reactor* CreateMicrophoneAudioReader(absl::string_view client_source_id = "") {
+        MicrophoneStreamStart started = StartMicrophoneStream(client_source_id);
         if (!started.status.ok()) {
             return new ErrorMicrophoneReader<Reactor>(std::move(started.status));
         }
@@ -243,6 +294,8 @@ class AudioServiceImpl final : public AudioServiceBase {
     static bool IsSupportedSampleFormat(SampleFormat format);
 
   private:
+    struct SinkMuxState;
+
     using ReadMicrophoneChunkFn = absl::AnyInvocable<::grpc::Status(const AudioChunk*)>;
     using StopMicrophoneStreamFn = std::function<void()>;
 
@@ -310,14 +363,24 @@ class AudioServiceImpl final : public AudioServiceBase {
         SampleFormat format;
     };
 
+    bool HasAudioSubsystem() const { return options_.has_audio_output || options_.has_audio_input; }
     ::grpc::Status CheckMicrophoneWritable(absl::string_view operation) const;
+    std::shared_ptr<::goldfish::audio::AudioInputMux> BindActiveMux() const
+            ABSL_LOCKS_EXCLUDED(bind_serialize_mutex_, state_binding_mutex_);
+    std::shared_ptr<::goldfish::audio::AudioInputMux> GetBoundMux() const
+            ABSL_LOCKS_EXCLUDED(state_binding_mutex_);
+    void PopulateAudioState(AudioState* out) const ABSL_LOCKS_EXCLUDED(state_binding_mutex_);
+    void OnMuxStateChanged() const;
+
     ::grpc::Status InjectClipViaSink(::grpc::ServerContext* context, const AudioChunk& request,
+                                     absl::string_view client_source_id,
                                      InjectAudioClipResponse* reply) const;
     ::grpc::Status InjectClipViaQemuAudioInject(::grpc::ServerContext* context,
                                                 const AudioChunk& request,
+                                                absl::string_view client_source_id,
                                                 InjectAudioClipResponse* reply) const;
-    MicrophoneStreamStart StartSinkMicrophoneStream() const;
-    MicrophoneStreamStart StartMicrophoneStream() const;
+    MicrophoneStreamStart StartSinkMicrophoneStream(absl::string_view client_source_id) const;
+    MicrophoneStreamStart StartMicrophoneStream(absl::string_view client_source_id) const;
     static absl::Status ValidateMicrophoneChunk(const AudioChunk& chunk,
                                                 absl::string_view operation);
     static absl::StatusOr<ResolvedSpeakerConfig> ResolveSpeakerRequest(
@@ -325,6 +388,15 @@ class AudioServiceImpl final : public AudioServiceBase {
     bool SleepUntil(const ::grpc::ServerContext* context, absl::Time target) const;
 
     const Options options_;
+    std::shared_ptr<SinkMuxState> sink_mux_state_;
+    mutable AudioStateEventSource state_events_;
+
+    mutable absl::Mutex bind_serialize_mutex_;
+    mutable absl::Mutex state_binding_mutex_ ABSL_ACQUIRED_AFTER(bind_serialize_mutex_);
+    mutable std::shared_ptr<::goldfish::audio::AudioInputMux> observed_mux_
+            ABSL_GUARDED_BY(state_binding_mutex_);
+    mutable ::goldfish::audio::AudioInputMux::StateObserverId observer_id_
+            ABSL_GUARDED_BY(state_binding_mutex_) = 0;
 };
 
 }  // namespace goldfish::grpc::v2
