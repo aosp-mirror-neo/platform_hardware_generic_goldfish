@@ -524,6 +524,7 @@ pkg_files(
 
 msvc_dlls_needed = [
     "msvcp140.dll",
+    "msvcp140_atomic_wait.dll",
     "vcruntime140.dll",
 ]
 
@@ -555,6 +556,7 @@ pkg_files(
     name = "win-dlls",
     srcs = [
         ":msvc_msvcp140.dll",
+        ":msvc_msvcp140_atomic_wait.dll",
         ":msvc_vcruntime140.dll",
     ] + select({
         ":windows_aarch64": [],

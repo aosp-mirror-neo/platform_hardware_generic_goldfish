@@ -234,6 +234,7 @@ emulator/lib64/vulkan/vk_swiftshader_icd.json
 emulator/lib64/vulkan/vk_swiftshader.dll
 emulator/lib64/vulkan/vulkan-1.dll
 emulator/msvcp140.dll
+emulator/msvcp140_atomic_wait.dll
 emulator/notice.md
 emulator/sbom.spdx.json
 emulator/share/
