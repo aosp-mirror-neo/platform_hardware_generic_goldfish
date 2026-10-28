@@ -17,14 +17,17 @@
 #include <grpcpp/grpcpp.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -37,8 +40,18 @@
 #include "absl/time/time.h"
 
 #include "audio_service.grpc.pb.h"
+#include "emulator/plugin/audio/test_bql.h"
 #include "emulator/plugin/audio/test_qemu_audio_stub.h"
+#include "emulator/plugin/vminterface/vm_lock.h"
+#include "goldfish/audio/audio_input_mux.h"
+#include "goldfish/audio/pcm_format.h"
+#include "goldfish/audio/qemu_audio_inject.h"
 #include "test/grpc_v2_service_test.h"
+
+extern "C" {
+// NOLINTNEXTLINE(readability-identifier-naming)
+AudioBackend* audio_be_by_name(const char* name, void* errp);
+}
 
 namespace goldfish::grpc::v2 {
 namespace {
@@ -49,6 +62,16 @@ using ::android::emulation::v2::InjectAudioClipResponse;
 using ::android::emulation::v2::SampleFormat;
 using ::android::emulation::v2::StreamMicrophoneAudioResponse;
 using ::android::emulation::v2::StreamSpeakerAudioRequest;
+using ::goldfish::audio::AudioInputMux;
+using ::goldfish::audio::AudioStreamConfig;
+using ::goldfish::audio::GuestAudioConfig;
+using ::goldfish::audio::GuestChannelVolume;
+using ::goldfish::audio::GuestPcmFormat;
+using ::goldfish::audio::HostAudioInputInterface;
+using ::goldfish::audio::MuxVoiceHandle;
+using ::goldfish::audio::QemuAudioInject;
+using ::goldfish::audio::RegisterAudioInputMux;
+using ::goldfish::audio::UnregisterAudioInputMux;
 using ::grpc::ClientContext;
 using ::grpc::Server;
 using ::grpc::ServerBuilder;
@@ -75,36 +98,180 @@ std::string MakeF32Bytes(const std::vector<float>& samples) {
 template <typename W>
 class ThreadSafeFakeWriteReactor : public test::FakeWriteReactor<W> {
   public:
-    void StartWrite(const W* msg) {
-        absl::MutexLock lock(mu_);
+    void StartWrite(const W* msg) ABSL_LOCKS_EXCLUDED(reactor_state_mutex_) {
+        absl::MutexLock reactor_lock(reactor_state_mutex_);
         test::FakeWriteReactor<W>::StartWrite(msg);
     }
 
-    void Finish(Status status) {
-        absl::MutexLock lock(mu_);
+    void Finish(Status status) ABSL_LOCKS_EXCLUDED(reactor_state_mutex_) {
+        absl::MutexLock reactor_lock(reactor_state_mutex_);
         test::FakeWriteReactor<W>::Finish(std::move(status));
     }
 
-    bool IsFinishedThreadSafe() const {
-        absl::MutexLock lock(mu_);
+    bool IsFinishedThreadSafe() const ABSL_LOCKS_EXCLUDED(reactor_state_mutex_) {
+        absl::MutexLock reactor_lock(reactor_state_mutex_);
         return this->finish_called;
     }
 
-    Status FinishStatusThreadSafe() const {
-        absl::MutexLock lock(mu_);
+    Status FinishStatusThreadSafe() const ABSL_LOCKS_EXCLUDED(reactor_state_mutex_) {
+        absl::MutexLock reactor_lock(reactor_state_mutex_);
         return this->finish_status;
     }
 
   private:
-    mutable absl::Mutex mu_;
+    mutable absl::Mutex reactor_state_mutex_;
+};
+
+template <typename R>
+class FakeReadReactor {
+  public:
+    virtual ~FakeReadReactor() = default;
+    virtual void OnReadDone(bool /*ok*/) {}
+    virtual void OnDone() {}
+    virtual void OnCancel() {}
+
+    void StartRead(R* msg) {
+        start_read_called = true;
+        last_read_msg = msg;
+    }
+
+    void DeliverMessage(const R& msg) {
+        if (last_read_msg == nullptr) {
+            return;
+        }
+        *last_read_msg = msg;
+        start_read_called = false;
+        OnReadDone(true);
+    }
+
+    void Finish(Status status) {
+        finish_called = true;
+        finish_status = std::move(status);
+    }
+
+    bool start_read_called = false;
+    bool finish_called = false;
+    Status finish_status = Status::OK;
+    R* last_read_msg = nullptr;
+};
+
+// Records whether the host microphone was already restored when the stream finished, so a test
+// fails if Finish() ever unblocks the client before the injector is released.
+// Templated like FakeReadReactor because WithSimpleReader reads the message type from it.
+template <typename R>
+class FinishOrderReadReactor : public FakeReadReactor<R> {
+  public:
+    void Finish(Status status) {
+        host_active_at_finish = probe ? std::optional<bool>(probe()) : std::nullopt;
+        FakeReadReactor<R>::Finish(std::move(status));
+    }
+
+    std::function<bool()> probe;
+    std::optional<bool> host_active_at_finish;
+};
+
+class StubHostAudioInput final : public HostAudioInputInterface {
+  public:
+    HostVoiceHandle OpenHostVoice(HostVoiceHandle existing, const char* /*name*/,
+                                  const GuestAudioConfig& /*config*/,
+                                  GuestDataCallback /*on_host_data*/) override {
+        return existing != nullptr ? existing : &dummy_voice_;
+    }
+
+    void CloseHostVoice(HostVoiceHandle /*voice*/) override {}
+
+    void SetHostVoiceActive(HostVoiceHandle /*voice*/, bool active) override
+            ABSL_LOCKS_EXCLUDED(host_state_mutex_) {
+        absl::MutexLock host_lock(host_state_mutex_);
+        host_active_ = active;
+    }
+
+    void SetHostVoiceVolume(HostVoiceHandle /*voice*/,
+                            const GuestChannelVolume& /*volume*/) override {}
+
+    size_t ReadHostVoice(HostVoiceHandle /*voice*/, void* dst, size_t byte_count) override {
+        std::memset(dst, 0, byte_count);
+        return byte_count;
+    }
+
+    void SetTimerArmed(bool armed) override ABSL_LOCKS_EXCLUDED(host_state_mutex_) {
+        absl::MutexLock host_lock(host_state_mutex_);
+        timer_armed_ = armed;
+    }
+
+    absl::Duration NowVirtualTime() const override ABSL_LOCKS_EXCLUDED(host_state_mutex_) {
+        absl::MutexLock host_lock(host_state_mutex_);
+        return virtual_now_;
+    }
+
+    void Reset() ABSL_LOCKS_EXCLUDED(host_state_mutex_) {
+        absl::MutexLock host_lock(host_state_mutex_);
+        host_active_ = false;
+        timer_armed_ = false;
+        virtual_now_ = absl::Seconds(1);
+    }
+
+    void AdvanceVirtualTime(absl::Duration delta) ABSL_LOCKS_EXCLUDED(host_state_mutex_) {
+        absl::MutexLock host_lock(host_state_mutex_);
+        virtual_now_ += delta;
+    }
+
+    bool IsHostActive() const ABSL_LOCKS_EXCLUDED(host_state_mutex_) {
+        absl::MutexLock host_lock(host_state_mutex_);
+        return host_active_;
+    }
+
+  private:
+    int dummy_voice_ = 1;
+    mutable absl::Mutex host_state_mutex_;
+    bool host_active_ ABSL_GUARDED_BY(host_state_mutex_) = false;
+    bool timer_armed_ ABSL_GUARDED_BY(host_state_mutex_) = false;
+    absl::Duration virtual_now_ ABSL_GUARDED_BY(host_state_mutex_) = absl::Seconds(1);
+};
+
+// Calls the mux the way QEMU device code does: with the VM lock held.
+class VmLockedMux {
+  public:
+    explicit VmLockedMux(const std::shared_ptr<AudioInputMux>* mux) : mux_(mux) {}
+
+    MuxVoiceHandle* OpenVoice(MuxVoiceHandle* existing, std::string_view name,
+                              const GuestAudioConfig& config,
+                              AudioInputMux::GuestDataCallback guest_cb) {
+        android::goldfish::RecursiveScopedVmLock lock;
+        return (*mux_)->OpenVoice(existing, name, config, std::move(guest_cb));
+    }
+    void CloseVoice(MuxVoiceHandle* voice) {
+        android::goldfish::RecursiveScopedVmLock lock;
+        (*mux_)->CloseVoice(voice);
+    }
+    void SetVoiceActive(MuxVoiceHandle* voice, bool active) {
+        android::goldfish::RecursiveScopedVmLock lock;
+        (*mux_)->SetVoiceActive(voice, active);
+    }
+    size_t ReadVoice(MuxVoiceHandle* voice, void* dst, size_t byte_count) {
+        android::goldfish::RecursiveScopedVmLock lock;
+        return (*mux_)->ReadVoice(voice, dst, byte_count);
+    }
+    void OnTimerTick() {
+        android::goldfish::RecursiveScopedVmLock lock;
+        (*mux_)->OnTimerTick();
+    }
+    void Shutdown() {
+        android::goldfish::RecursiveScopedVmLock lock;
+        (*mux_)->Shutdown();
+    }
+
+  private:
+    const std::shared_ptr<AudioInputMux>* const mux_;
 };
 
 class AudioServiceTest : public ::testing::Test {
   protected:
     void SetUp() override {
         test_reset_audio_stubs();
+        host_input_.Reset();
         {
-            absl::MutexLock lock(clock_mu_);
+            absl::MutexLock clock_lock(clock_mu_);
             current_time_ = absl::FromUnixNanos(1'000'000'000LL);
             total_slept_ = absl::ZeroDuration();
         }
@@ -114,7 +281,27 @@ class AudioServiceTest : public ::testing::Test {
     void TearDown() override {
         ShutdownServer();
         service_.reset();
+        TeardownDefaultAudioInputMux();
         test_reset_audio_stubs();
+    }
+
+    void InstallDefaultAudioInputMux() {
+        TeardownDefaultAudioInputMux();
+        default_backend_ = audio_be_by_name("mainaudiodev", nullptr);
+        ASSERT_NE(default_backend_, nullptr);
+        mux_ = std::make_shared<AudioInputMux>(&host_input_);
+        RegisterAudioInputMux(default_backend_, mux_);
+    }
+
+    void TeardownDefaultAudioInputMux() {
+        if (default_backend_ != nullptr) {
+            UnregisterAudioInputMux(default_backend_);
+            default_backend_ = nullptr;
+        }
+        if (mux_ != nullptr) {
+            guest_mux_.Shutdown();
+            mux_.reset();
+        }
     }
 
     AudioServiceImpl::Options MakeDefaultOptions() {
@@ -123,16 +310,16 @@ class AudioServiceTest : public ::testing::Test {
         opts.has_audio_input = true;
         opts.read_only = false;
         opts.now_fn = [this]() {
-            absl::MutexLock lock(clock_mu_);
+            absl::MutexLock clock_lock(clock_mu_);
             return current_time_;
         };
         opts.sleep_fn = [this](absl::Duration d) {
-            absl::MutexLock lock(clock_mu_);
+            absl::MutexLock clock_lock(clock_mu_);
             current_time_ += d;
             total_slept_ += d;
         };
         opts.microphone_sink = [this](const AudioChunk& chunk) {
-            absl::MutexLock lock(sink_mu_);
+            absl::MutexLock sink_lock(sink_mu_);
             if (!sink_status_.ok()) {
                 return sink_status_;
             }
@@ -162,19 +349,22 @@ class AudioServiceTest : public ::testing::Test {
     }
 
     void AdvanceClock(absl::Duration delta) {
-        absl::MutexLock lock(clock_mu_);
+        absl::MutexLock clock_lock(clock_mu_);
         current_time_ += delta;
     }
 
     std::vector<AudioChunk> GetInjectedChunks() const {
-        absl::MutexLock lock(sink_mu_);
+        absl::MutexLock sink_lock(sink_mu_);
         return injected_chunks_;
     }
 
     void SetSinkStatus(absl::Status status) {
-        absl::MutexLock lock(sink_mu_);
+        absl::MutexLock sink_lock(sink_mu_);
         sink_status_ = std::move(status);
     }
+
+    // Declared first so it outlives the service and the mux.
+    ::goldfish::audio::TestBql bql_;
 
     mutable absl::Mutex clock_mu_;
     absl::Time current_time_ ABSL_GUARDED_BY(clock_mu_);
@@ -183,6 +373,11 @@ class AudioServiceTest : public ::testing::Test {
     mutable absl::Mutex sink_mu_;
     std::vector<AudioChunk> injected_chunks_ ABSL_GUARDED_BY(sink_mu_);
     absl::Status sink_status_ ABSL_GUARDED_BY(sink_mu_) = absl::OkStatus();
+
+    StubHostAudioInput host_input_;
+    AudioBackend* default_backend_ = nullptr;
+    std::shared_ptr<AudioInputMux> mux_;
+    VmLockedMux guest_mux_{&mux_};
 
     std::unique_ptr<AudioServiceImpl> service_;
     std::unique_ptr<Server> server_;
@@ -248,7 +443,6 @@ TEST_F(AudioServiceTest, SpeakerWriterConvertsPcm16ToFloat32WhenRequested) {
 
 TEST_F(AudioServiceTest, SpeakerWriterBoundsQueueUnderClientBackpressure) {
     auto* writer = service_->CreateSpeakerAudioWriter<test::FakeWriteReactor<AudioChunk>>();
-    const std::array<int16_t, 2> samples = {123, -123};
 
     // Enqueue 150 chunks without calling OnWriteDone(true); 1 chunk is in-flight
     // and at most kMaxPendingSpeakerChunks remain queued.
@@ -419,17 +613,18 @@ TEST_F(AudioServiceTest, InjectAudioClipEnforcesReadOnlyAndCapabilityPreconditio
         EXPECT_TRUE(absl::StrContains(status.error_message(), "hw.audioInput=no"));
     }
 
-    // No microphone sink configured -> FAILED_PRECONDITION.
+    // No GoldfishAudioBackend mux registered (e.g., -no-audio) -> FAILED_PRECONDITION.
     {
         auto opts = MakeDefaultOptions();
         opts.microphone_sink = nullptr;
-        AudioServiceImpl no_sink_service(std::move(opts));
+        AudioServiceImpl no_mux_service(std::move(opts));
 
         ServerContext context;
         InjectAudioClipResponse reply;
-        Status status = no_sink_service.InjectAudioClip(&context, &valid_chunk, &reply);
+        Status status = no_mux_service.InjectAudioClip(&context, &valid_chunk, &reply);
         EXPECT_EQ(status.error_code(), StatusCode::FAILED_PRECONDITION);
-        EXPECT_TRUE(absl::StrContains(status.error_message(), "microphone_profile is unset"));
+        EXPECT_TRUE(absl::StrContains(status.error_message(), "-no-audio"));
+        EXPECT_TRUE(absl::StrContains(status.error_message(), "microphone_profile"));
     }
 }
 
@@ -600,6 +795,413 @@ TEST_F(AudioServiceTest, StreamMicrophoneAudioFailsOnInvalidChunk) {
     Status status = writer->Finish();
     EXPECT_EQ(status.error_code(), StatusCode::INVALID_ARGUMENT);
     EXPECT_TRUE(absl::StrContains(status.error_message(), "pcm_data is empty"));
+}
+
+// ============================================================================
+// QemuAudioInject Integration & Concurrency Tests (Default Production Path)
+// ============================================================================
+
+TEST_F(AudioServiceTest, InjectAudioClipPullsFramesThroughQemuAudioInjectAndRestoresHostMic) {
+    InstallDefaultAudioInputMux();
+
+    std::vector<int16_t> guest_captured;
+    MuxVoiceHandle* voice = nullptr;
+    voice = guest_mux_.OpenVoice(
+            nullptr, "virtio-sound.in",
+            GuestAudioConfig{
+                .sample_rate_hz = 16000, .channels = 1, .format = GuestPcmFormat::kS16},
+            [this, &voice, &guest_captured](int avail_bytes) {
+                std::vector<int16_t> buf(static_cast<size_t>(avail_bytes) / sizeof(int16_t));
+                const size_t read_bytes =
+                        guest_mux_.ReadVoice(voice, buf.data(), buf.size() * sizeof(int16_t));
+                buf.resize(read_bytes / sizeof(int16_t));
+                guest_captured.insert(guest_captured.end(), buf.begin(), buf.end());
+            });
+    ASSERT_NE(voice, nullptr);
+    guest_mux_.SetVoiceActive(voice, true);
+    EXPECT_TRUE(host_input_.IsHostActive());
+
+    bool saw_host_mic_deactivated = false;
+    auto opts = MakeDefaultOptions();
+    opts.microphone_sink = nullptr;
+    opts.sleep_fn = [this, &saw_host_mic_deactivated](absl::Duration duration) {
+        if (!host_input_.IsHostActive()) {
+            saw_host_mic_deactivated = true;
+        }
+        absl::Duration remaining = duration;
+        constexpr absl::Duration kTickStep = absl::Milliseconds(10);
+        while (remaining > absl::ZeroDuration()) {
+            const absl::Duration step = std::min(remaining, kTickStep);
+            AdvanceClock(step);
+            host_input_.AdvanceVirtualTime(step);
+            guest_mux_.OnTimerTick();
+            remaining -= step;
+        }
+    };
+    RecreateService(std::move(opts));
+
+    constexpr size_t kTotalFrames = 800;  // 50 ms at 16000 Hz.
+    std::vector<int16_t> expected_samples(kTotalFrames);
+    for (size_t i = 0; i < kTotalFrames; ++i) {
+        expected_samples[i] = static_cast<int16_t>(i + 1);
+    }
+
+    AudioChunk clip;
+    clip.set_sample_rate_hz(16000);
+    clip.set_channel_count(1);
+    clip.set_format(SampleFormat::SAMPLE_FORMAT_PCM16_BIT);
+    clip.set_pcm_data(MakePcm16Bytes(expected_samples));
+
+    ServerContext context;
+    InjectAudioClipResponse reply;
+    Status status = service_->InjectAudioClip(&context, &clip, &reply);
+    ASSERT_TRUE(status.ok()) << status.error_message();
+    EXPECT_EQ(reply.duration_ms(), 50U);
+    EXPECT_TRUE(saw_host_mic_deactivated);
+    EXPECT_TRUE(host_input_.IsHostActive());
+    EXPECT_EQ(guest_captured, expected_samples);
+
+    guest_mux_.CloseVoice(voice);
+}
+
+TEST_F(AudioServiceTest, InjectAudioClipCancellationAbortsEarlyAndRestoresHostMicImmediately) {
+    InstallDefaultAudioInputMux();
+
+    MuxVoiceHandle* voice = guest_mux_.OpenVoice(
+            nullptr, "virtio-sound.in",
+            GuestAudioConfig{
+                .sample_rate_hz = 16000, .channels = 1, .format = GuestPcmFormat::kS16},
+            [](int /*avail_bytes*/) {});
+    ASSERT_NE(voice, nullptr);
+    guest_mux_.SetVoiceActive(voice, true);
+    EXPECT_TRUE(host_input_.IsHostActive());
+
+    ClientContext client_context;
+    int sleep_slice_count = 0;
+    auto opts = MakeDefaultOptions();
+    opts.microphone_sink = nullptr;
+    opts.sleep_fn = [this, &client_context, &sleep_slice_count](absl::Duration duration) {
+        ++sleep_slice_count;
+        AdvanceClock(duration);
+        host_input_.AdvanceVirtualTime(duration);
+        guest_mux_.OnTimerTick();
+        // Cancel the RPC during the first 20 ms pacing slice of a 100 ms clip.
+        if (sleep_slice_count == 1) {
+            client_context.TryCancel();
+        }
+    };
+    RecreateService(std::move(opts));
+
+    // 1600 frames at 16000 Hz = 100 ms (5 slices of 20 ms).
+    AudioChunk clip;
+    clip.set_sample_rate_hz(16000);
+    clip.set_channel_count(1);
+    clip.set_format(SampleFormat::SAMPLE_FORMAT_PCM16_BIT);
+    clip.set_pcm_data(MakePcm16Bytes(std::vector<int16_t>(1600, 1024)));
+
+    InjectAudioClipResponse reply;
+    Status status = stub_->InjectAudioClip(&client_context, clip, &reply);
+    EXPECT_EQ(status.error_code(), StatusCode::CANCELLED);
+    // Must abort after the first 20 ms slice rather than sleeping all 5 slices.
+    EXPECT_EQ(sleep_slice_count, 1);
+    // Scoped QemuAudioInject teardown must immediately restore physical host mic passthrough.
+    EXPECT_TRUE(host_input_.IsHostActive());
+
+    guest_mux_.CloseVoice(voice);
+}
+
+TEST_F(AudioServiceTest, StreamMicrophoneAudioFeedsBoundedPullBufferAndReconfiguresFormat) {
+    InstallDefaultAudioInputMux();
+
+    std::vector<int16_t> guest_captured;
+    MuxVoiceHandle* voice = nullptr;
+    voice = guest_mux_.OpenVoice(
+            nullptr, "virtio-sound.in",
+            GuestAudioConfig{
+                .sample_rate_hz = 16000, .channels = 1, .format = GuestPcmFormat::kS16},
+            [this, &voice, &guest_captured](int avail_bytes) {
+                std::vector<int16_t> buf(static_cast<size_t>(avail_bytes) / sizeof(int16_t));
+                const size_t read_bytes =
+                        guest_mux_.ReadVoice(voice, buf.data(), buf.size() * sizeof(int16_t));
+                buf.resize(read_bytes / sizeof(int16_t));
+                guest_captured.insert(guest_captured.end(), buf.begin(), buf.end());
+            });
+    ASSERT_NE(voice, nullptr);
+    guest_mux_.SetVoiceActive(voice, true);
+    EXPECT_TRUE(host_input_.IsHostActive());
+
+    auto opts = MakeDefaultOptions();
+    opts.microphone_sink = nullptr;
+    RecreateService(std::move(opts));
+
+    auto* reader = service_->CreateMicrophoneAudioReader<FakeReadReactor<AudioChunk>>();
+    ASSERT_FALSE(reader->finish_called);
+    EXPECT_FALSE(host_input_.IsHostActive());
+
+    // Stream 20 ms (320 frames) of 16 kHz mono PCM16 samples.
+    AudioChunk pcm16_chunk;
+    pcm16_chunk.set_sample_rate_hz(16000);
+    pcm16_chunk.set_channel_count(1);
+    pcm16_chunk.set_format(SampleFormat::SAMPLE_FORMAT_PCM16_BIT);
+    pcm16_chunk.set_pcm_data(MakePcm16Bytes(std::vector<int16_t>(320, 2048)));
+    reader->DeliverMessage(pcm16_chunk);
+    ASSERT_FALSE(reader->finish_called);
+
+    host_input_.AdvanceVirtualTime(absl::Milliseconds(20));
+    guest_mux_.OnTimerTick();
+    ASSERT_EQ(guest_captured.size(), 320U);
+    EXPECT_EQ(guest_captured.front(), 2048);
+    EXPECT_EQ(guest_captured.back(), 2048);
+
+    // Reconfigure mid-stream to 16 kHz mono F32 (+0.5f -> ~16384 in S16).
+    guest_captured.clear();
+    AudioChunk f32_chunk;
+    f32_chunk.set_sample_rate_hz(16000);
+    f32_chunk.set_channel_count(1);
+    f32_chunk.set_format(SampleFormat::SAMPLE_FORMAT_F32_BIT);
+    f32_chunk.set_pcm_data(MakeF32Bytes(std::vector<float>(320, 0.5F)));
+    reader->DeliverMessage(f32_chunk);
+    ASSERT_FALSE(reader->finish_called);
+
+    host_input_.AdvanceVirtualTime(absl::Milliseconds(20));
+    guest_mux_.OnTimerTick();
+    ASSERT_EQ(guest_captured.size(), 320U);
+    EXPECT_NEAR(guest_captured.front(), 16384, 2);
+
+    // Verify bounded ring buffer drops the oldest whole frames when exceeding 5 seconds.
+    guest_captured.clear();
+    const size_t one_second_frames = 16000;
+    for (size_t sec = 0; sec < AudioServiceImpl::kMaxBufferedMicrophoneSeconds + 1; ++sec) {
+        AudioChunk one_sec_chunk;
+        one_sec_chunk.set_sample_rate_hz(16000);
+        one_sec_chunk.set_channel_count(1);
+        one_sec_chunk.set_format(SampleFormat::SAMPLE_FORMAT_PCM16_BIT);
+        const auto marker = static_cast<int16_t>((sec + 1) * 100);
+        one_sec_chunk.set_pcm_data(MakePcm16Bytes(std::vector<int16_t>(one_second_frames, marker)));
+        reader->DeliverMessage(one_sec_chunk);
+        ASSERT_FALSE(reader->finish_called);
+    }
+
+    host_input_.AdvanceVirtualTime(absl::Milliseconds(10));
+    guest_mux_.OnTimerTick();
+    ASSERT_EQ(guest_captured.size(), 160U);
+    // The first 1-second chunk (marker 100) was evicted; the oldest retained sample is 200.
+    EXPECT_EQ(guest_captured.front(), 200);
+
+    reader->OnDone();
+    EXPECT_TRUE(host_input_.IsHostActive());
+    guest_mux_.CloseVoice(voice);
+}
+
+TEST_F(AudioServiceTest, StreamMicrophoneAudioClientCancelReleasesMicrophoneImmediately) {
+    InstallDefaultAudioInputMux();
+    MuxVoiceHandle* voice = guest_mux_.OpenVoice(
+            nullptr, "virtio-sound.in",
+            GuestAudioConfig{
+                .sample_rate_hz = 16000, .channels = 1, .format = GuestPcmFormat::kS16},
+            [](int /*avail_bytes*/) {});
+    ASSERT_NE(voice, nullptr);
+    guest_mux_.SetVoiceActive(voice, true);
+
+    auto opts = MakeDefaultOptions();
+    opts.microphone_sink = nullptr;
+    RecreateService(std::move(opts));
+
+    auto* first = service_->CreateMicrophoneAudioReader<FakeReadReactor<AudioChunk>>();
+    ASSERT_FALSE(first->finish_called);
+    EXPECT_FALSE(host_input_.IsHostActive());
+    AudioChunk chunk;
+    chunk.set_sample_rate_hz(16000);
+    chunk.set_channel_count(1);
+    chunk.set_format(SampleFormat::SAMPLE_FORMAT_PCM16_BIT);
+    chunk.set_pcm_data(MakePcm16Bytes(std::vector<int16_t>(320, 1000)));
+    first->DeliverMessage(chunk);
+
+    // The client vanishes (crash or network drop): gRPC delivers OnCancel without a final
+    // OnReadDone(false). The host microphone must come back right away.
+    first->OnCancel();
+    EXPECT_TRUE(host_input_.IsHostActive());
+
+    // The microphone is free for the next client even before the old reactor's OnDone runs.
+    auto* second = service_->CreateMicrophoneAudioReader<FakeReadReactor<AudioChunk>>();
+    EXPECT_FALSE(second->finish_called) << second->finish_status.error_message();
+    EXPECT_FALSE(host_input_.IsHostActive());
+
+    // The cancelled stream's late OnDone must not stop the new owner.
+    first->OnDone();
+    EXPECT_FALSE(host_input_.IsHostActive());
+
+    second->OnDone();
+    EXPECT_TRUE(host_input_.IsHostActive());
+    guest_mux_.CloseVoice(voice);
+}
+
+TEST_F(AudioServiceTest, StreamMicrophoneAudioReleasesMicrophoneBeforeFinishing) {
+    InstallDefaultAudioInputMux();
+    MuxVoiceHandle* voice = guest_mux_.OpenVoice(
+            nullptr, "virtio-sound.in",
+            GuestAudioConfig{
+                .sample_rate_hz = 16000, .channels = 1, .format = GuestPcmFormat::kS16},
+            [](int /*avail_bytes*/) {});
+    ASSERT_NE(voice, nullptr);
+    guest_mux_.SetVoiceActive(voice, true);
+
+    auto opts = MakeDefaultOptions();
+    opts.microphone_sink = nullptr;
+    RecreateService(std::move(opts));
+
+    // Client half-close (WritesDone): Finish(OK) lets the client start its next stream, so the
+    // previous injector must already be gone or that stream fails with ALREADY_EXISTS.
+    auto* eof_reader = service_->CreateMicrophoneAudioReader<FinishOrderReadReactor<AudioChunk>>();
+    eof_reader->probe = [this]() { return host_input_.IsHostActive(); };
+    ASSERT_FALSE(host_input_.IsHostActive());
+    eof_reader->OnReadDone(false);
+    ASSERT_TRUE(eof_reader->finish_called);
+    EXPECT_EQ(eof_reader->host_active_at_finish, std::optional<bool>(true));
+    eof_reader->OnDone();
+
+    // An invalid chunk ends the stream with an error; the same ordering applies.
+    auto* bad_reader = service_->CreateMicrophoneAudioReader<FinishOrderReadReactor<AudioChunk>>();
+    bad_reader->probe = [this]() { return host_input_.IsHostActive(); };
+    ASSERT_FALSE(host_input_.IsHostActive());
+    AudioChunk invalid;
+    invalid.set_sample_rate_hz(16000);
+    invalid.set_channel_count(1);
+    invalid.set_format(SampleFormat::SAMPLE_FORMAT_PCM16_BIT);
+    bad_reader->DeliverMessage(invalid);  // Empty pcm_data -> INVALID_ARGUMENT.
+    ASSERT_TRUE(bad_reader->finish_called);
+    EXPECT_EQ(bad_reader->finish_status.error_code(), StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(bad_reader->host_active_at_finish, std::optional<bool>(true));
+    bad_reader->OnDone();
+
+    guest_mux_.CloseVoice(voice);
+}
+
+TEST_F(AudioServiceTest, ConcurrentMicrophoneInjectionReturnsAlreadyExists) {
+    InstallDefaultAudioInputMux();
+
+    auto opts = MakeDefaultOptions();
+    opts.microphone_sink = nullptr;
+    RecreateService(std::move(opts));
+
+    AudioChunk chunk;
+    chunk.set_sample_rate_hz(48000);
+    chunk.set_channel_count(1);
+    chunk.set_format(SampleFormat::SAMPLE_FORMAT_PCM16_BIT);
+    chunk.set_pcm_data(MakePcm16Bytes(std::vector<int16_t>(480, 512)));
+
+    // Hold an external QemuAudioInject session (e.g., WebRTC inbound audio track).
+    QemuAudioInject external_injector([](void* /*dst*/, size_t max_frames) { return max_frames; },
+                                      AudioStreamConfig{});
+    ASSERT_TRUE(external_injector.Start().ok());
+
+    // Both InjectAudioClip and StreamMicrophoneAudio must fail with ALREADY_EXISTS.
+    {
+        ServerContext clip_context;
+        InjectAudioClipResponse clip_reply;
+        Status clip_status = service_->InjectAudioClip(&clip_context, &chunk, &clip_reply);
+        EXPECT_EQ(clip_status.error_code(), StatusCode::ALREADY_EXISTS);
+        EXPECT_TRUE(absl::StrContains(clip_status.error_message(), "WebRTC"));
+    }
+    {
+        ClientContext stream_context;
+        StreamMicrophoneAudioResponse stream_reply;
+        auto second_writer = stub_->StreamMicrophoneAudio(&stream_context, &stream_reply);
+        second_writer->WritesDone();
+        Status stream_status = second_writer->Finish();
+        EXPECT_EQ(stream_status.error_code(), StatusCode::ALREADY_EXISTS);
+    }
+
+    // Releasing the external injector immediately allows StreamMicrophoneAudio, while a concurrent
+    // second gRPC caller is rejected with ALREADY_EXISTS until the first stream closes.
+    external_injector.Stop();
+
+    auto* active_reader = service_->CreateMicrophoneAudioReader<FakeReadReactor<AudioChunk>>();
+    ASSERT_FALSE(active_reader->finish_called);
+    active_reader->DeliverMessage(chunk);
+    ASSERT_FALSE(active_reader->finish_called);
+
+    {
+        ServerContext clip_context;
+        InjectAudioClipResponse clip_reply;
+        Status clip_status = service_->InjectAudioClip(&clip_context, &chunk, &clip_reply);
+        EXPECT_EQ(clip_status.error_code(), StatusCode::ALREADY_EXISTS);
+    }
+
+    // Client half-close (OnReadDone(false)) must release microphone ownership BEFORE Finish(OK)
+    // unblocks the client, even while gRPC's callback executor has not yet invoked OnDone().
+    active_reader->OnReadDone(false);
+
+    ServerContext clip_context;
+    InjectAudioClipResponse clip_reply;
+    Status clip_status = service_->InjectAudioClip(&clip_context, &chunk, &clip_reply);
+    EXPECT_TRUE(clip_status.ok()) << clip_status.error_message();
+
+    active_reader->OnDone();
+}
+
+TEST_F(AudioServiceTest, ConcurrentMicrophoneStreamingAndGuestPullAreRaceFree) {
+    InstallDefaultAudioInputMux();
+
+    MuxVoiceHandle* voice = nullptr;
+    voice = guest_mux_.OpenVoice(
+            nullptr, "virtio-sound.in",
+            GuestAudioConfig{
+                .sample_rate_hz = 48000, .channels = 2, .format = GuestPcmFormat::kS16},
+            [this, &voice](int avail_bytes) {
+                std::vector<uint8_t> scratch(static_cast<size_t>(avail_bytes));
+                (void)guest_mux_.ReadVoice(voice, scratch.data(), scratch.size());
+            });
+    ASSERT_NE(voice, nullptr);
+    guest_mux_.SetVoiceActive(voice, true);
+
+    auto opts = MakeDefaultOptions();
+    opts.microphone_sink = nullptr;
+    RecreateService(std::move(opts));
+
+    std::atomic<bool> start_barrier{false};
+    std::atomic<bool> stop_puller{false};
+
+    std::thread guest_puller([this, &start_barrier, &stop_puller]() {
+        while (!start_barrier.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        while (!stop_puller.load(std::memory_order_acquire)) {
+            host_input_.AdvanceVirtualTime(absl::Milliseconds(10));
+            guest_mux_.OnTimerTick();
+            std::this_thread::yield();
+        }
+    });
+
+    start_barrier.store(true, std::memory_order_release);
+
+    AudioChunk pcm16_chunk;
+    pcm16_chunk.set_sample_rate_hz(48000);
+    pcm16_chunk.set_channel_count(2);
+    pcm16_chunk.set_format(SampleFormat::SAMPLE_FORMAT_PCM16_BIT);
+    pcm16_chunk.set_pcm_data(MakePcm16Bytes(std::vector<int16_t>(960, 321)));
+
+    AudioChunk f32_chunk;
+    f32_chunk.set_sample_rate_hz(16000);
+    f32_chunk.set_channel_count(1);
+    f32_chunk.set_format(SampleFormat::SAMPLE_FORMAT_F32_BIT);
+    f32_chunk.set_pcm_data(MakeF32Bytes(std::vector<float>(320, 0.25F)));
+
+    for (int iter = 0; iter < 10; ++iter) {
+        ClientContext context;
+        StreamMicrophoneAudioResponse response;
+        auto writer = stub_->StreamMicrophoneAudio(&context, &response);
+        for (int c = 0; c < 6; ++c) {
+            (void)writer->Write((c % 2 == 0) ? pcm16_chunk : f32_chunk);
+        }
+        writer->WritesDone();
+        Status status = writer->Finish();
+        EXPECT_TRUE(status.ok()) << status.error_message();
+    }
+
+    stop_puller.store(true, std::memory_order_release);
+    guest_puller.join();
+    guest_mux_.CloseVoice(voice);
 }
 
 }  // namespace

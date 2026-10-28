@@ -23,8 +23,10 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <utility>
 
+#include "absl/functional/any_invocable.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
@@ -50,25 +52,27 @@ using AudioServiceBase =
                         ::android::emulation::v2::AudioService::Service>>;
 
 /**
- * @brief Implements the AEMU v2 AudioService gRPC interface.
+ * Implements the AEMU v2 `AudioService` gRPC interface (`android.emulation.v2.AudioService`).
  *
- * Streams uncompressed PCM audio from the guest speaker mixer via
- * `goldfish::audio::QemuAudioCapture` (`StreamSpeakerAudio`) and supports
- * host-to-guest PCM microphone injection (`InjectAudioClip` and
- * `StreamMicrophoneAudio`) when a virtual microphone sink is configured.
+ * Bridges host gRPC clients to QEMU's speaker capture mixer and virtual microphone multiplexer:
+ * - `StreamSpeakerAudio` registers a pull-free capture voice via
+ *   `goldfish::audio::QemuAudioCapture` at the requested sample rate and channel count
+ *   (defaulting to 48000 Hz, 2 channels, `SAMPLE_FORMAT_PCM16_BIT`), converts samples to
+ *   `SAMPLE_FORMAT_F32_BIT` when requested, and stamps each `AudioChunk` with a
+ *   `CLOCK_MONOTONIC` nanosecond timestamp.
+ * - `InjectAudioClip` and `StreamMicrophoneAudio` feed host PCM audio into QEMU's
+ *   `GoldfishAudioBackend` via `goldfish::audio::QemuAudioInject` by default (or delegate to
+ *   `Options::microphone_sink` when a custom sink is supplied). Only one microphone injection
+ *   owner may be active at a time; concurrent callers fail with `ALREADY_EXISTS`.
  *
  * ### Streaming & Backpressure:
- * - `StreamSpeakerAudio` registers a capture voice on QEMU's `AudioBackend` at
- *   the requested sample rate and channel count (defaulting to the native mixer
- *   settings of 48000 Hz, 2 channels, `SAMPLE_FORMAT_PCM16_BIT`), converts
- *   samples to `SAMPLE_FORMAT_F32_BIT` when requested, and stamps each
- *   `AudioChunk` with a `CLOCK_MONOTONIC` nanosecond timestamp.
- * - Under client backpressure, pending chunks are bounded by
- *   `kMaxPendingSpeakerChunks` so slow clients cannot cause unbounded memory
- *   growth or stall the QEMU audio thread.
+ * - Speaker capture queues at most `kMaxPendingSpeakerChunks` unread chunks per client so slow
+ *   readers cannot cause unbounded memory growth or stall the QEMU audio thread.
+ * - Live microphone streaming buffers at most `kMaxBufferedMicrophoneSeconds` of whole PCM frames
+ *   in a `goldfish::SocketBuffer`, dropping the oldest unread frames on overflow.
  *
  * ### Thread Safety:
- * - Thread-safe across concurrent gRPC calls and QEMU audio capture callbacks.
+ * - Thread-safe across concurrent gRPC calls and QEMU audio capture/pull callbacks.
  */
 class AudioServiceImpl final : public AudioServiceBase {
   public:
@@ -86,6 +90,7 @@ class AudioServiceImpl final : public AudioServiceBase {
     static constexpr int32_t kDefaultSpeakerChannelCount = 2;
     static constexpr SampleFormat kDefaultSpeakerFormat = SampleFormat::SAMPLE_FORMAT_PCM16_BIT;
     static constexpr size_t kMaxPendingSpeakerChunks = 50;
+    static constexpr size_t kMaxBufferedMicrophoneSeconds = 5;
 
     static constexpr std::array<int32_t, 8> kSupportedSampleRatesHz = {8000,  11025, 16000, 22050,
                                                                        24000, 32000, 44100, 48000};
@@ -202,7 +207,24 @@ class AudioServiceImpl final : public AudioServiceBase {
             ::grpc::CallbackServerContext* context, StreamMicrophoneAudioResponse* reply) override;
 
     /**
-     * @brief Constructs a SpeakerAudioWriter for streaming AudioChunk messages.
+     * Constructs a client-streaming microphone reader reactor (templated for hermetic testing).
+     */
+    template <typename Reactor = ::grpc::ServerReadReactor<AudioChunk>>
+    Reactor* CreateMicrophoneAudioReader() {
+        MicrophoneStreamStart started = StartMicrophoneStream();
+        if (!started.status.ok()) {
+            return new ErrorMicrophoneReader<Reactor>(std::move(started.status));
+        }
+        auto* reader = new MicrophoneAudioReader<Reactor>(std::move(started.on_chunk),
+                                                          std::move(started.stop_stream));
+        if constexpr (!std::is_base_of_v<::grpc::internal::ServerReactor, Reactor>) {
+            reader->StartRead();
+        }
+        return reader;
+    }
+
+    /**
+     * Constructs a SpeakerAudioWriter for streaming AudioChunk messages.
      */
     template <typename Reactor = ::grpc::ServerWriteReactor<AudioChunk>>
     auto* CreateSpeakerAudioWriter(int32_t sample_rate_hz = kDefaultSpeakerSampleRateHz,
@@ -221,6 +243,67 @@ class AudioServiceImpl final : public AudioServiceBase {
     static bool IsSupportedSampleFormat(SampleFormat format);
 
   private:
+    using ReadMicrophoneChunkFn = absl::AnyInvocable<::grpc::Status(const AudioChunk*)>;
+    using StopMicrophoneStreamFn = std::function<void()>;
+
+    struct MicrophoneStreamStart {
+        ::grpc::Status status;
+        ReadMicrophoneChunkFn on_chunk;
+        StopMicrophoneStreamFn stop_stream;
+    };
+
+    template <typename Reactor = ::grpc::ServerReadReactor<AudioChunk>>
+    class MicrophoneAudioReader final : public ::WithSimpleReader<Reactor> {
+      public:
+        MicrophoneAudioReader(ReadMicrophoneChunkFn on_chunk, StopMicrophoneStreamFn stop_stream)
+                : on_chunk_(std::move(on_chunk)), stop_stream_(std::move(stop_stream)) {}
+
+        bool Read(const AudioChunk* chunk) override {
+            ::grpc::Status status = on_chunk_(chunk);
+            if (!status.ok()) {
+                StopStream();
+                Reactor::Finish(status);
+                return false;
+            }
+            return true;
+        }
+
+        void OnReadDone(bool ok) override {
+            if (!ok) {
+                // Release exclusive microphone ownership before Finish(OK) unblocks the client.
+                StopStream();
+                if constexpr (!std::is_base_of_v<::grpc::internal::ServerReactor, Reactor>) {
+                    Reactor::Finish(::grpc::Status::OK);
+                }
+            }
+            ::WithSimpleReader<Reactor>::OnReadDone(ok);
+        }
+
+        void OnCancel() override { StopStream(); }
+
+        void OnDone() override {
+            StopStream();
+            delete this;
+        }
+
+      private:
+        void StopStream() {
+            if (stop_stream_) {
+                stop_stream_();
+            }
+        }
+
+        ReadMicrophoneChunkFn on_chunk_;
+        StopMicrophoneStreamFn stop_stream_;
+    };
+
+    template <typename Reactor = ::grpc::ServerReadReactor<AudioChunk>>
+    class ErrorMicrophoneReader final : public Reactor {
+      public:
+        explicit ErrorMicrophoneReader(::grpc::Status status) { this->Finish(std::move(status)); }
+        void OnDone() override { delete this; }
+    };
+
     struct ResolvedSpeakerConfig {
         int32_t sample_rate_hz;
         int32_t channel_count;
@@ -228,6 +311,13 @@ class AudioServiceImpl final : public AudioServiceBase {
     };
 
     ::grpc::Status CheckMicrophoneWritable(absl::string_view operation) const;
+    ::grpc::Status InjectClipViaSink(::grpc::ServerContext* context, const AudioChunk& request,
+                                     InjectAudioClipResponse* reply) const;
+    ::grpc::Status InjectClipViaQemuAudioInject(::grpc::ServerContext* context,
+                                                const AudioChunk& request,
+                                                InjectAudioClipResponse* reply) const;
+    MicrophoneStreamStart StartSinkMicrophoneStream() const;
+    MicrophoneStreamStart StartMicrophoneStream() const;
     static absl::Status ValidateMicrophoneChunk(const AudioChunk& chunk,
                                                 absl::string_view operation);
     static absl::StatusOr<ResolvedSpeakerConfig> ResolveSpeakerRequest(

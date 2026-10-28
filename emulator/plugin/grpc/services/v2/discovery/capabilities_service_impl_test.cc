@@ -169,7 +169,13 @@ TEST_F(CapabilitiesServiceTest, ReturnsSubsystemsCapabilities) {
     ASSERT_TRUE(reply.has_audio());
     EXPECT_EQ(reply.audio().access_mode(), AccessMode::ACCESS_MODE_READ_WRITE);
     EXPECT_EQ(reply.audio().fidelity(), Fidelity::FIDELITY_HARDWARE);
-    EXPECT_FALSE(reply.audio().has_microphone_profile());
+    ASSERT_TRUE(reply.audio().has_microphone_profile());
+    EXPECT_THAT(reply.audio().microphone_profile().supported_formats(),
+                ElementsAre(SampleFormat::SAMPLE_FORMAT_PCM16_BIT,
+                            SampleFormat::SAMPLE_FORMAT_F32_BIT));
+    EXPECT_THAT(reply.audio().microphone_profile().supported_sample_rates_hz(),
+                ElementsAre(8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000));
+    EXPECT_THAT(reply.audio().microphone_profile().supported_channel_counts(), ElementsAre(1, 2));
     ASSERT_TRUE(reply.audio().has_speaker_profile());
     EXPECT_THAT(reply.audio().speaker_profile().supported_formats(),
                 ElementsAre(SampleFormat::SAMPLE_FORMAT_PCM16_BIT,
@@ -286,6 +292,43 @@ TEST_F(CapabilitiesServiceTest, OmitsAudioCapabilitiesWhenDisabled) {
     Status status = service.GetDeviceCapabilities(&server_context, &request, &reply);
     ASSERT_TRUE(status.ok());
     EXPECT_FALSE(reply.has_audio());
+}
+
+TEST_F(CapabilitiesServiceTest, AudioProfilesFollowInputAndOutputHardwareFlags) {
+    {
+        auto props = std::make_unique<AvdProperties>();
+        props->hw_config = FakeHardwareConfig::GetHwConfig();
+        props->hw_config.hw_audioInput = true;
+        props->hw_config.hw_audioOutput = false;
+
+        auto universe = std::make_unique<TestUniverse>(std::move(props));
+        CapabilitiesServiceImpl service(*universe);
+
+        GetDeviceCapabilitiesRequest request;
+        DeviceCapabilities reply;
+        ServerContext server_context;
+        ASSERT_TRUE(service.GetDeviceCapabilities(&server_context, &request, &reply).ok());
+        ASSERT_TRUE(reply.has_audio());
+        EXPECT_TRUE(reply.audio().has_microphone_profile());
+        EXPECT_FALSE(reply.audio().has_speaker_profile());
+    }
+    {
+        auto props = std::make_unique<AvdProperties>();
+        props->hw_config = FakeHardwareConfig::GetHwConfig();
+        props->hw_config.hw_audioInput = false;
+        props->hw_config.hw_audioOutput = true;
+
+        auto universe = std::make_unique<TestUniverse>(std::move(props));
+        CapabilitiesServiceImpl service(*universe);
+
+        GetDeviceCapabilitiesRequest request;
+        DeviceCapabilities reply;
+        ServerContext server_context;
+        ASSERT_TRUE(service.GetDeviceCapabilities(&server_context, &request, &reply).ok());
+        ASSERT_TRUE(reply.has_audio());
+        EXPECT_FALSE(reply.audio().has_microphone_profile());
+        EXPECT_TRUE(reply.audio().has_speaker_profile());
+    }
 }
 
 }  // namespace
