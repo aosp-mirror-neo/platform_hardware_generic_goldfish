@@ -15,20 +15,26 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 #include "grpcpp/support/interceptor.h"
 
 #include "android/control/interceptor/logging_interceptor.h"
 #include "android/control/interceptor/percentiles.h"
+#include "goldfish/async/event_loop.h"
 #include "goldfish/metrics/metrics_reporter.h"
 
 namespace android::control::interceptor {
 
 class MetricsInterceptorFactory : public grpc::experimental::ServerInterceptorFactoryInterface {
   public:
+    static constexpr absl::Duration kFlushInterval = absl::Minutes(5);
+
     // Metrics for a single gRPC method.
     struct MethodMetrics {
         // Tracks bytes received for streaming reads.
@@ -50,9 +56,9 @@ class MetricsInterceptorFactory : public grpc::experimental::ServerInterceptorFa
         int failed_requests = 0;
     };
 
-    explicit MetricsInterceptorFactory(::goldfish::metrics::MetricsReporter& reporter)
-            : reporter_(reporter) {}
-    ~MetricsInterceptorFactory() override { ReportMetrics(); }
+    MetricsInterceptorFactory(::goldfish::metrics::MetricsReporter& reporter,
+                              ::goldfish::async::EventLoop* event_loop);
+    ~MetricsInterceptorFactory() override;
 
     grpc::experimental::Interceptor* CreateServerInterceptor(
             grpc::experimental::ServerRpcInfo* info) override {
@@ -62,24 +68,18 @@ class MetricsInterceptorFactory : public grpc::experimental::ServerInterceptorFa
 
     void Record(const InvocationRecord& invocation);
 
-    void ReportMetrics() {
-        absl::MutexLock lock(&mutex_);
-        for (const auto& [name, metrics] : server_metrics_) {
-            ReportMethodMetrics(name, metrics, /*is_server=*/true);
-        }
-        for (const auto& [name, metrics] : client_metrics_) {
-            ReportMethodMetrics(name, metrics, /*is_server=*/false);
-        }
-    }
+    void ReportMetrics();
 
   private:
-    void ReportMethodMetrics(const std::string& name, const MethodMetrics& metrics, bool is_server);
+    void ReportMethodMetrics(const std::string& name, const MethodMetrics& metrics, bool is_server)
+            ABSL_LOCKS_EXCLUDED(mutex_);
 
     ::goldfish::metrics::MetricsReporter& reporter_;
 
     absl::Mutex mutex_;
     absl::flat_hash_map<std::string, MethodMetrics> server_metrics_ ABSL_GUARDED_BY(mutex_);
     absl::flat_hash_map<std::string, MethodMetrics> client_metrics_ ABSL_GUARDED_BY(mutex_);
+    std::shared_ptr<::goldfish::async::EventLoop::Timer> flush_timer_;
 };
 
 }  // namespace android::control::interceptor

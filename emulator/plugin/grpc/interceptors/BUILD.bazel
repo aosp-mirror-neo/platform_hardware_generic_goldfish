@@ -105,9 +105,14 @@ cc_library(
     deps = [
         ":logging_interceptor",
         ":percentiles",
+        "//emulator/libs/async:async_api",
         "//emulator/libs/metrics",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@grpc//:grpc++",
         "@zlib",
     ],
 )
@@ -118,11 +123,17 @@ cc_test(
     srcs = ["metrics_interceptor_test.cc"],
     visibility = ["//visibility:public"],
     deps = [
+        ":logging_interceptor",
         ":metrics_interceptor",
+        "//emulator/libs/async:async_testing",
+        "//emulator/libs/metrics",
+        "//emulator/libs/metrics:fake_metrics_writer",
         "//emulator/libs/test:googletest_main",
         "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
         "@googletest//:gtest",
+        "@zlib",
     ],
 )
 

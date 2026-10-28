@@ -185,7 +185,8 @@ CreateInterceptors(bool enable_logging, int idle_timeout) {
             std::make_unique<android::control::interceptor::BreadcrumbInterceptorFactory>());
     creators.emplace_back(
             std::make_unique<android::control::interceptor::MetricsInterceptorFactory>(
-                    ::goldfish::avd::GetAvd().GetMetricsReporter()));
+                    ::goldfish::avd::GetAvd().GetMetricsReporter(),
+                    goldfish::avd::globalEventLoop()));
     creators.emplace_back(
             std::make_unique<android::control::interceptor::PerfettoInterceptorFactory>());
 
