@@ -18,9 +18,19 @@
 
 #include "goldfish/audio/goldfish_audio_mux.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 
+#include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/time/time.h"
+
+#include "goldfish/audio/audio_input_mux.h"
+#include "goldfish/audio/pcm_format.h"
 
 // clang-format off
 // IWYU pragma: begin_keep
@@ -29,7 +39,9 @@ extern "C" {
 #include "hw/core/qdev.h"
 #include "qapi/error.h"
 #include "qemu/audio.h"
+#include "qemu/timer.h"
 #include "qom/object.h"
+#include "system/runstate.h"
 }
 // IWYU pragma: end_keep
 // clang-format on
@@ -37,9 +49,227 @@ extern "C" {
 namespace goldfish::audio {
 namespace {
 
+constexpr int64_t kTimerPeriodNs = 10'000'000;  // 10 ms virtual-clock cadence.
+constexpr char kDefaultInputVoiceName[] = "goldfish.in";
+
+GuestPcmFormat ToGuestPcmFormat(AudioFormat fmt) {
+    switch (fmt) {
+    case AUDIO_FORMAT_S8:
+        return GuestPcmFormat::kS8;
+    case AUDIO_FORMAT_U8:
+        return GuestPcmFormat::kU8;
+    case AUDIO_FORMAT_S16:
+        return GuestPcmFormat::kS16;
+    case AUDIO_FORMAT_U16:
+        return GuestPcmFormat::kU16;
+    case AUDIO_FORMAT_S32:
+        return GuestPcmFormat::kS32;
+    case AUDIO_FORMAT_U32:
+        return GuestPcmFormat::kU32;
+    case AUDIO_FORMAT_F32:
+        return GuestPcmFormat::kF32;
+    case AUDIO_FORMAT__MAX:
+        break;
+    }
+    return GuestPcmFormat::kS16;
+}
+
+AudioFormat ToQemuAudioFormat(GuestPcmFormat fmt) {
+    switch (fmt) {
+    case GuestPcmFormat::kS8:
+        return AUDIO_FORMAT_S8;
+    case GuestPcmFormat::kU8:
+        return AUDIO_FORMAT_U8;
+    case GuestPcmFormat::kS16:
+        return AUDIO_FORMAT_S16;
+    case GuestPcmFormat::kU16:
+        return AUDIO_FORMAT_U16;
+    case GuestPcmFormat::kS32:
+        return AUDIO_FORMAT_S32;
+    case GuestPcmFormat::kU32:
+        return AUDIO_FORMAT_U32;
+    case GuestPcmFormat::kF32:
+        return AUDIO_FORMAT_F32;
+    }
+    return AUDIO_FORMAT_S16;
+}
+
+GuestAudioConfig ToGuestAudioConfig(const audsettings& as) {
+    return GuestAudioConfig{
+        .sample_rate_hz = static_cast<uint32_t>(std::max(1, as.freq)),
+        .channels = static_cast<uint32_t>(
+                std::clamp(as.nchannels, 1, static_cast<int>(kMaxAudioChannels))),
+        .format = ToGuestPcmFormat(as.fmt),
+        .big_endian = as.big_endian,
+    };
+}
+
+audsettings ToQemuAudSettings(const GuestAudioConfig& cfg) {
+    audsettings as = {};
+    as.freq = static_cast<int>(cfg.sample_rate_hz);
+    as.nchannels = static_cast<int>(cfg.channels);
+    as.fmt = ToQemuAudioFormat(cfg.format);
+    as.big_endian = cfg.big_endian;
+    return as;
+}
+
+class QemuHostAudioAdapter final : public HostAudioInputInterface {
+  public:
+    struct HostVoiceContext {
+        SWVoiceIn* host_sw = nullptr;
+        GuestDataCallback on_host_data;
+
+        static void OnHostCallbackStatic(void* opaque, int avail) {
+            auto* ctx = static_cast<HostVoiceContext*>(opaque);
+            if (ctx && ctx->on_host_data) {
+                ctx->on_host_data(avail);
+            }
+        }
+    };
+
+    QemuHostAudioAdapter(AudioBackend* host_be, QEMUTimer* timer)
+            : host_be_(host_be), timer_(timer) {}
+
+    HostVoiceHandle OpenHostVoice(HostVoiceHandle existing, const char* name,
+                                  const GuestAudioConfig& config,
+                                  GuestDataCallback on_host_data) override {
+        if (!host_be_) {
+            return nullptr;
+        }
+        AudioBackendClass* hk = AUDIO_BACKEND_GET_CLASS(host_be_);
+        if (!hk || !hk->open_in) {
+            return nullptr;
+        }
+
+        const char* voice_name =
+                (name != nullptr && name[0] != '\0') ? name : kDefaultInputVoiceName;
+        const audsettings as = ToQemuAudSettings(config);
+        if (existing != nullptr) {
+            auto* ctx = static_cast<HostVoiceContext*>(existing);
+            ctx->on_host_data = std::move(on_host_data);
+            SWVoiceIn* reopened = hk->open_in(host_be_, ctx->host_sw, voice_name, ctx,
+                                              &HostVoiceContext::OnHostCallbackStatic, &as);
+            if (!reopened) {
+                // QEMU's audio_mixeng_backend_open_in closes the previous SWVoiceIn on every
+                // failure path before returning nullptr; calling hk->close_in here would
+                // double-free ctx->host_sw.
+                delete ctx;
+                return nullptr;
+            }
+            ctx->host_sw = reopened;
+            return ctx;
+        }
+
+        auto ctx = std::make_unique<HostVoiceContext>();
+        ctx->on_host_data = std::move(on_host_data);
+        SWVoiceIn* created = hk->open_in(host_be_, nullptr, voice_name, ctx.get(),
+                                         &HostVoiceContext::OnHostCallbackStatic, &as);
+        if (!created) {
+            return nullptr;
+        }
+        ctx->host_sw = created;
+        return ctx.release();
+    }
+
+    void CloseHostVoice(HostVoiceHandle voice) override {
+        auto* ctx = static_cast<HostVoiceContext*>(voice);
+        if (!ctx) {
+            return;
+        }
+        if (const auto resolved = ResolveActiveHostVoice(voice);
+            resolved.has_value() && resolved->hk->close_in) {
+            resolved->hk->close_in(host_be_, resolved->ctx->host_sw);
+        }
+        delete ctx;
+    }
+
+    void SetHostVoiceActive(HostVoiceHandle voice, bool active) override {
+        const auto resolved = ResolveActiveHostVoice(voice);
+        if (resolved.has_value() && resolved->hk->set_active_in) {
+            resolved->hk->set_active_in(host_be_, resolved->ctx->host_sw, active);
+        }
+    }
+
+    void SetHostVoiceVolume(HostVoiceHandle voice, const GuestChannelVolume& volume) override {
+        const auto resolved = ResolveActiveHostVoice(voice);
+        if (!resolved.has_value() || !resolved->hk->set_volume_in) {
+            return;
+        }
+        Volume qvol = {};
+        qvol.mute = volume.mute;
+        qvol.channels = static_cast<int>(std::min(volume.channels, kMaxAudioChannels));
+        for (int i = 0; i < qvol.channels; ++i) {
+            qvol.vol[i] = volume.gain[static_cast<size_t>(i)];
+        }
+        resolved->hk->set_volume_in(host_be_, resolved->ctx->host_sw, &qvol);
+    }
+
+    size_t ReadHostVoice(HostVoiceHandle voice, void* dst, size_t byte_count) override {
+        const auto resolved = ResolveActiveHostVoice(voice);
+        if (!resolved.has_value() || !resolved->hk->read) {
+            return 0;
+        }
+        return resolved->hk->read(host_be_, resolved->ctx->host_sw, dst, byte_count);
+    }
+
+    void SetTimerArmed(bool armed) override {
+        timer_armed_ = armed;
+        if (!timer_) {
+            return;
+        }
+        if (armed) {
+            RearmTimerIfArmed();
+        } else {
+            timer_del(timer_);
+        }
+    }
+
+    absl::Duration NowVirtualTime() const override {
+        return absl::Nanoseconds(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    }
+
+    void RearmTimerIfArmed() {
+        if (timer_armed_ && timer_ != nullptr) {
+            timer_mod_ns(timer_, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + kTimerPeriodNs);
+        }
+    }
+
+    void DetachResources() {
+        timer_armed_ = false;
+        timer_ = nullptr;
+        host_be_ = nullptr;
+    }
+
+  private:
+    struct ActiveHostVoice {
+        HostVoiceContext* ctx = nullptr;
+        AudioBackendClass* hk = nullptr;
+    };
+
+    std::optional<ActiveHostVoice> ResolveActiveHostVoice(HostVoiceHandle voice) const {
+        auto* ctx = static_cast<HostVoiceContext*>(voice);
+        if (!ctx || !ctx->host_sw || !host_be_) {
+            return std::nullopt;
+        }
+        AudioBackendClass* hk = AUDIO_BACKEND_GET_CLASS(host_be_);
+        if (!hk) {
+            return std::nullopt;
+        }
+        return ActiveHostVoice{.ctx = ctx, .hk = hk};
+    }
+
+    AudioBackend* host_be_ = nullptr;
+    QEMUTimer* timer_ = nullptr;
+    bool timer_armed_ = false;
+};
+
 struct GoldfishAudioBackendState {
     std::string audiodev_id;
     AudioBackend* host_be = nullptr;
+    QEMUTimer* timer = nullptr;
+    VMChangeStateEntry* vm_state_entry = nullptr;
+    std::unique_ptr<QemuHostAudioAdapter> host_adapter;
+    std::shared_ptr<AudioInputMux> mux;
     bool torn_down = false;
 };
 
@@ -59,6 +289,28 @@ AudioBackend* WrappedHost(AudioBackend* be) {
     return (self != nullptr && self->state != nullptr) ? self->state->host_be : nullptr;
 }
 
+AudioInputMux* BackendMux(AudioBackend* be) {
+    auto* self = GOLDFISH_AUDIO_BACKEND(be);
+    return (self != nullptr && self->state != nullptr) ? self->state->mux.get() : nullptr;
+}
+
+void goldfish_audio_backend_on_timer(void* opaque) {
+    auto* state = static_cast<GoldfishAudioBackendState*>(opaque);
+    if (!state || state->torn_down || !state->mux || !state->host_adapter) {
+        return;
+    }
+    state->host_adapter->RearmTimerIfArmed();
+    state->mux->OnTimerTick();
+}
+
+void goldfish_audio_backend_on_vm_state(void* opaque, bool running, RunState /*runstate*/) {
+    auto* state = static_cast<GoldfishAudioBackendState*>(opaque);
+    if (!state || state->torn_down || !state->mux) {
+        return;
+    }
+    state->mux->OnVmRunningChanged(running);
+}
+
 void TearDownBackendState(GoldfishAudioBackend* self) {
     GoldfishAudioBackendState* state = self->state;
     if (!state || state->torn_down) {
@@ -66,6 +318,21 @@ void TearDownBackendState(GoldfishAudioBackend* self) {
     }
     state->torn_down = true;
 
+    UnregisterAudioInputMux(AUDIO_BACKEND(self));
+    if (state->mux) {
+        state->mux->Shutdown();
+    }
+    if (state->host_adapter) {
+        state->host_adapter->DetachResources();
+    }
+    if (state->vm_state_entry) {
+        qemu_del_vm_change_state_handler(state->vm_state_entry);
+        state->vm_state_entry = nullptr;
+    }
+    if (state->timer) {
+        timer_free(state->timer);
+        state->timer = nullptr;
+    }
     if (state->host_be) {
         object_unref(OBJECT(state->host_be));
         state->host_be = nullptr;
@@ -206,51 +473,62 @@ bool goldfish_audio_backend_set_dbus_server(AudioBackend* be, GDBusObjectManager
 SWVoiceIn* goldfish_audio_backend_open_in(AudioBackend* be, SWVoiceIn* sw, const char* name,
                                           void* callback_opaque, audio_callback_fn callback_fn,
                                           const struct audsettings* as) {
-    AudioBackend* host = WrappedHost(be);
-    if (!host) {
+    AudioInputMux* mux = BackendMux(be);
+    if (!mux || !as || !callback_fn) {
         return nullptr;
     }
-    return AUDIO_BACKEND_GET_CLASS(host)->open_in(host, sw, name, callback_opaque, callback_fn, as);
+    MuxVoiceHandle* handle = mux->OpenVoice(
+            reinterpret_cast<MuxVoiceHandle*>(sw), name ? name : kDefaultInputVoiceName,
+            ToGuestAudioConfig(*as),
+            [callback_fn, callback_opaque](int avail) { callback_fn(callback_opaque, avail); });
+    return reinterpret_cast<SWVoiceIn*>(handle);
 }
 
 void goldfish_audio_backend_close_in(AudioBackend* be, SWVoiceIn* sw) {
-    AudioBackend* host = WrappedHost(be);
-    if (!host || !sw) {
+    AudioInputMux* mux = BackendMux(be);
+    if (!mux || !sw) {
         return;
     }
-    AUDIO_BACKEND_GET_CLASS(host)->close_in(host, sw);
+    mux->CloseVoice(reinterpret_cast<MuxVoiceHandle*>(sw));
 }
 
 bool goldfish_audio_backend_is_active_in(AudioBackend* be, SWVoiceIn* sw) {
-    AudioBackend* host = WrappedHost(be);
-    if (!host || !sw) {
+    AudioInputMux* mux = BackendMux(be);
+    if (!mux || !sw) {
         return false;
     }
-    return AUDIO_BACKEND_GET_CLASS(host)->is_active_in(host, sw);
+    return mux->IsVoiceActive(reinterpret_cast<const MuxVoiceHandle*>(sw));
 }
 
 void goldfish_audio_backend_set_active_in(AudioBackend* be, SWVoiceIn* sw, bool on) {
-    AudioBackend* host = WrappedHost(be);
-    if (!host || !sw) {
+    AudioInputMux* mux = BackendMux(be);
+    if (!mux || !sw) {
         return;
     }
-    AUDIO_BACKEND_GET_CLASS(host)->set_active_in(host, sw, on);
+    mux->SetVoiceActive(reinterpret_cast<MuxVoiceHandle*>(sw), on);
 }
 
 void goldfish_audio_backend_set_volume_in(AudioBackend* be, SWVoiceIn* sw, Volume* vol) {
-    AudioBackend* host = WrappedHost(be);
-    if (!host || !sw || !vol) {
+    AudioInputMux* mux = BackendMux(be);
+    if (!mux || !sw || !vol) {
         return;
     }
-    AUDIO_BACKEND_GET_CLASS(host)->set_volume_in(host, sw, vol);
+    GuestChannelVolume gvol;
+    gvol.mute = vol->mute;
+    gvol.channels = static_cast<uint32_t>(
+            std::clamp(vol->channels, 1, static_cast<int>(kMaxAudioChannels)));
+    for (uint32_t i = 0; i < gvol.channels; ++i) {
+        gvol.gain[i] = vol->vol[i];
+    }
+    mux->SetVoiceVolume(reinterpret_cast<MuxVoiceHandle*>(sw), gvol);
 }
 
 size_t goldfish_audio_backend_read(AudioBackend* be, SWVoiceIn* sw, void* buf, size_t size) {
-    AudioBackend* host = WrappedHost(be);
-    if (!host || !sw || !buf || size == 0) {
+    AudioInputMux* mux = BackendMux(be);
+    if (!mux || !sw || !buf || size == 0) {
         return 0;
     }
-    return AUDIO_BACKEND_GET_CLASS(host)->read(host, sw, buf, size);
+    return mux->ReadVoice(reinterpret_cast<MuxVoiceHandle*>(sw), buf, size);
 }
 
 void goldfish_audio_backend_class_init(ObjectClass* oc, const void* /*data*/) {
@@ -378,6 +656,14 @@ void goldfish_audio_mux_dev_realize(DeviceState* qdev, Error** errp) {
     state->audiodev_id = dev->config->audiodev_id;
     object_ref(OBJECT(host_be));
     state->host_be = host_be;
+    state->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, &goldfish_audio_backend_on_timer, state);
+    state->host_adapter = std::make_unique<QemuHostAudioAdapter>(state->host_be, state->timer);
+    state->mux = std::make_shared<AudioInputMux>(state->host_adapter.get(),
+                                                 runstate_get() == RUN_STATE_RUNNING);
+    state->vm_state_entry =
+            qemu_add_vm_change_state_handler(&goldfish_audio_backend_on_vm_state, state);
+
+    RegisterAudioInputMux(AUDIO_BACKEND(mux_be), state->mux);
 
     if (!object_property_try_add_child(audiodevs_root, state->audiodev_id.c_str(), OBJECT(mux_be),
                                        errp)) {
