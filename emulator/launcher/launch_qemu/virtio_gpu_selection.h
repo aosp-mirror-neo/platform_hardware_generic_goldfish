@@ -27,16 +27,17 @@ namespace android::goldfish {
 // Both drive gfxstream; they differ in where the device lives and how it
 // reaches the renderer (b/576450291):
 //   kRutabaga:  QEMU's in-tree virtio-gpu-rutabaga, through librutabaga_ffi.
+//               Deprecated fallback; selecting it logs a warning.
 //   kGfxstream: the goldfish plugin's virtio-gpu-gfxstream, calling
 //               libgfxstream_backend's stream_renderer_* API directly.
 // Exactly one of them is put on the command line, chosen with the
-// "-virtio-gpu-device rutabaga|gfxstream" option (AndroidOptions::virtio_gpu_device).
+// "-virtio-gpu-device gfxstream|rutabaga" option (AndroidOptions::virtio_gpu_device).
 enum class VirtioGpuDevice {
     kRutabaga,
     kGfxstream,
 };
 
-inline constexpr VirtioGpuDevice kDefaultVirtioGpuDevice = VirtioGpuDevice::kRutabaga;
+inline constexpr VirtioGpuDevice kDefaultVirtioGpuDevice = VirtioGpuDevice::kGfxstream;
 
 // The device selected by `opts` (-virtio-gpu-device; unset means the
 // default). INVALID_ARGUMENT, naming the option and the accepted values, for

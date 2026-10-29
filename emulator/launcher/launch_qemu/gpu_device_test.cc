@@ -25,6 +25,8 @@
 #include <utility>
 #include <vector>
 
+#include "absl/base/log_severity.h"
+#include "absl/log/scoped_mock_log.h"
 #include "absl/status/status_matchers.h"
 #include "absl/strings/str_cat.h"
 #include "gmock/gmock.h"
@@ -42,6 +44,8 @@
 
 namespace android::goldfish::test {
 
+using ::absl::ScopedMockLog;
+using ::testing::_;
 using ::testing::AllOf;
 using ::testing::ElementsAre;
 using ::testing::Eq;
@@ -310,50 +314,80 @@ TEST(GpuDeviceTest, DefaultSoftwareGpuEnv) {
 
 // Exactly one virtio-gpu device goes on the command line; the properties are
 // the same for both, only the device name differs (-virtio-gpu-device).
-TEST(GpuDeviceTest, DefaultsToVirtioGpuRutabaga) {
+TEST(GpuDeviceTest, DefaultsToVirtioGpuGfxstreamAndWarnsWithRutabagaFallback) {
     base::TestSystem sys("");
     FakeEmulator emu;
     HardwareConfig hw;
     EXPECT_CALL(emu.mock_avd(), Hw()).WillRepeatedly(ReturnRef(hw));
 
+    ScopedMockLog log(absl::MockLogDefault::kIgnoreUnexpected);
+    EXPECT_CALL(log, Log(absl::LogSeverity::kWarning, _,
+                         AllOf(HasSubstr("virtio-gpu-gfxstream is now used by default"),
+                               HasSubstr("https://issuetracker.google.com/issues/new?component="),
+                               HasSubstr("-virtio-gpu-device rutabaga"),
+                               HasSubstr("deprecated virtio-gpu-rutabaga"))));
+    EXPECT_CALL(log, Log(absl::LogSeverity::kWarning, _,
+                         HasSubstr("virtio-gpu-rutabaga is deprecated")))
+            .Times(0);
+    log.StartCapturingLogs();
     SnapshotDevice snapshot_dev;
     GpuDevice dev("gpu0", snapshot_dev);
     EXPECT_OK(dev.initialize(emu.config()));
-    EXPECT_EQ(dev.virtio_gpu_device(), VirtioGpuDevice::kRutabaga);
+    log.StopCapturingLogs();
+    EXPECT_EQ(dev.virtio_gpu_device(), VirtioGpuDevice::kGfxstream);
     const std::vector<std::string> params = dev.getQemuParameters(emu.config());
     ASSERT_THAT(params, ElementsAre(Eq("-device"), HasSubstr("gfxstream-vulkan=on")));
     EXPECT_THAT(params[1],
-                AllOf(StartsWith("virtio-gpu-rutabaga,"), Not(HasSubstr("virtio-gpu-gfxstream"))));
+                AllOf(StartsWith("virtio-gpu-gfxstream,"), Not(HasSubstr("virtio-gpu-rutabaga"))));
 }
 
-TEST(GpuDeviceTest, VirtioGpuDeviceOptionSelectsGfxstream) {
+TEST(GpuDeviceTest, VirtioGpuDeviceOptionSelectsRutabagaOrGfxstream) {
     base::TestSystem sys("");
-    AndroidOptions opts{};
-    opts.virtio_gpu_device = const_cast<char*>("gfxstream");
-    FakeEmulator emu(opts);
-    HardwareConfig hw;
-    EXPECT_CALL(emu.mock_avd(), Hw()).WillRepeatedly(ReturnRef(hw));
-
-    SnapshotDevice snapshot_dev;
-    GpuDevice dev("gpu0", snapshot_dev);
-    EXPECT_OK(dev.initialize(emu.config()));
-    EXPECT_EQ(dev.virtio_gpu_device(), VirtioGpuDevice::kGfxstream);
-    const std::vector<std::string> gfxstream_params = dev.getQemuParameters(emu.config());
-    ASSERT_THAT(gfxstream_params, ElementsAre(Eq("-device"), HasSubstr("gfxstream-vulkan=on")));
-    EXPECT_THAT(gfxstream_params[1],
-                AllOf(StartsWith("virtio-gpu-gfxstream,"), Not(HasSubstr("virtio-gpu-rutabaga"))));
-
-    // Same properties as the rutabaga device, just a different device name.
     AndroidOptions rutabaga_opts{};
     rutabaga_opts.virtio_gpu_device = const_cast<char*>("rutabaga");
     FakeEmulator rutabaga_emu(rutabaga_opts);
+    HardwareConfig hw;
     EXPECT_CALL(rutabaga_emu.mock_avd(), Hw()).WillRepeatedly(ReturnRef(hw));
+
+    SnapshotDevice snapshot_dev;
     GpuDevice rutabaga_dev("gpu0", snapshot_dev);
-    EXPECT_OK(rutabaga_dev.initialize(rutabaga_emu.config()));
+    {
+        ScopedMockLog log(absl::MockLogDefault::kIgnoreUnexpected);
+        EXPECT_CALL(log, Log(absl::LogSeverity::kWarning, _,
+                             HasSubstr("virtio-gpu-gfxstream is now used by default")))
+                .Times(0);
+        EXPECT_CALL(log, Log(absl::LogSeverity::kWarning, _,
+                             AllOf(HasSubstr("virtio-gpu-rutabaga is deprecated"),
+                                   HasSubstr("switch to virtio-gpu-gfxstream"),
+                                   HasSubstr("https://issuetracker.google.com/issues/new?"
+                                             "component="))));
+        log.StartCapturingLogs();
+        EXPECT_OK(rutabaga_dev.initialize(rutabaga_emu.config()));
+    }
     EXPECT_EQ(rutabaga_dev.virtio_gpu_device(), VirtioGpuDevice::kRutabaga);
     const std::vector<std::string> rutabaga_params =
             rutabaga_dev.getQemuParameters(rutabaga_emu.config());
-    ASSERT_EQ(rutabaga_params.size(), 2u);
+    ASSERT_THAT(rutabaga_params, ElementsAre(Eq("-device"), HasSubstr("gfxstream-vulkan=on")));
+    EXPECT_THAT(rutabaga_params[1],
+                AllOf(StartsWith("virtio-gpu-rutabaga,"), Not(HasSubstr("virtio-gpu-gfxstream"))));
+
+    // Same properties as the gfxstream device, just a different device name.
+    // An explicit -virtio-gpu-device gfxstream is an opt-in: no warning at all.
+    AndroidOptions gfxstream_opts{};
+    gfxstream_opts.virtio_gpu_device = const_cast<char*>("gfxstream");
+    FakeEmulator gfxstream_emu(gfxstream_opts);
+    EXPECT_CALL(gfxstream_emu.mock_avd(), Hw()).WillRepeatedly(ReturnRef(hw));
+    GpuDevice gfxstream_dev("gpu0", snapshot_dev);
+    {
+        ScopedMockLog log(absl::MockLogDefault::kIgnoreUnexpected);
+        EXPECT_CALL(log, Log(absl::LogSeverity::kWarning, _, HasSubstr("virtio-gpu"))).Times(0);
+        log.StartCapturingLogs();
+        EXPECT_OK(gfxstream_dev.initialize(gfxstream_emu.config()));
+    }
+    EXPECT_EQ(gfxstream_dev.virtio_gpu_device(), VirtioGpuDevice::kGfxstream);
+    const std::vector<std::string> gfxstream_params =
+            gfxstream_dev.getQemuParameters(gfxstream_emu.config());
+    ASSERT_EQ(gfxstream_params.size(), 2u);
     EXPECT_EQ(rutabaga_params[1].substr(std::strlen("virtio-gpu-rutabaga")),
               gfxstream_params[1].substr(std::strlen("virtio-gpu-gfxstream")));
 }

@@ -53,6 +53,11 @@ namespace {
 
 using android::base::System;
 
+// Where users report problems with the virtio-gpu device switch
+// (b/576450291): the public Android Emulator issue tracker component.
+constexpr std::string_view kVirtioGpuBugReportUrl =
+        "https://issuetracker.google.com/issues/new?component=192727";
+
 ::goldfish::gvk::IMetaLoader::Ptr& VulkanLoaderOverride() {
     static absl::NoDestructor<::goldfish::gvk::IMetaLoader::Ptr> override_loader;
     return *override_loader;
@@ -456,6 +461,21 @@ absl::Status GpuDevice::initialize(const EmulatorConfig& emulator) {
     // -virtio-gpu-device: validated here so that a typo is reported at startup.
     ASSIGN_OR_RETURN(mVirtioGpuDevice, SelectedVirtioGpuDevice(emulator.opts()));
     LOG(INFO) << "Using virtio-gpu device: " << VirtioGpuDeviceName(mVirtioGpuDevice);
+    if (mVirtioGpuDevice == VirtioGpuDevice::kRutabaga) {
+        LOG(WARNING) << "virtio-gpu-rutabaga is deprecated and will be removed in a future "
+                        "release. Please switch to virtio-gpu-gfxstream (the default: drop "
+                        "'-virtio-gpu-device rutabaga'); if it does not work for you, please "
+                        "report the problem at "
+                     << kVirtioGpuBugReportUrl << " so it can be fixed before the removal.";
+    } else if (!emulator.opts().virtio_gpu_device) {
+        // Only when the user did not choose: an explicit -virtio-gpu-device
+        // gfxstream needs no nudge on every launch.
+        LOG(WARNING) << "virtio-gpu-gfxstream is now used by default. If you hit a problem, "
+                        "please report it at "
+                     << kVirtioGpuBugReportUrl
+                     << "; until it is fixed, '-virtio-gpu-device rutabaga' selects the "
+                        "deprecated virtio-gpu-rutabaga device.";
+    }
 
     auto selection = selectGpu(emulator);
     LOG(INFO) << "Selected GPU mode: " << selection.chosen_gpu_mode;

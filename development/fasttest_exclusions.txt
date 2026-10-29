@@ -1,8 +1,10 @@
 @breakpad//:dump_syms
 @goldfish//emulator/crashreport/tool:bazel_crashreport
 @goldfish//emulator/launcher:boot_tests
+@goldfish//emulator/launcher:can_boot_with_gfxstream_device_zip
 @goldfish//emulator/launcher:can_boot_with_minigbm_2x_zip
 @goldfish//emulator/launcher:can_boot_with_minigbm_zip
+@goldfish//emulator/launcher:can_boot_with_rutabaga_device_zip
 @goldfish//emulator/launcher:can_launch_kernel_with_minigbm_zip
 @goldfish//emulator/launcher:emulator_produces_pixels_zip
 @goldfish//emulator/tests:release_zip_internal_test

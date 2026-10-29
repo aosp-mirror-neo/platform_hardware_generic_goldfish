@@ -772,10 +772,10 @@ create_launch_emulator_test(
 )
 
 create_launch_emulator_test(
-    # Same boot with the plugin's virtio-gpu-gfxstream device instead of the
-    # default virtio-gpu-rutabaga (b/576450291). x-verify-state=enforce is not
-    # passed because the launcher owns the -device string; the device's default
-    # "log" mode reports invariant violations in the emulator log.
+    # Explicit -virtio-gpu-device gfxstream boot check (now also the default,
+    # b/576450291). x-verify-state=enforce is not passed because the launcher
+    # owns the -device string; the device's default "log" mode reports invariant
+    # violations in the emulator log.
     name = "can_boot_with_gfxstream_device",
     count_log_pattern = "'Using virtio-gpu device: virtio-gpu-gfxstream'",
     expected_occurrences = 1,
@@ -784,6 +784,24 @@ create_launch_emulator_test(
         "-no-boot-anim",
         "-virtio-gpu-device",
         "gfxstream",
+        "-netsim-startup-timeout",
+        "30s",
+    ],
+    target_log_line = "'Boot completed in \\d+ ms'",
+    timeout_seconds = 300,
+)
+
+create_launch_emulator_test(
+    # Same boot with QEMU's fallback virtio-gpu-rutabaga device instead of the
+    # default virtio-gpu-gfxstream (b/576450291).
+    name = "can_boot_with_rutabaga_device",
+    count_log_pattern = "'Using virtio-gpu device: virtio-gpu-rutabaga'",
+    expected_occurrences = 1,
+    params = [
+        "-show-kernel",
+        "-no-boot-anim",
+        "-virtio-gpu-device",
+        "rutabaga",
         "-netsim-startup-timeout",
         "30s",
     ],
@@ -819,6 +837,7 @@ test_suite(
     tests = [
         ":can_boot_with_gfxstream_device",
         ":can_boot_with_minigbm",
+        ":can_boot_with_rutabaga_device",
     ],
 )
 
