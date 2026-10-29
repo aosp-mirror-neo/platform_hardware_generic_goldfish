@@ -39,6 +39,7 @@ using ::android::emulation::control::EvDevEvent;
 using ::android::emulation::control::EvDevEvents;
 using ::android::emulation::control::kMtsPointerUp;
 using ::android::emulation::control::kMtsPressureMax;
+using ::android::emulation::v2::ButtonMask;
 using ::android::emulation::v2::PointerAction;
 using ::android::emulation::v2::PointerEvent;
 using ::android::emulation::v2::ToolType;
@@ -165,6 +166,44 @@ TEST(TouchEncodingTest, PalmEmitsPalmTool) {
                 Contains(EvDevEvent{EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_PALM}));
 }
 
+TEST(TouchEncodingTest, StylusEmitsPenToolRubberZeroAndStylusButtonState) {
+    auto unpressed = MakePointer(ToolType::TOOL_TYPE_STYLUS);
+    const auto unpressed_events = DownOrMove(unpressed, PointerAction::POINTER_ACTION_DOWN, true);
+    EXPECT_THAT(unpressed_events, Contains(EvDevEvent{EV_KEY, BTN_TOOL_RUBBER, 0}));
+    EXPECT_THAT(unpressed_events, Contains(EvDevEvent{EV_KEY, BTN_STYLUS, 0}));
+    EXPECT_THAT(unpressed_events, Contains(EvDevEvent{EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_PEN}));
+
+    auto pressed = MakePointer(ToolType::TOOL_TYPE_STYLUS);
+    pressed.set_button_mask(ButtonMask::BUTTON_MASK_STYLUS_PRIMARY);
+    const auto pressed_events = DownOrMove(pressed, PointerAction::POINTER_ACTION_MOVE, false);
+    EXPECT_THAT(pressed_events, Contains(EvDevEvent{EV_KEY, BTN_TOOL_RUBBER, 0}));
+    EXPECT_THAT(pressed_events, Contains(EvDevEvent{EV_KEY, BTN_STYLUS, 1}));
+    EXPECT_THAT(pressed_events, Contains(EvDevEvent{EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_PEN}));
+}
+
+TEST(TouchEncodingTest, EraserEmitsMaxToolRubberOneAndStylusButtonState) {
+    auto unpressed = MakePointer(ToolType::TOOL_TYPE_ERASER);
+    const auto unpressed_events = DownOrMove(unpressed, PointerAction::POINTER_ACTION_DOWN, true);
+    EXPECT_THAT(unpressed_events, Contains(EvDevEvent{EV_KEY, BTN_TOOL_RUBBER, 1}));
+    EXPECT_THAT(unpressed_events, Contains(EvDevEvent{EV_KEY, BTN_STYLUS, 0}));
+    EXPECT_THAT(unpressed_events, Contains(EvDevEvent{EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_MAX}));
+
+    auto pressed = MakePointer(ToolType::TOOL_TYPE_ERASER);
+    pressed.set_button_mask(ButtonMask::BUTTON_MASK_STYLUS_PRIMARY);
+    const auto pressed_events = DownOrMove(pressed, PointerAction::POINTER_ACTION_MOVE, false);
+    EXPECT_THAT(pressed_events, Contains(EvDevEvent{EV_KEY, BTN_TOOL_RUBBER, 1}));
+    EXPECT_THAT(pressed_events, Contains(EvDevEvent{EV_KEY, BTN_STYLUS, 1}));
+    EXPECT_THAT(pressed_events, Contains(EvDevEvent{EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_MAX}));
+}
+
+TEST(TouchEncodingTest, FingerOmitsStylusAndRubberKeys) {
+    const auto events = DownOrMove(MakePointer(ToolType::TOOL_TYPE_FINGER),
+                                   PointerAction::POINTER_ACTION_DOWN, true);
+    EXPECT_THAT(events, Contains(EvDevEvent{EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER}));
+    EXPECT_THAT(events, Not(Contains(Field(&EvDevEvent::code, BTN_TOOL_RUBBER))));
+    EXPECT_THAT(events, Not(Contains(Field(&EvDevEvent::code, BTN_STYLUS))));
+}
+
 TEST(TouchEncodingTest, StylusTiltIsSplitAlongOrientation) {
     auto pointer = MakePointer(ToolType::TOOL_TYPE_STYLUS);
     pointer.set_orientation_radians(0.785398F);  // 45 degrees.
@@ -179,7 +218,9 @@ TEST(TouchEncodingTest, TiltedStylusAndEraserEmitTilt) {
         auto pointer = MakePointer(tool_type);
         pointer.set_tilt_radians(0.785398163F);  // 45 degrees, pointing up (orientation 0).
         const auto events = DownOrMove(pointer, PointerAction::POINTER_ACTION_MOVE, false);
-        EXPECT_THAT(events, Contains(EvDevEvent{EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_PEN}));
+        const uint32_t expected_tool =
+                tool_type == ToolType::TOOL_TYPE_ERASER ? MT_TOOL_MAX : MT_TOOL_PEN;
+        EXPECT_THAT(events, Contains(EvDevEvent{EV_ABS, ABS_MT_TOOL_TYPE, expected_tool}));
         EXPECT_THAT(events, Contains(EvDevEvent{EV_ABS, ABS_TILT_X, 0}));
         EXPECT_THAT(events, Contains(EvDevEvent{EV_ABS, ABS_TILT_Y, static_cast<uint32_t>(-45)}));
     }
@@ -207,6 +248,13 @@ TEST(TouchEncodingTest, ContactUpSelectsSlotAndClearsTrackingId) {
     AppendContactUp(7, events);
     EXPECT_THAT(events, ElementsAre(EvDevEvent{EV_ABS, ABS_MT_SLOT, 7},
                                     EvDevEvent{EV_ABS, ABS_MT_TRACKING_ID, kMtsPointerUp}));
+
+    EvDevEvents stylus_up_events;
+    AppendContactUp(7, stylus_up_events, /*clear_stylus_keys=*/true);
+    EXPECT_THAT(stylus_up_events, ElementsAre(EvDevEvent{EV_ABS, ABS_MT_SLOT, 7},
+                                              EvDevEvent{EV_ABS, ABS_MT_TRACKING_ID, kMtsPointerUp},
+                                              EvDevEvent{EV_KEY, BTN_TOOL_RUBBER, 0},
+                                              EvDevEvent{EV_KEY, BTN_STYLUS, 0}));
 }
 
 TEST(TouchEncodingTest, ContactCancelTurnsToPalmBeforeLifting) {
@@ -217,6 +265,18 @@ TEST(TouchEncodingTest, ContactCancelTurnsToPalmBeforeLifting) {
                                          EvDevEvent{EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_PALM}));
     EXPECT_THAT(lift_events, ElementsAre(EvDevEvent{EV_ABS, ABS_MT_SLOT, 7},
                                          EvDevEvent{EV_ABS, ABS_MT_TRACKING_ID, kMtsPointerUp}));
+
+    EvDevEvents stylus_palm_events;
+    EvDevEvents stylus_lift_events;
+    AppendContactCancel(7, stylus_palm_events, stylus_lift_events, /*clear_stylus_keys=*/true);
+    EXPECT_THAT(stylus_palm_events,
+                ElementsAre(EvDevEvent{EV_ABS, ABS_MT_SLOT, 7},
+                            EvDevEvent{EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_PALM}));
+    EXPECT_THAT(
+            stylus_lift_events,
+            ElementsAre(EvDevEvent{EV_ABS, ABS_MT_SLOT, 7},
+                        EvDevEvent{EV_ABS, ABS_MT_TRACKING_ID, kMtsPointerUp},
+                        EvDevEvent{EV_KEY, BTN_TOOL_RUBBER, 0}, EvDevEvent{EV_KEY, BTN_STYLUS, 0}));
 }
 
 TEST(TouchEncodingTest, IsContactReleasedFollowsActionAndPressure) {

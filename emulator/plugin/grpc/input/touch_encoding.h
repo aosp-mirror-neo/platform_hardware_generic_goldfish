@@ -26,12 +26,27 @@ namespace goldfish::grpc::v2 {
 // appended to `events`; the caller terminates the report (SYN_REPORT).
 
 /**
+ * @brief Returns whether `tool_type` is an active pen tool (`TOOL_TYPE_STYLUS`
+ * or `TOOL_TYPE_ERASER`) that drives global `BTN_TOOL_RUBBER` / `BTN_STYLUS`
+ * `EV_KEY` state on the touch device.
+ */
+bool IsStylusOrEraser(::android::emulation::v2::ToolType tool_type);
+
+/**
+ * @brief Appends `EV_KEY` events resetting `BTN_TOOL_RUBBER` and `BTN_STYLUS`
+ * to 0 so subsequent finger contacts do not inherit stale pen/eraser state in
+ * Android's `TouchButtonAccumulator`.
+ */
+void AppendStylusKeysReset(::android::emulation::control::EvDevEvents& events);
+
+/**
  * @brief Appends the events for a contact going down, moving, or hovering.
  *
- * Emits ABS_MT_SLOT `slot`, then ABS_MT_TRACKING_ID `slot` if `new_contact`,
- * then position, tool type, pressure (scaled to kMtsPressureMax; 0 while
- * hovering), touch major/minor, orientation (if non-zero) and, for a tilted
- * stylus or eraser, ABS_TILT_X/Y.
+ * Emits `BTN_TOOL_RUBBER` and `BTN_STYLUS` for stylus/eraser contacts, then
+ * ABS_MT_SLOT `slot`, then ABS_MT_TRACKING_ID `slot` if `new_contact`, then
+ * position, tool type, pressure (scaled to kMtsPressureMax; 0 while hovering),
+ * touch major/minor, orientation (if non-zero) and, for a tilted stylus or
+ * eraser, ABS_TILT_X/Y.
  *
  * @param pointer The contact's position and properties.
  * @param action The pointer action; hover actions encode zero pressure.
@@ -47,12 +62,16 @@ void AppendContactDownOrMove(const ::android::emulation::v2::PointerEvent::Point
 /**
  * @brief Appends the events lifting the contact in `slot`.
  *
- * Emits ABS_MT_SLOT `slot`, then ABS_MT_TRACKING_ID kMtsPointerUp (-1).
+ * Emits ABS_MT_SLOT `slot`, then ABS_MT_TRACKING_ID kMtsPointerUp (-1), and
+ * optionally resets `BTN_TOOL_RUBBER` and `BTN_STYLUS` to 0 when lifting the
+ * last stylus/eraser contact on the device.
  *
  * @param slot The multi-touch slot of the contact to lift; must be >= 0.
  * @param events The event list to append to.
+ * @param clear_stylus_keys Whether to reset `BTN_TOOL_RUBBER` and `BTN_STYLUS`.
  */
-void AppendContactUp(int slot, ::android::emulation::control::EvDevEvents& events);
+void AppendContactUp(int slot, ::android::emulation::control::EvDevEvents& events,
+                     bool clear_stylus_keys = false);
 
 /**
  * @brief Appends the two-report event sequence cancelling the contact in
@@ -60,9 +79,9 @@ void AppendContactUp(int slot, ::android::emulation::control::EvDevEvents& event
  *
  * Appends `ABS_MT_SLOT slot` and `ABS_MT_TOOL_TYPE MT_TOOL_PALM` to
  * `palm_events`, and `ABS_MT_SLOT slot` and `ABS_MT_TRACKING_ID
- * kMtsPointerUp` (-1) to `lift_events`. The caller must flush `palm_events`
- * (`SYN_REPORT`) before `lift_events`: Android's
- * `MultiTouchMotionAccumulator` clears a slot immediately upon
+ * kMtsPointerUp` (-1) (plus optional stylus key resets) to `lift_events`. The
+ * caller must flush `palm_events` (`SYN_REPORT`) before `lift_events`:
+ * Android's `MultiTouchMotionAccumulator` clears a slot immediately upon
  * `ABS_MT_TRACKING_ID = -1` before `SYN_REPORT` syncs `TouchInputMapper`, so
  * `MT_TOOL_PALM` and the lift must arrive in separate frames for the guest to
  * dispatch a cancelled `MotionEvent` (`FLAG_CANCELED`).
@@ -70,9 +89,12 @@ void AppendContactUp(int slot, ::android::emulation::control::EvDevEvents& event
  * @param slot The multi-touch slot of the contact to cancel; must be >= 0.
  * @param palm_events First frame: marks `slot` as `MT_TOOL_PALM`.
  * @param lift_events Second frame: lifts `slot` (`ABS_MT_TRACKING_ID = -1`).
+ * @param clear_stylus_keys Whether to reset `BTN_TOOL_RUBBER` and `BTN_STYLUS`
+ *     in `lift_events`.
  */
 void AppendContactCancel(int slot, ::android::emulation::control::EvDevEvents& palm_events,
-                         ::android::emulation::control::EvDevEvents& lift_events);
+                         ::android::emulation::control::EvDevEvents& lift_events,
+                         bool clear_stylus_keys = false);
 
 /**
  * @brief Determines if a pointer action or pressure indicator signifies a touch release /

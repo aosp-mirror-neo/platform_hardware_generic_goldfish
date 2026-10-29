@@ -14,6 +14,7 @@
 
 #include "goldfish/input/virtio_input_android.h"
 
+#include "virtio_input_android_config.h"
 #include "virtio_input_android_internal.h"
 
 // clang-format off
@@ -124,165 +125,6 @@ static struct virtio_input_config virtio_input_android_template[] = {
              }},
     {/* end of list */},
 };
-
-// clang-format off
-/**
- * @brief Extended virtio-input configuration for Android.
- * @private
- *
- * This configuration structure specifies details for multi-touch input,
- * including axis ranges, pressure sensitivity, and support for a fold/unfold
- * switch event (`EV_SW`).  It's used to inform the Android guest about the
- * capabilities of the emulated input device.
- *
- * The configuration is an array of `virtio_input_config` structures.  Each
- * structure in the array describes a particular aspect of the input device,
- * such as the range of values for a given axis.  The `select` and `subsel`
- * fields determine which aspect is being configured.
- *
- * **Configuration Details:**
- *
- * The following table summarizes the configuration entries:
- *
- * | select                      | subsel                 | Description                                               |
- * | :-------------------------- | :--------------------- | :---------------------------------------------------------|
- * | `VIRTIO_INPUT_CFG_ABS_INFO` | `ABS_X`                | X-axis absolute position.                                 |
- * | `VIRTIO_INPUT_CFG_ABS_INFO` | `ABS_Y`                | Y-axis absolute position.                                 |
- * | `VIRTIO_INPUT_CFG_ABS_INFO` | `ABS_Z`                | Z-axis absolute position.                                 |
- * | `VIRTIO_INPUT_CFG_ABS_INFO` | `ABS_MT_SLOT`          | Multi-touch slot selection.                               |
- * | `VIRTIO_INPUT_CFG_ABS_INFO` | `ABS_MT_TOUCH_MAJOR`   | Major axis of the touch ellipse.                          |
- * | `VIRTIO_INPUT_CFG_ABS_INFO` | `ABS_MT_TOUCH_MINOR`   | Minor axis of the touch ellipse.                          |
- * | `VIRTIO_INPUT_CFG_ABS_INFO` | `ABS_MT_ORIENTATION`   | Orientation of the touch ellipse.                         |
- * | `VIRTIO_INPUT_CFG_ABS_INFO` | `ABS_MT_POSITION_X`    | X-coordinate of the multi-touch point.                    |
- * | `VIRTIO_INPUT_CFG_ABS_INFO` | `ABS_MT_POSITION_Y`    | Y-coordinate of the multi-touch point.                    |
- * | `VIRTIO_INPUT_CFG_ABS_INFO` | `ABS_MT_TOOL_TYPE`     | Type of tool used for multi-touch (e.g., finger, stylus). |
- * | `VIRTIO_INPUT_CFG_ABS_INFO` | `ABS_MT_TRACKING_ID`   | Unique ID for tracking a multi-touch point.               |
- * | `VIRTIO_INPUT_CFG_ABS_INFO` | `ABS_MT_PRESSURE`      | Pressure of the multi-touch point.                        |
- * | `VIRTIO_INPUT_CFG_EV_BITS`  | `EV_SW`                | Switch event (used for fold/unfold events).               |
- * | *End of list*               |                        | Marks the end of the configuration array.                 |
- */
-// clang-format on
-static struct virtio_input_config virtio_android_config[] = {
-    {
-        .select = VIRTIO_INPUT_CFG_ABS_INFO,
-        .subsel = ABS_X,
-        .size = sizeof(virtio_input_absinfo),
-        .u.abs.min = const_le32(INPUT_EVENT_ABS_MIN),
-        .u.abs.max = const_le32(INPUT_EVENT_ABS_MAX),
-    },
-    {
-        .select = VIRTIO_INPUT_CFG_ABS_INFO,
-        .subsel = ABS_Y,
-        .size = sizeof(virtio_input_absinfo),
-        .u.abs.min = const_le32(INPUT_EVENT_ABS_MIN),
-        .u.abs.max = const_le32(INPUT_EVENT_ABS_MAX),
-    },
-    {
-        .select = VIRTIO_INPUT_CFG_ABS_INFO,
-        .subsel = ABS_Z,
-        .size = sizeof(virtio_input_absinfo),
-        .u.abs.min = const_le32(INPUT_EVENT_ABS_MIN),
-        .u.abs.max = const_le32(1),
-    },
-    {
-        .select = VIRTIO_INPUT_CFG_ABS_INFO,
-        .subsel = ABS_MT_SLOT,
-        .size = sizeof(virtio_input_absinfo),
-        // SLOT max value seems to be TRACKING_ID-1
-        .u.abs.max = const_le32(MTS_POINTERS_NUM),
-    },
-    {
-        .select = VIRTIO_INPUT_CFG_ABS_INFO,
-        .subsel = ABS_MT_TOUCH_MAJOR,
-        .size = sizeof(virtio_input_absinfo),
-        .u.abs.max = const_le32(MTS_TOUCH_AXIS_RANGE_MAX),
-    },
-    {
-        .select = VIRTIO_INPUT_CFG_ABS_INFO,
-        .subsel = ABS_MT_TOUCH_MINOR,
-        .size = sizeof(virtio_input_absinfo),
-        .u.abs.max = const_le32(MTS_TOUCH_AXIS_RANGE_MAX),
-    },
-    {
-        .select = VIRTIO_INPUT_CFG_ABS_INFO,
-        .subsel = ABS_MT_ORIENTATION,
-        .size = sizeof(virtio_input_absinfo),
-        .u.abs.max = const_le32(MTS_ORIENTATION_RANGE_MAX),
-    },
-    {
-        .select = VIRTIO_INPUT_CFG_ABS_INFO,
-        .subsel = ABS_TILT_X,
-        .size = sizeof(virtio_input_absinfo),
-        .u.abs.min = const_le32(MTS_TILT_RANGE_MIN),
-        .u.abs.max = const_le32(MTS_TILT_RANGE_MAX),
-    },
-    {
-        .select = VIRTIO_INPUT_CFG_ABS_INFO,
-        .subsel = ABS_TILT_Y,
-        .size = sizeof(virtio_input_absinfo),
-        .u.abs.min = const_le32(MTS_TILT_RANGE_MIN),
-        .u.abs.max = const_le32(MTS_TILT_RANGE_MAX),
-    },
-    {
-        .select = VIRTIO_INPUT_CFG_ABS_INFO,
-        .subsel = ABS_MT_POSITION_X,
-        .size = sizeof(virtio_input_absinfo),
-        .u.abs.max = const_le32(INPUT_EVENT_ABS_MAX),
-    },
-    {
-        .select = VIRTIO_INPUT_CFG_ABS_INFO,
-        .subsel = ABS_MT_POSITION_Y,
-        .size = sizeof(virtio_input_absinfo),
-        .u.abs.max = const_le32(INPUT_EVENT_ABS_MAX),
-    },
-    {
-        .select = VIRTIO_INPUT_CFG_ABS_INFO,
-        .subsel = ABS_MT_TOOL_TYPE,
-        .size = sizeof(virtio_input_absinfo),
-        .u.abs.max = const_le32(MT_TOOL_MAX),
-    },
-    {
-        .select = VIRTIO_INPUT_CFG_ABS_INFO,
-        .subsel = ABS_MT_TRACKING_ID,
-        .size = sizeof(virtio_input_absinfo),
-        // TRACKING_ID max value seems to be 0xFFFF
-        .u.abs.max = const_le32(MTS_POINTERS_NUM + 1),
-    },
-    {
-        .select = VIRTIO_INPUT_CFG_ABS_INFO,
-        .subsel = ABS_MT_PRESSURE,
-        .size = sizeof(virtio_input_absinfo),
-        .u.abs.max = const_le32(MTS_PRESSURE_RANGE_MAX),
-    },
-    {
-        // Needed for fold/unfold (EV_SW)
-        .select = VIRTIO_INPUT_CFG_EV_BITS,
-        .subsel = EV_SW,
-        .size = 1,
-        .u.bitmap =
-                {
-                    1,
-                },
-    },
-    {/* end of list */},
-};
-
-static const unsigned short ev_key_codes[] = {BTN_TOOL_RUBBER, BTN_STYLUS};
-
-static const unsigned short ev_abs_codes[] = {ABS_X,
-                                              ABS_Y,
-                                              ABS_Z,
-                                              ABS_TILT_X,
-                                              ABS_TILT_Y,
-                                              ABS_MT_SLOT,
-                                              ABS_MT_TOUCH_MAJOR,
-                                              ABS_MT_TOUCH_MINOR,
-                                              ABS_MT_ORIENTATION,
-                                              ABS_MT_POSITION_X,
-                                              ABS_MT_POSITION_Y,
-                                              ABS_MT_TOOL_TYPE,
-                                              ABS_MT_TRACKING_ID,
-                                              ABS_MT_PRESSURE};
 
 static void virtio_input_extend_config(VirtIOInput* vinput, const unsigned short* map,
                                        size_t mapsize, uint8_t select, uint8_t subsel) {
@@ -642,15 +484,19 @@ static void virtio_android_init(Object* obj) {
 
     // And register it with the proper configuration
     virtio_input_init_config(vinput, vahid->virtio_input_android_device_config);
-    virtio_input_extend_config(vinput, ev_key_codes, ARRAY_SIZE(ev_key_codes),
-                               VIRTIO_INPUT_CFG_EV_BITS, EV_KEY);
-    virtio_input_extend_config(vinput, ev_abs_codes, ARRAY_SIZE(ev_abs_codes),
-                               VIRTIO_INPUT_CFG_EV_BITS, EV_ABS);
+    size_t ev_key_count = 0;
+    const unsigned short* ev_key_codes = virtio_input_android_ev_key_codes(&ev_key_count);
+    virtio_input_extend_config(vinput, ev_key_codes, ev_key_count, VIRTIO_INPUT_CFG_EV_BITS,
+                               EV_KEY);
+    size_t ev_abs_count = 0;
+    const unsigned short* ev_abs_codes = virtio_input_android_ev_abs_codes(&ev_abs_count);
+    virtio_input_extend_config(vinput, ev_abs_codes, ev_abs_count, VIRTIO_INPUT_CFG_EV_BITS,
+                               EV_ABS);
 
-    int i = 0;
-    while (virtio_android_config[i].select) {
-        virtio_input_add_config(vinput, virtio_android_config + i);
-        i++;
+    const struct virtio_input_config* configs = virtio_input_android_configs();
+    for (int i = 0; configs[i].select; i++) {
+        virtio_input_config cfg = configs[i];
+        virtio_input_add_config(vinput, &cfg);
     }
 
     vahid->current_slot = 0;

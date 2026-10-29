@@ -211,7 +211,12 @@ TEST_F(CapabilitiesServiceTest, ReturnsSubsystemsCapabilities) {
     EXPECT_EQ(reply.input().max_touch_point_count(), 10);
     EXPECT_TRUE(reply.input().supports_input_activity_observation());
     EXPECT_EQ(reply.input().max_batch_duration_ms(), 30000);
+    EXPECT_THAT(reply.input().supported_features(), Contains(InputFeature::INPUT_FEATURE_TOUCH));
+    EXPECT_THAT(reply.input().supported_features(),
+                Contains(InputFeature::INPUT_FEATURE_MULTI_TOUCH));
     EXPECT_THAT(reply.input().supported_features(), Contains(InputFeature::INPUT_FEATURE_KEYBOARD));
+    EXPECT_THAT(reply.input().supported_features(),
+                Not(Contains(InputFeature::INPUT_FEATURE_STYLUS)));
     EXPECT_THAT(reply.input().supported_features(),
                 Not(Contains(InputFeature::INPUT_FEATURE_MOUSE_POINTER)));
     EXPECT_THAT(reply.input().supported_features(),
