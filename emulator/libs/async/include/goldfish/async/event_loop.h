@@ -23,6 +23,7 @@
 #include <type_traits>
 
 #include "absl/functional/any_invocable.h"
+#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -421,6 +422,29 @@ class EventLoop : public CallbackEventSource<LooperStatusEvent> {
         if (old_state != new_state) {
             FireEvent({.state = new_state});
         }
+    }
+
+    /**
+     * @brief Atomically moves the loop from `expected` to `desired`.
+     *
+     * Unlike SetState(), this never overwrites a state set concurrently by
+     * another thread, e.g. kShuttingDown from Shutdown(). It does nothing
+     * unless the loop is in `expected`.
+     * @return true if the state changed.
+     */
+    bool CompareAndSetState(LooperStatusEvent::State expected, LooperStatusEvent::State desired) {
+        DCHECK(expected != desired);
+        if (!state_.compare_exchange_strong(expected, desired)) {
+            return false;
+        }
+        FireEvent({.state = desired});
+        return true;
+    }
+
+    template <LooperStatusEvent::State kExpected, LooperStatusEvent::State kDesired>
+    bool CompareAndSetState() {
+        static_assert(kExpected != kDesired);
+        return CompareAndSetState(kExpected, kDesired);
     }
 
   private:

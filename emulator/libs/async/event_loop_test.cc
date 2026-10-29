@@ -3,6 +3,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <memory>
@@ -1308,6 +1309,128 @@ TEST_P(EventLoopTest, QemuSnapshotProgressPausesAndResumesRunningLoop) {
                                                LooperStatusEvent::State::kRunning,
                                                LooperStatusEvent::State::kPaused,
                                                LooperStatusEvent::State::kRunning));
+}
+
+TEST_P(EventLoopTest, QemuSnapshotProgressDoesNotOverwriteShutdown) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    using State = LooperStatusEvent::State;
+    using ::testing::AnyOf;
+    using ::testing::Each;
+
+    fake_qemu_advance_ms(1);
+    ASSERT_EQ(loop->GetState(), State::kRunning);
+
+    QemuSnapshotProgress progress{};
+    progress.operation = QEMU_SNAPSHOT_OP_SAVE;
+    progress.phase = QEMU_SNAPSHOT_PHASE_PREPARING;
+    fake_qemu_fire_snapshot_progress(&progress);
+    ASSERT_EQ(loop->GetState(), State::kPaused);
+
+    // Shut down from another thread mid-snapshot. Shutdown() sets kShuttingDown before it
+    // returns and queues the rest of the shutdown on the loop thread (this thread).
+    std::future<absl::Status> shutdown_future;
+    std::thread([&]() { shutdown_future = loop->Shutdown(); }).join();
+    ASSERT_EQ(loop->GetState(), State::kShuttingDown);
+
+    std::vector<State> states;
+    auto subscription = android::base::eventing::MakeScopedCallback(
+            *loop, [&](const LooperStatusEvent& event) { states.push_back(event.state); });
+
+    // Neither the end of this snapshot nor the start of the next one may resurrect the loop.
+    progress.phase = QEMU_SNAPSHOT_PHASE_COMPLETED;
+    fake_qemu_fire_snapshot_progress(&progress);
+    EXPECT_EQ(loop->GetState(), State::kShuttingDown);
+    progress.phase = QEMU_SNAPSHOT_PHASE_PREPARING;
+    fake_qemu_fire_snapshot_progress(&progress);
+    EXPECT_EQ(loop->GetState(), State::kShuttingDown);
+
+    runUntil(shutdown_future);
+    EXPECT_THAT(shutdown_future.get(), absl_testing::IsOk());
+
+    progress.phase = QEMU_SNAPSHOT_PHASE_FAILED;
+    fake_qemu_fire_snapshot_progress(&progress);
+    EXPECT_THAT(loop->GetState(), AnyOf(State::kShuttingDown, State::kFinished));
+    EXPECT_THAT(states, Each(AnyOf(State::kShuttingDown, State::kFinished)));
+}
+
+TEST_P(EventLoopTest, QemuInitialDrainDoesNotOverwriteShutdown) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    using State = LooperStatusEvent::State;
+    using ::testing::AnyOf;
+    using ::testing::Each;
+
+    ASSERT_EQ(loop->GetState(), State::kNotStarted);
+
+    // With a snapshot in progress, the initial drain would move the loop to kPaused.
+    QemuSnapshotProgress progress{};
+    progress.operation = QEMU_SNAPSHOT_OP_LOAD;
+    progress.phase = QEMU_SNAPSHOT_PHASE_PREPARING;
+    fake_qemu_fire_snapshot_progress(&progress);
+
+    // Shut down from another thread before the loop has drained anything.
+    std::future<absl::Status> shutdown_future;
+    std::thread([&]() { shutdown_future = loop->Shutdown(); }).join();
+    ASSERT_EQ(loop->GetState(), State::kShuttingDown);
+
+    std::vector<State> states;
+    auto subscription = android::base::eventing::MakeScopedCallback(
+            *loop, [&](const LooperStatusEvent& event) { states.push_back(event.state); });
+
+    // The initial drain runs before the queued shutdown task and must keep kShuttingDown.
+    runUntil(shutdown_future);
+    EXPECT_THAT(shutdown_future.get(), absl_testing::IsOk());
+    EXPECT_THAT(loop->GetState(), AnyOf(State::kShuttingDown, State::kFinished));
+    EXPECT_THAT(states, Each(AnyOf(State::kShuttingDown, State::kFinished)));
+}
+
+TEST_P(EventLoopTest, QemuSnapshotCompletionRacingShutdownKeepsShutdown) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    // Unlike the tests above, this lets the snapshot callback (this thread) and Shutdown()
+    // (another thread) race freely, so it can hit the read-to-write window of a
+    // check-then-set transition.
+    constexpr int kIterations = 2000;
+    constexpr int kMaxStartDelaySpins = 400;
+    fake_qemu_advance_ms(1);
+    QemuSnapshotProgress progress{};
+    progress.operation = QEMU_SNAPSHOT_OP_SAVE;
+    for (int i = 0; i < kIterations; ++i) {
+        auto racing_loop = QemuEventLoop::Create("RacingLoop");
+        fake_qemu_advance_ms(1);
+        progress.phase = QEMU_SNAPSHOT_PHASE_PREPARING;
+        fake_qemu_fire_snapshot_progress(&progress);
+        ASSERT_EQ(racing_loop->GetState(), LooperStatusEvent::State::kPaused);
+
+        std::atomic<int> arrived = 0;
+        std::future<absl::Status> shutdown_future;
+        std::thread shutdown_thread([&, delay_spins = i % kMaxStartDelaySpins]() {
+            arrived.fetch_add(1);
+            while (arrived.load() < 2) {
+            }
+            // Vary the start offset so that many points of the race window get sampled.
+            for (int spin = 0; spin < delay_spins; ++spin) {
+                std::atomic_signal_fence(std::memory_order_seq_cst);
+            }
+            shutdown_future = racing_loop->Shutdown();
+        });
+        arrived.fetch_add(1);
+        while (arrived.load() < 2) {
+        }
+        progress.phase = QEMU_SNAPSHOT_PHASE_COMPLETED;
+        fake_qemu_fire_snapshot_progress(&progress);
+        shutdown_thread.join();
+
+        // The shutdown task is still queued, so the loop must be exactly kShuttingDown.
+        ASSERT_EQ(racing_loop->GetState(), LooperStatusEvent::State::kShuttingDown)
+                << "iteration " << i;
+        runUntil(shutdown_future);
+        ASSERT_THAT(shutdown_future.get(), absl_testing::IsOk());
+    }
 }
 
 TEST_P(EventLoopTest, QemuSnapshotBeforeInitialDrainPreservesNotStartedAndPausedStates) {
