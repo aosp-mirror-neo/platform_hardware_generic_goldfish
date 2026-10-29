@@ -37,8 +37,6 @@ class VCpuEventLoop : public ::goldfish::async::EventLoop {
             mCallback.opaque = this;
         }
 
-        ~VCpuTimer() = default;
-
         void Cancel() override {
             // We can't actually cancel - but we shouldn't allow rescheduling.
         }
