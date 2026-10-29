@@ -163,6 +163,17 @@ class InertialModel {
     float GetAmbientMotionBoundsDeriv(ParameterValueType parameter_value_type) const;
     float GetAmbientMotionBoundsSecondDeriv(ParameterValueType parameter_value_type) const;
 
+    /// Immediately sets the rotation state to `rotation` with zero rotational
+    /// velocity and acceleration.
+    void SetStepRotation(glm::quat rotation);
+
+    /// Evaluates the quintic ambient motion bounds polynomial (or its
+    /// derivative) at the current model time, returning `end_value` once the
+    /// transition has completed or when `kTarget` is requested.
+    float EvaluateAmbientMotionBounds(const glm::vec2& quintic, const glm::vec4& cubic,
+                                      float end_value,
+                                      ParameterValueType parameter_value_type) const;
+
     // Note: Each target interpolation begins at a set time, accelerates at a
     //       for half of the target time, then decelerates for the second half
     //       with each half defined by a quartic polynomial such that the two
