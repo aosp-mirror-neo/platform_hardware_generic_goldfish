@@ -38,6 +38,7 @@
 
 #include "android/base/system.h"
 #include "android/goldfish/avd.h"
+#include "android/goldfish/constants.h"
 #include "android/goldfish/hardware_config.h"
 #include "android/status/status_macros.h"
 #include "goldfish/file/file.h"
@@ -568,7 +569,7 @@ absl::flat_hash_map<std::string, std::string> GpuDevice::getQemuEnv(
 }
 
 std::vector<std::string> GpuDevice::getQemuParameters(const EmulatorConfig& emulator) const {
-    if (emulator.avd().ApiLevel() < 37) {
+    if (emulator.avd().ApiLevel() < kVirtioReadyApiLevel) {
         return {};
     }
 

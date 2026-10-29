@@ -25,6 +25,8 @@
 // IWYU pragma: begin_keep
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qemu/atomic.h"
+#include "qemu/main-loop.h"
 #include "hw/core/irq.h"
 #include "hw/core/resettable.h"
 #include "hw/core/sysbus.h"
@@ -53,8 +55,10 @@ struct GoldfishSyncState {
 
     MemoryRegion iomem;       /**< 8 KiB (`0x2000`) MMIO region mapped at `0xff014000` on x86_64. */
     qemu_irq irq;             /**< Outbound system-bus interrupt line (GSI 21 on x86_64). */
+    QEMUBH* irq_bh;           /**< Bottom half for delivering cross-thread IRQ updates under BQL. */
     Error* migration_blocker; /**< Registered live-migration / snapshot blocker for v1. */
     struct GoldfishMmioCore core; /**< Opaque handle and dispatch table for C++ core logic. */
+    int irq_level;                /**< Latest interrupt level (0 or 1), accessed atomically. */
 };
 
 static bool goldfish_sync_guest_mem_read(void* opaque, uint64_t gpa, void* dst, size_t size) {
@@ -134,9 +138,20 @@ static bool goldfish_sync_guest_mem_write(void* opaque, uint64_t gpa, const void
     return true;
 }
 
+static void goldfish_sync_irq_bh(void* opaque) {
+    struct GoldfishSyncState* s = (struct GoldfishSyncState*)opaque;
+    qemu_set_irq(s->irq, qatomic_read(&s->irq_level));
+}
+
 static void goldfish_sync_irq_set_level(void* opaque, bool level) {
     struct GoldfishSyncState* s = (struct GoldfishSyncState*)opaque;
-    qemu_set_irq(s->irq, level ? 1 : 0);
+    const int target_level = level ? 1 : 0;
+    qatomic_set(&s->irq_level, target_level);
+    if (bql_locked()) {
+        qemu_set_irq(s->irq, target_level);
+    } else {
+        qemu_bh_schedule(s->irq_bh);
+    }
 }
 
 static uint64_t goldfish_sync_mmio_read(void* opaque, hwaddr offset, unsigned size) {
@@ -175,6 +190,8 @@ static void goldfish_sync_realize(DeviceState* dev, Error** errp) {
                           GOLDFISH_SYNC_IOMEM_SIZE);
     sysbus_init_mmio(sbdev, &s->iomem);
     sysbus_init_irq(sbdev, &s->irq);
+    s->irq_level = 0;
+    s->irq_bh = qemu_bh_new(goldfish_sync_irq_bh, s);
 
     struct GoldfishDeviceEnv env;
     memset(&env, 0, sizeof(env));
@@ -185,6 +202,7 @@ static void goldfish_sync_realize(DeviceState* dev, Error** errp) {
     env.irq.set_level = goldfish_sync_irq_set_level;
 
     s->core = GoldfishSyncCoreCreate(&env);
+    add_deletable_object(OBJECT(dev));
 }
 
 static void goldfish_sync_unrealize(DeviceState* dev) {
@@ -192,6 +210,10 @@ static void goldfish_sync_unrealize(DeviceState* dev) {
     assert(s->core.destroy != NULL);
     s->core.destroy(s->core.core);
     memset(&s->core, 0, sizeof(s->core));
+    if (s->irq_bh != NULL) {
+        qemu_bh_delete(s->irq_bh);
+        s->irq_bh = NULL;
+    }
     if (s->migration_blocker != NULL) {
         migrate_del_blocker(&s->migration_blocker);
     }

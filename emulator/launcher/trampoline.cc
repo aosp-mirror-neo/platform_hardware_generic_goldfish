@@ -18,6 +18,7 @@
 #include "absl/log/log.h"
 
 #include "android/base/system.h"
+#include "android/goldfish/constants.h"
 #include "android/goldfish/feature_flags.h"
 #include "android/process/command.h"
 #include "goldfish/file/file.h"
@@ -94,8 +95,8 @@ bool ShouldTrampolineToQemu2(const absl::StatusOr<std::unique_ptr<android::goldf
         return true;
     }
 
-    if ((*avd)->ApiLevel() < 37) {
-        VLOG(1) << "Trampolining as api level is less than 37";
+    if ((*avd)->ApiLevel() < kVirtioReadyApiLevel) {
+        VLOG(1) << "Trampolining as api level is less than " << kVirtioReadyApiLevel;
         return true;
     }
 
