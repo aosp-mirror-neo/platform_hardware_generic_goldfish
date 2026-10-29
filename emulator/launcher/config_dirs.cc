@@ -14,6 +14,8 @@
 #include "android/goldfish/config_dirs.h"
 
 #include <filesystem>
+#include <initializer_list>
+#include <string>
 #include <string_view>
 
 #include "absl/log/check.h"
@@ -27,10 +29,20 @@ namespace android::goldfish {
 namespace fs = std::filesystem;
 
 using android::base::System;
+
+namespace {
+
 // Name of the Android configuration directory under $HOME.
-static const std::string_view kAndroidSubDir = ".android";
+constexpr std::string_view kAndroidSubDir = ".android";
 // Subdirectory for AVD data files.
-static const std::string_view kAvdSubDir = "avd";
+constexpr std::string_view kAvdSubDir = "avd";
+
+// Returns true if `path` is a non-empty, readable directory.
+bool IsReadableDir(const fs::path& path) {
+    return !path.empty() && base::file::is_dir(path) && base::file::can_read(path);
+}
+
+}  // namespace
 
 // static
 auto ConfigDirs::GetUserDirectory() -> fs::path {
@@ -73,35 +85,24 @@ auto ConfigDirs::GetAvdRootDirectory() -> fs::path {
     }
 
     // No luck with ANDROID_AVD_HOME, try ANDROID_PREFS_ROOT/ANDROID_SDK_HOME
-    avd_root = GetAvdRootDirectoryWithPrefsRoot(System::Get()->EnvGet("ANDROID_PREFS_ROOT"));
-    if (!avd_root.empty()) {
-        return avd_root;
+    for (std::string_view env_var : {"ANDROID_PREFS_ROOT", "ANDROID_SDK_HOME"}) {
+        avd_root = GetAvdRootDirectoryWithPrefsRoot(System::Get()->EnvGet(env_var));
+        if (!avd_root.empty()) {
+            return avd_root;
+        }
     }
-    avd_root = GetAvdRootDirectoryWithPrefsRoot(System::Get()->EnvGet("ANDROID_SDK_HOME"));
-    if (!avd_root.empty()) {
-        return avd_root;
-    }  // ANDROID_PREFS_ROOT/ANDROID_SDK_HOME is defined but bad. In this case,
+
+    // ANDROID_PREFS_ROOT/ANDROID_SDK_HOME is defined but bad. In this case,
     // Android Studio tries $TEST_TMPDIR, $USER_HOME, and
     // $HOME. We'll do the same.
-    avd_root = System::Get()->EnvGet("TEST_TMPDIR");
-    if (!avd_root.empty()) {
-        avd_root = fs::path(avd_root) / kAndroidSubDir;
-        if (IsValidAvdRoot(avd_root)) {
-            return fs::path(avd_root) / kAvdSubDir;
+    for (std::string_view env_var : {"TEST_TMPDIR", "USER_HOME", "HOME"}) {
+        const fs::path env_dir = System::Get()->EnvGet(env_var);
+        if (env_dir.empty()) {
+            continue;
         }
-    }
-    avd_root = System::Get()->EnvGet("USER_HOME");
-    if (!avd_root.empty()) {
-        avd_root = fs::path(avd_root) / kAndroidSubDir;
-        if (IsValidAvdRoot(avd_root)) {
-            return fs::path(avd_root) / kAvdSubDir;
-        }
-    }
-    avd_root = System::Get()->EnvGet("HOME");
-    if (!avd_root.empty()) {
-        avd_root = fs::path(avd_root) / kAndroidSubDir;
-        if (IsValidAvdRoot(avd_root)) {
-            return fs::path(avd_root) / kAvdSubDir;
+        const fs::path candidate_root = env_dir / kAndroidSubDir;
+        if (IsValidAvdRoot(candidate_root)) {
+            return candidate_root / kAvdSubDir;
         }
     }
 
@@ -124,7 +125,7 @@ auto ConfigDirs::GetSdkRootDirectoryByEnv(bool verbose) -> fs::path {
 
     // ANDROID_HOME is not good. Try ANDROID_SDK_ROOT.
     sdk_root = System::Get()->EnvGet("ANDROID_SDK_ROOT");
-    if (static_cast<unsigned int>(!sdk_root.empty()) != 0U) {
+    if (!sdk_root.empty()) {
         // Unquote a possibly "quoted" path.
         if (sdk_root[0] == '"') {
             DCHECK(sdk_root.back() == '"');
@@ -201,18 +202,15 @@ auto ConfigDirs::IsValidSdkRoot(const fs::path& root_path, bool verbose) -> bool
         LOG_IF(WARNING, verbose) << "empty sdk root";
         return false;
     }
-
-    if (!base::file::is_dir(root_path) || !base::file::can_read(root_path)) {
-        if (verbose) {
-            if (!base::file::is_dir(root_path)) {
-                LOG(WARNING) << root_path << " is not a directory, and cannot be sdk root";
-            } else if (!base::file::can_read(root_path)) {
-                LOG(WARNING) << root_path << " is not readable, and cannot be sdk root";
-            }
-        }
+    if (!base::file::is_dir(root_path)) {
+        LOG_IF(WARNING, verbose) << root_path << " is not a directory, and cannot be sdk root";
         return false;
     }
-    const fs::path platform_tools_path = fs::path(root_path) / "platform-tools";
+    if (!base::file::can_read(root_path)) {
+        LOG_IF(WARNING, verbose) << root_path << " is not readable, and cannot be sdk root";
+        return false;
+    }
+    const fs::path platform_tools_path = root_path / "platform-tools";
     if (!base::file::is_dir(platform_tools_path)) {
         LOG_IF(WARNING, verbose) << "platform-tools subdirectory is missing under " << root_path
                                  << ", please install it";
@@ -224,14 +222,7 @@ auto ConfigDirs::IsValidSdkRoot(const fs::path& root_path, bool verbose) -> bool
 
 // static
 auto ConfigDirs::IsValidAvdRoot(const fs::path& avd_path) -> bool {
-    if (avd_path.empty()) {
-        return false;
-    }
-    if (!base::file::is_dir(avd_path) || !base::file::can_read(avd_path)) {
-        return false;
-    }
-    const fs::path avd_avd_path = avd_path / "avd";
-    return (base::file::is_dir(avd_avd_path) && base::file::can_read(avd_avd_path));
+    return IsReadableDir(avd_path) && IsReadableDir(avd_path / kAvdSubDir);
 }
 
 auto ConfigDirs::GetAvdRootDirectoryWithPrefsRoot(const fs::path& path) -> fs::path {
