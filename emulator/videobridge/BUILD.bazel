@@ -548,7 +548,7 @@ cc_library(
     srcs = [
         "core/event_forwarder.cc",
         "core/event_forwarder.h",
-        "core/goldfish_audio_device_module.h",
+        "core/goldfish_audio_device_module.cc",
         "core/grpc_input_sender.cc",
         "core/grpc_input_sender.h",
         "core/in_process_input_sender.cc",
@@ -565,6 +565,7 @@ cc_library(
     ],
     hdrs = [
         "include/goldfish/videobridge/codec_factories.h",
+        "include/goldfish/videobridge/goldfish_audio_device_module.h",
         "include/goldfish/videobridge/in_process_audio_source.h",
         "include/goldfish/videobridge/in_process_input_sender.h",
         "include/goldfish/videobridge/in_process_video_source.h",
@@ -616,6 +617,7 @@ cc_test(
     deps = [
         ":videobridge_core",
         "//emulator/libs/test:googletest_main",
+        "@googletest//:gtest",
     ],
 )
 
@@ -726,6 +728,28 @@ cc_test(
         ":videobridge_core",
         "//emulator/libs/test:googletest_main",
         "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time",
+        "@nlohmann_json//:singleheader-json",
+        "@webrtc//rtc_base:rtc_base_tests_utils",
+    ],
+)
+
+cc_test(
+    name = "remote_audio_test",
+    size = "small",
+    srcs = [
+        "core/participant.h",
+        "core/remote_audio_test.cc",
+        "core/virtual_network_fixture.h",
+    ],
+    copts = WEBRTC_COPTS,
+    linkopts = WEBRTC_LINKOPTS,
+    deps = [
+        ":in_process_audio_source",
+        ":videobridge_core",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
         "@nlohmann_json//:singleheader-json",
         "@webrtc//rtc_base:rtc_base_tests_utils",
