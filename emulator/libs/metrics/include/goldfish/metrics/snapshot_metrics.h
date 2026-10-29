@@ -68,6 +68,21 @@ struct SnapshotOperationStats {
         android_studio::EmulatorQuickbootSave::EMULATOR_QUICKBOOT_SAVE_SUCCEEDED};
     android_studio::EmulatorSnapshotFailureReason failure_reason{
         android_studio::EMULATOR_SNAPSHOT_FAILURE_REASON_UNSPECIFIED};
+
+    /// Marks this snapshot operation as failed with the given `reason`.
+    void ReportFailure(android_studio::EmulatorSnapshotFailureReason reason =
+                               android_studio::EMULATOR_SNAPSHOT_FAILURE_REASON_INTERNAL_ERROR) {
+        if (for_save) {
+            save_state = android_studio::EMULATOR_SNAPSHOT_SAVE_FAILED;
+            quickboot_save_state =
+                    android_studio::EmulatorQuickbootSave::EMULATOR_QUICKBOOT_SAVE_FAILED;
+        } else {
+            load_state = android_studio::EMULATOR_SNAPSHOT_LOAD_FAILED;
+            quickboot_load_state =
+                    android_studio::EmulatorQuickbootLoad::EMULATOR_QUICKBOOT_LOAD_FAILED;
+        }
+        failure_reason = reason;
+    }
 };
 
 std::string AnonymizeSnapshotName(std::string_view name);
