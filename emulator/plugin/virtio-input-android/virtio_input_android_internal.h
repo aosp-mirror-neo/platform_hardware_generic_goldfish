@@ -72,31 +72,18 @@
  *   - ...and so on.
  *
  * **Supported Events:**
- *   This device is designed to handle the following input event types:
- *     - Multi-touch events (`MT_...`)
- *     - `EV_SW` (e.g., fold/unfold events)
- *   It registers with QEMU to handle these event masks:
- *     - `INPUT_EVENT_MASK_MTT`  (Touch events)
- *     - `INPUT_EVENT_MASK_ABS`  (Absolute mouse events - *not* relative)
- *     - `INPUT_EVENT_MASK_BTN`  (Mouse buttons)
+ *   All touch, stylus, mouse-as-touch, and `EV_SW` (e.g., fold/unfold) events
+ *   are injected directly by the host `InputDispatcher` as raw evdev reports via
+ *   `virtio_input_send_evdev`. The QEMU `QemuInputHandler` required by
+ *   `VirtIOInputHID` realization is registered with `.mask = 0` because QEMU
+ *   console input routing is unused.
  *
- * **Mouse Event Translation:**
- *   By default, the device translates mouse events into touch events.
- *
- * **Limitations:**
- *   - **Wheel Events:**  Wheel events are *not* currently handled, as there's no
- *     established mechanism to simulate wheel events as a sequence of touch events.
- *
- * **Display and Head Routing:**
- *  During device registration, you must specify the display and head the device
- *  is attached to. QEMU uses this information to route input events to the
- *  correct handler.
- *  Example:
- *  ```bash
- *    qemu-system-x86_64 ... -device virtio-input-android-pci,display=gpu0,head=0 ...
- *  ```
- *   This command connects the device to display `gpu0` and head `0`.  Mouse clicks
- *   on a VNC display connected to `gpu0`, head `0` will be routed to this device.
+ * **Display and Head Association:**
+ *   During device registration, specify the display and head the device is
+ *   attached to so the host can bind the touch device to its target display:
+ *   ```bash
+ *     qemu-system-x86_64 ... -device virtio-input-android-pci,display=gpu0,head=0 ...
+ *   ```
  *
  */
 
@@ -123,21 +110,9 @@
 #define VIRTIO_INPUT_MAX_NUM 11
 
 /**
- * @brief Maximum number of simultaneous touch pointers supported.
- *
- *  This represents the maximum number of fingers or styluses that can be
- *  simultaneously tracked by the multi-touch emulation.  It's currently set to INPUT_BUTTON__MAX,
- *  so we can translate button clicks to finger tracking when needed.
+ * @brief Maximum `ABS_MT_SLOT` index advertised to the guest (`0..10`).
  */
-#define MTS_POINTERS_NUM INPUT_BUTTON__MAX
-
-/**
- * @brief Indicates that a pointer is not currently tracked (finger/stylus is up).
- *
- *  This value signifies that a particular pointer slot is not in use, meaning
- *  the corresponding finger or stylus is not touching the screen.
- */
-#define MTS_POINTER_UP -1
+#define MTS_POINTERS_NUM 10
 
 /**
  * @brief Maximum value for the major and minor axis of a touch.
@@ -169,103 +144,23 @@
  */
 #define MTS_PRESSURE_RANGE_MAX 0x400
 
-/**
- * @brief Default value for TOUCH_MAJOR and TOUCH_MINOR.
- *
- * This is the default size of touch events that will be send to the device.
- */
-#define MTS_TOUCH_AXIS_DEFAULT 0x500
-
-#define TYPE_VIRTIO_INPUT_ANDROID_HID "virtio-input-android"
 #define TYPE_VIRTIO_INPUT_ANDROID_HID_PCI "virtio-input-android-pci"
 
 OBJECT_DECLARE_SIMPLE_TYPE(VirtIOInputAndroidHID, VIRTIO_INPUT_ANDROID_HID);
 OBJECT_DECLARE_SIMPLE_TYPE(VirtIOInputAndroidHIDPCI, VIRTIO_INPUT_ANDROID_HID_PCI)
 
 /**
- * @struct MTSPointerState
- * @brief Represents the state of a single multi-touch pointer (finger or stylus).
- *
- * This structure holds the data for a single touch point, including its
- * tracking ID, position, pressure, and the dimensions of the touch ellipse.
- */
-typedef struct MTSPointerState {
-    /**
-     * @brief Tracking ID assigned to the pointer.
-     *
-     *  This ID is used by applications emulating multi-touch to uniquely
-     *  identify and track individual touch points.
-     */
-    int tracking_id;
-    /**
-     * @brief X-coordinate of the pointer.
-     *
-     * The horizontal position of the touch point on the screen.
-     */
-    int x;
-    /**
-     * @brief Y-coordinate of the pointer.
-     *
-     * The vertical position of the touch point on the screen.
-     */
-    int y;
-    /**
-     * @brief Current pressure value.
-     *
-     * Represents the pressure applied by the finger or stylus, ranging from 0
-     * (no pressure) to #MTS_PRESSURE_RANGE_MAX.
-     */
-    int pressure;
-    /**
-     * @brief Major axis of the touch ellipse.
-     *
-     *  The length of the major axis of the ellipse representing the area of contact.
-     */
-    int touch_major;
-    /**
-     * @brief Minor axis of the touch ellipse.
-     *
-     * The length of the minor axis of the ellipse representing the area of contact.
-     */
-    int touch_minor;
-} MTSPointerState;
-
-/**
  * @struct VirtIOInputAndroidHID
  * @brief Represents the state of the virtio-input-android device (HID variant).
  * @extends VirtIOInputHID
  *
- * This structure holds the complete state of the virtio-input-android device,
- * including the state of multiple touch pointers, button states, and device configuration.
+ * This structure holds the state and configuration of the virtio-input-android device.
  */
 struct VirtIOInputAndroidHID {
     /*< private >*/
     VirtIOInputHID parent_obj;
 
     /*< public >*/
-    /**
-     * @brief Index of the currently selected multi-touch slot.
-     *
-     *  This variable tracks the last pointer for which `ABS_MT_SLOT` was sent.
-     *  A value of -1 indicates that no slot selection has been made yet.
-     */
-    int current_slot;
-
-    /**
-     * @brief Array indicating the state of mouse buttons.
-     *
-     * A map to tell us if any given button is currently down.
-     */
-    bool keymap_button_down[INPUT_BUTTON__MAX];
-
-    /**
-     * @brief Array of multi-touch pointer states.
-     *
-     *  This array stores the state of each tracked pointer (finger or stylus),
-     *  up to #INPUT_BUTTON__MAX
-     */
-    MTSPointerState tracked_pointers[INPUT_BUTTON__MAX];
-
     /**
      * @brief Pointer to the virtio-input device configuration.
      *
