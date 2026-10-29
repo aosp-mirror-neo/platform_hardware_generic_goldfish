@@ -267,6 +267,56 @@ TEST(HttpMessageTest, HttpResponseHeadRequestOmitsBodyPreservesContentLength) {
     EXPECT_FALSE(absl::StrContains(wire, "Full Payload Body"));
 }
 
+TEST(HttpMessageTest, HttpResponseLargeHeadersAndBodyExactWireFormatting) {
+    constexpr std::string_view kBody = "{\"status\":\"ok\",\"emulator\":\"goldfish\"}";
+    auto resp = HttpResponse::String(std::string(kBody), HttpStatus::kOk, mime::kApplicationJson)
+                        .WithHeader(headers::kAccessControlAllowOrigin, "http://localhost:8080")
+                        .WithHeader(headers::kAccessControlAllowMethods,
+                                    "GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH")
+                        .WithHeader(headers::kAccessControlAllowHeaders,
+                                    "content-type,x-grpc-web,x-user-agent,authorization")
+                        .WithHeader(headers::kAccessControlExposeHeaders,
+                                    "grpc-status,grpc-message,grpc-status-details-bin")
+                        .WithHeader(headers::kCacheControl, "no-store, no-cache, must-revalidate")
+                        .WithHeader(headers::kXGrpcWeb, "1");
+
+    const std::string wire = resp.FormatWireResponse(/*keep_alive=*/true);
+    EXPECT_TRUE(absl::StartsWith(wire, "HTTP/1.1 200 OK\r\n"));
+    EXPECT_TRUE(absl::StrContains(wire, "access-control-allow-origin: http://localhost:8080\r\n"));
+    EXPECT_TRUE(absl::StrContains(
+            wire,
+            "access-control-allow-methods: GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH\r\n"));
+    EXPECT_TRUE(absl::StrContains(wire,
+                                  "access-control-allow-headers: "
+                                  "content-type,x-grpc-web,x-user-agent,authorization\r\n"));
+    EXPECT_TRUE(absl::StrContains(
+            wire,
+            "access-control-expose-headers: grpc-status,grpc-message,grpc-status-details-bin\r\n"));
+    EXPECT_TRUE(absl::StrContains(wire, "cache-control: no-store, no-cache, must-revalidate\r\n"));
+    EXPECT_TRUE(absl::StrContains(wire, "x-grpc-web: 1\r\n"));
+    EXPECT_TRUE(absl::StrContains(wire, absl::StrCat("content-length: ", kBody.size(), "\r\n")));
+    EXPECT_TRUE(absl::StrContains(wire, "connection: keep-alive\r\n"));
+    EXPECT_TRUE(absl::EndsWith(wire, absl::StrCat("\r\n\r\n", kBody)));
+
+    // Verify 304 Not Modified and 204 No Content with non-empty bodies omit body on wire.
+    auto resp_304 = HttpResponse::String(std::string(kBody), HttpStatus::kNotModified);
+    const std::string wire_304 = resp_304.FormatWireResponse(/*keep_alive=*/false);
+    EXPECT_TRUE(absl::StartsWith(wire_304, "HTTP/1.1 304 Not Modified\r\n"));
+    EXPECT_TRUE(
+            absl::StrContains(wire_304, absl::StrCat("content-length: ", kBody.size(), "\r\n")));
+    EXPECT_TRUE(absl::EndsWith(wire_304, "\r\n\r\n"));
+    EXPECT_FALSE(absl::StrContains(wire_304, kBody));
+
+    // Verify large body HEAD request does not reserve or append the payload body.
+    auto large_head = HttpResponse::String(std::string(65536, 'x'), HttpStatus::kOk,
+                                           mime::kApplicationOctetStream);
+    const std::string wire_head =
+            large_head.FormatWireResponse(/*keep_alive=*/true, /*is_head_request=*/true);
+    EXPECT_TRUE(absl::StrContains(wire_head, "content-length: 65536\r\n"));
+    EXPECT_TRUE(absl::EndsWith(wire_head, "\r\n\r\n"));
+    EXPECT_LT(wire_head.capacity(), 512u);
+}
+
 TEST(HttpMessageTest, StatusCodeBoundaryChecks) {
     auto r100 = HttpResponse::Empty(100);
     EXPECT_EQ(r100.StatusCode(), 100);
