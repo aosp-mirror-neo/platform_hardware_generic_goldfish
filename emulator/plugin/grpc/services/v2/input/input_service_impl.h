@@ -66,8 +66,11 @@ using InputServiceBase =
  *   `DispatcherSession`.
  * - A `StreamInputEvents` stream closes its sessions when it ends, which reports
  *   the release of what they held as synthesized `POINTER_ACTION_CANCEL` and
- *   `KEY_ACTION_UP` activity. `SendInputEvents` calls share one session per
- *   source, so input one call leaves held is still held in the next.
+ *   `KEY_ACTION_UP` activity. Anonymous `SendInputEvents` events (`source_id == 0`)
+ *   use a per-call session that closes when the call returns; identified sources
+ *   (`source_id != 0`) share one persistent session per source across
+ *   `SendInputEvents` calls and expire any input left held after
+ *   `held_input_idle_timeout` of inactivity.
  * - The first event that fails to dispatch, for example with
  *   `RESOURCE_EXHAUSTED` when no touch slot is free, ends the call with its
  *   index; later events aren't dispatched.
@@ -83,6 +86,7 @@ class InputServiceImpl final : public InputServiceBase {
   public:
     static constexpr absl::Duration kDefaultMaxBatchDuration = absl::Seconds(30);
     static constexpr absl::Duration kDefaultMaxStreamStepDuration = absl::Seconds(1);
+    static constexpr absl::Duration kDefaultHeldInputIdleTimeout = absl::Seconds(60);
     static constexpr int32_t kDefaultMaxTouchPoints = V2InputValidator::kDefaultMaxTouchPoints;
 
     using IMultiDisplay = ::goldfish::display::IMultiDisplay;
@@ -112,6 +116,7 @@ class InputServiceImpl final : public InputServiceBase {
         int32_t max_touch_points{kDefaultMaxTouchPoints};
         absl::Duration max_batch_duration{kDefaultMaxBatchDuration};
         absl::Duration max_stream_step_duration{kDefaultMaxStreamStepDuration};
+        absl::Duration held_input_idle_timeout{kDefaultHeldInputIdleTimeout};
         ::goldfish::async::EventLoop* event_loop{nullptr};
         NowFn now_fn{[]() { return absl::Now(); }};
         SleepFn sleep_fn{[](absl::Duration d) { absl::SleepFor(d); }};
@@ -169,9 +174,11 @@ class InputServiceImpl final : public InputServiceBase {
 
     absl::Status ValidateInputEvent(const InputEvent& event) const;
     absl::Status ValidateBatchRequest(const SendInputEventsRequest& request) const;
-    std::unique_ptr<DispatcherSession> OpenSession(int32_t source_id) const;
-    // @return The session that the SendInputEvents calls of `source_id` share,
-    //     which stays open as long as the service.
+    std::unique_ptr<DispatcherSession> OpenSession(
+            int32_t source_id, absl::Duration idle_timeout = absl::ZeroDuration()) const;
+    // @return The session that the SendInputEvents calls of non-zero `source_id`
+    //     share, which stays open as long as the service and expires held input
+    //     after `held_input_idle_timeout` of inactivity.
     DispatcherSession& BatchSession(int32_t source_id) ABSL_LOCKS_EXCLUDED(batch_sessions_mutex_);
     void SleepUntil(absl::Time target) const;
 
@@ -180,8 +187,6 @@ class InputServiceImpl final : public InputServiceBase {
     const V2InputValidator validator_;
 
     absl::Mutex batch_sessions_mutex_;
-    // TODO(b/554875313): "persistent sessions for identified SendInputEvents
-    // sources" expires idle sessions and gives anonymous calls their own.
     SourceSessions batch_sessions_ ABSL_GUARDED_BY(batch_sessions_mutex_);
 };
 

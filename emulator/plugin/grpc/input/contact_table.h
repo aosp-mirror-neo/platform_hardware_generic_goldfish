@@ -111,6 +111,7 @@ class ContactTable {
 
     std::optional<Contact> Find(const ContactKey& key) const;
     bool IsHeld(const ContactKey& key) const { return contacts_.contains(key); }
+    bool HasSession(InputSessionId session) const;
 
     /**
      * @brief Frees the slot held by `key`.

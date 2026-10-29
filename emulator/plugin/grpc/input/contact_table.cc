@@ -67,6 +67,11 @@ std::optional<Contact> ContactTable::Find(const ContactKey& key) const {
     return it != contacts_.end() ? std::optional<Contact>(it->second.contact) : std::nullopt;
 }
 
+bool ContactTable::HasSession(InputSessionId session) const {
+    return std::ranges::any_of(
+            contacts_, [session](const auto& entry) { return entry.first.session == session; });
+}
+
 std::optional<Contact> ContactTable::Release(const ContactKey& key) {
     auto node = contacts_.extract(key);
     if (node.empty()) {

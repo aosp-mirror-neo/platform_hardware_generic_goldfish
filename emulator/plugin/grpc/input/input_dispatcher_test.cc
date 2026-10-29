@@ -1684,5 +1684,102 @@ TEST_F(InputDispatcherTest, DisplayRemovedWithNoContactsDoesNothing) {
     EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.25F, 0.25F)));
 }
 
+TEST_F(InputDispatcherTest, IdleTimeoutReleasesHeldContactsAndKeysWhileKeepingSessionOpen) {
+    const InputSessionId a = dispatcher_.OpenSession({
+        .source_id = 7,
+        .reject_down_on_held = true,
+        .idle_timeout = absl::Seconds(60),
+    });
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.25F, 0.25F}})), IsOk());
+    ASSERT_THAT(Dispatch(a, Key(kKeyDown, KEY_A)), IsOk());
+    Activities();
+    log_.writes.clear();
+    inner_.reports.clear();
+
+    // 30s < 60s timeout: nothing is released yet.
+    loop_->AdvanceClock(absl::Seconds(30));
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.25F, 0.25F)));
+    EXPECT_THAT(log_.writes, IsEmpty());
+
+    // Activity at t=30s resets the 60s idle deadline to t=90s.
+    ASSERT_THAT(Dispatch(a, Touch(kMove, {{0, 0.5F, 0.5F}})), IsOk());
+    Activities();
+    log_.writes.clear();
+    inner_.reports.clear();
+
+    // At t=60s (30s after the move), the session is still within its 60s timeout.
+    loop_->AdvanceClock(absl::Seconds(30));
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.5F, 0.5F)));
+    EXPECT_THAT(log_.writes, IsEmpty());
+
+    // At t=90s (60s after the move), held contacts and keys are released: the
+    // contact as a two-frame palm cancel, then the key.
+    loop_->AdvanceClock(absl::Seconds(30));
+    EXPECT_THAT(inner_.reports, ElementsAre(Palm(0), Lift(0)));
+    EXPECT_THAT(inner_.guest.Active(), IsEmpty());
+    EXPECT_THAT(log_.writes, ElementsAre("touch inner", "touch inner", Up(KEY_A)));
+    EXPECT_THAT(Activities(), ElementsAre("src7 synthesized POINTER_ACTION_CANCEL display 0 ids 0",
+                                          absl::StrCat("src7 synthesized KEY_ACTION_UP ", KEY_A)));
+
+    // The session remains open and pointer 0 is no longer considered held.
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.75F, 0.75F}})), IsOk());
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.75F, 0.75F)));
+}
+
+TEST_F(InputDispatcherTest, IdleTimerFiringBeforeItsGenerationIsArmedIsStale) {
+    const InputSessionId a = dispatcher_.OpenSession({
+        .source_id = 7,
+        .idle_timeout = absl::Seconds(60),
+    });
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.25F, 0.25F}})), IsOk());
+    Activities();
+
+    // An operation ran, but the loop task that records which generation the
+    // re-armed timer fires for has not. On loops whose Schedule() arms from a
+    // task of its own, the previous deadline can still fire in that window;
+    // it must not release what the operation just held.
+    loop_->AdvanceClock(absl::Seconds(30));
+    dispatcher_.DispatchPointer(a, Touch(kMove, {{0, 0.5F, 0.5F}}), nullptr);
+    ASSERT_TRUE(loop_->RunOne());
+    log_.writes.clear();
+    loop_->AdvanceClock(absl::Seconds(60));
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.5F, 0.5F)));
+    EXPECT_THAT(log_.writes, IsEmpty());
+
+    // The timer stays usable: the next operation arms it again.
+    loop_->RunAll();
+    ASSERT_THAT(Dispatch(a, Touch(kMove, {{0, 0.6F, 0.6F}})), IsOk());
+    loop_->AdvanceClock(absl::Seconds(60));
+    EXPECT_THAT(inner_.guest.Active(), IsEmpty());
+    EXPECT_THAT(Activities(),
+                ElementsAre("src7 POINTER_ACTION_MOVE display 0 ids 0",
+                            "src7 POINTER_ACTION_MOVE display 0 ids 0",
+                            "src7 synthesized POINTER_ACTION_CANCEL display 0 ids 0"));
+}
+
+TEST_F(InputDispatcherTest, IdleTimerFiringAfterShutdownOrDestructionIsIgnored) {
+    auto dispatcher = std::make_unique<InputDispatcher>(*loop_, devices_, &keyboard_,
+                                                        ResolveEvdevOnly, &clock_);
+    const InputSessionId a = dispatcher->OpenSession({
+        .source_id = 7,
+        .idle_timeout = absl::Seconds(60),
+    });
+    dispatcher->DispatchPointer(a, Touch(kDown, {{0, 0.25F, 0.25F}}), nullptr);
+    dispatcher->DispatchKey(a, Key(kKeyDown, KEY_A), nullptr);
+    loop_->RunAll();
+    log_.writes.clear();
+
+    // Shut down, so the still-armed timer must leave the dispatcher alone...
+    dispatcher->Shutdown();
+    loop_->AdvanceClock(absl::Seconds(60));
+    EXPECT_THAT(log_.writes, IsEmpty());
+
+    // ...and once it is gone, the timer has nothing to touch.
+    dispatcher.reset();
+    loop_->RunAll();
+    loop_->AdvanceClock(absl::Seconds(60));
+    EXPECT_THAT(log_.writes, IsEmpty());
+}
+
 }  // namespace
 }  // namespace goldfish::grpc::v2

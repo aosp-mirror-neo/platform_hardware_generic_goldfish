@@ -58,6 +58,12 @@ class IInputDispatcher {
          * a pointer before pressing it again (v2); others may resend presses.
          */
         bool reject_down_on_held = false;
+        /**
+         * @brief If positive, how long the session may go without an operation
+         * before its held contacts and keys are released as on
+         * `CloseSession()`, while the session stays open.
+         */
+        absl::Duration idle_timeout = absl::ZeroDuration();
     };
 
     using ActivityEventSource =

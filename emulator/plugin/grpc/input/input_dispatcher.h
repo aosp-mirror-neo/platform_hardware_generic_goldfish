@@ -225,6 +225,27 @@ class InputDispatcher final : public IInputDispatcher {
         uint64_t generation = 0;
         std::bitset<kTouchDeviceSlots> slots;
     };
+    struct Session {
+        SessionOptions options;
+        // Bumped by every operation of the session. The idle timer fires for
+        // the generation it was armed with; a firing for an older one is stale.
+        uint64_t idle_generation = 0;
+        // The generation the armed timer fires for. Recorded in loop order
+        // after Timer::Schedule(), which arms from a loop task of its own.
+        uint64_t armed_generation = 0;
+        // Armed while the session holds input and has a positive idle_timeout.
+        // Never self-cancels, so Schedule() can re-arm it.
+        std::shared_ptr<::goldfish::async::EventLoop::Timer> idle_timer;
+    };
+    // Shared with the idle-timer callbacks and the tasks they need in loop
+    // order, which may still run after the dispatcher is gone: once Shutdown()
+    // clears `dispatcher`, they do nothing, and Shutdown() waits for one that
+    // is running.
+    struct TimerGate {
+        explicit TimerGate(InputDispatcher* owner) : dispatcher(owner) {}
+        absl::Mutex mutex;
+        InputDispatcher* dispatcher ABSL_GUARDED_BY(mutex);
+    };
 
     void ShutdownOnce() ABSL_LOCKS_EXCLUDED(pending_mutex_, outbox_mutex_);
     void OnDeviceActiveChanged() ABSL_LOCKS_EXCLUDED(pending_mutex_);
@@ -257,6 +278,18 @@ class InputDispatcher final : public IInputDispatcher {
     // to, lifting them as `action` (CANCEL or HOVER_EXIT) does.
     absl::Status CancelOnDisplay(InputSessionId session, int32_t source_id, int32_t display_id,
                                  ::android::emulation::v2::PointerAction action);
+    bool SessionHasHeldInput(InputSessionId session) const;
+    // Arms the idle timer of `session` for its current operation, if it has
+    // a positive idle_timeout and holds input.
+    void RefreshIdleTimer(InputSessionId session);
+    // Records that the idle timer of `session` fires for `generation`.
+    void ArmIdleGeneration(InputSessionId session, uint64_t generation);
+    // Releases the held input of `session` if no operation ran since the
+    // timer was armed.
+    void OnIdleTimer(InputSessionId session);
+    // Releases the contacts and keys `session` holds, reporting their
+    // synthesized CANCEL and KEY_ACTION_UP, and keeps the session open.
+    void ReleaseSessionInput(InputSessionId session);
     void ReleaseSession(InputSessionId session);
     void ResetAfterSnapshotLoad();
     // Cancels slots left down on `device` by OnDisplayRemoved() if `sink` is
@@ -288,6 +321,7 @@ class InputDispatcher final : public IInputDispatcher {
     absl::once_flag shutdown_once_;
     const std::shared_ptr<ActiveGate> active_gate_;
     ScopedActiveChangedListener devices_active_subscription_;
+    const std::shared_ptr<TimerGate> timer_gate_;
 
     mutable absl::Mutex pending_mutex_;
     bool shut_down_ ABSL_GUARDED_BY(pending_mutex_) = false;
@@ -298,7 +332,7 @@ class InputDispatcher final : public IInputDispatcher {
     // Loop-only state.
     KeyboardSink* keyboard_;
     ContactTable contacts_;
-    absl::flat_hash_map<InputSessionId, SessionOptions> sessions_;
+    absl::flat_hash_map<InputSessionId, Session> sessions_;
     // The sessions holding each pressed evdev code.
     absl::flat_hash_map<uint32_t, absl::flat_hash_set<InputSessionId>> key_holders_;
     // The active generation of each device written to, as of the first write
