@@ -30,10 +30,12 @@
 #include "absl/hash/hash.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
 #include "benchmark/benchmark.h"
 
 #include "goldfish/http/http_headers.h"
 #include "goldfish/http/http_request.h"
+#include "goldfish/http/http_response.h"
 #include "goldfish/http/http_router.h"
 #include "http_session_internal.h"
 
@@ -488,6 +490,121 @@ void BmLlhttpMethodParse(benchmark::State& state) {
     }
 }
 BENCHMARK(BmLlhttpMethodParse);
+
+ABSL_ATTRIBUTE_NOINLINE std::string LegacyFormatWireResponse(const HttpResponse& resp,
+                                                             bool keep_alive,
+                                                             bool is_head_request = false) {
+    std::string response;
+    const std::string& body = resp.Body();
+    const int status = resp.StatusCode();
+    response.reserve(body.size() + 256);
+    absl::StrAppend(&response, protocol::kHttp11, protocol::kSpace, status, protocol::kSpace,
+                    HttpStatusToReason(status), protocol::kCrlf);
+
+    bool has_content_length = false;
+    bool has_connection = false;
+
+    for (const auto& [name, value] : resp.Headers()) {
+        absl::StrAppend(&response, name, protocol::kColonSpace, value, protocol::kCrlf);
+        if (absl::EqualsIgnoreCase(name, headers::kContentLength)) {
+            has_content_length = true;
+        }
+        if (absl::EqualsIgnoreCase(name, headers::kConnection)) {
+            has_connection = true;
+        }
+    }
+
+    const bool forbids_content_length = (status >= 100 && status < 200) || status == 204;
+    if (!has_content_length && !forbids_content_length) {
+        absl::StrAppend(&response, headers::kContentLength, protocol::kColonSpace, body.size(),
+                        protocol::kCrlf);
+    }
+    if (!has_connection) {
+        absl::StrAppend(&response, headers::kConnection, protocol::kColonSpace,
+                        keep_alive ? protocol::kKeepAlive : protocol::kClose, protocol::kCrlf);
+    }
+
+    absl::StrAppend(&response, protocol::kCrlf);
+    if (!is_head_request && status != 204 && status != 304 && (status < 100 || status >= 200)) {
+        absl::StrAppend(&response, body);
+    }
+    return response;
+}
+
+HttpResponse BuildJsonResponse() {
+    return HttpResponse::String("{\"status\":\"ok\",\"emulator\":\"goldfish\",\"port\":8554}",
+                                HttpStatus::kOk, mime::kApplicationJson);
+}
+
+HttpResponse BuildCorsJsonResponse() {
+    return BuildJsonResponse()
+            .WithHeader(headers::kAccessControlAllowOrigin, "http://localhost:8080")
+            .WithHeader(headers::kAccessControlAllowMethods,
+                        "GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH")
+            .WithHeader(headers::kAccessControlAllowHeaders,
+                        "content-type,x-grpc-web,x-user-agent,authorization")
+            .WithHeader(headers::kAccessControlExposeHeaders,
+                        "grpc-status,grpc-message,grpc-status-details-bin")
+            .WithHeader(headers::kCacheControl, "no-store, no-cache, must-revalidate")
+            .WithHeader(headers::kXGrpcWeb, "1");
+}
+
+void BmFormatWireResponseJsonBaseline(benchmark::State& state) {
+    const HttpResponse resp = BuildJsonResponse();
+    for (auto _ : state) {
+        std::string wire = LegacyFormatWireResponse(resp, /*keep_alive=*/true);
+        benchmark::DoNotOptimize(wire);
+    }
+}
+BENCHMARK(BmFormatWireResponseJsonBaseline);
+
+void BmFormatWireResponseJson(benchmark::State& state) {
+    const HttpResponse resp = BuildJsonResponse();
+    for (auto _ : state) {
+        std::string wire = resp.FormatWireResponse(/*keep_alive=*/true);
+        benchmark::DoNotOptimize(wire);
+    }
+}
+BENCHMARK(BmFormatWireResponseJson);
+
+void BmFormatWireResponseCorsHeadersBaseline(benchmark::State& state) {
+    const HttpResponse resp = BuildCorsJsonResponse();
+    for (auto _ : state) {
+        std::string wire = LegacyFormatWireResponse(resp, /*keep_alive=*/true);
+        benchmark::DoNotOptimize(wire);
+    }
+}
+BENCHMARK(BmFormatWireResponseCorsHeadersBaseline);
+
+void BmFormatWireResponseCorsHeaders(benchmark::State& state) {
+    const HttpResponse resp = BuildCorsJsonResponse();
+    for (auto _ : state) {
+        std::string wire = resp.FormatWireResponse(/*keep_alive=*/true);
+        benchmark::DoNotOptimize(wire);
+    }
+}
+BENCHMARK(BmFormatWireResponseCorsHeaders);
+
+void BmFormatWireResponseHeadLargeBodyBaseline(benchmark::State& state) {
+    const HttpResponse resp = HttpResponse::String(std::string(65536, 'x'), HttpStatus::kOk,
+                                                   mime::kApplicationOctetStream);
+    for (auto _ : state) {
+        std::string wire =
+                LegacyFormatWireResponse(resp, /*keep_alive=*/true, /*is_head_request=*/true);
+        benchmark::DoNotOptimize(wire);
+    }
+}
+BENCHMARK(BmFormatWireResponseHeadLargeBodyBaseline);
+
+void BmFormatWireResponseHeadLargeBody(benchmark::State& state) {
+    const HttpResponse resp = HttpResponse::String(std::string(65536, 'x'), HttpStatus::kOk,
+                                                   mime::kApplicationOctetStream);
+    for (auto _ : state) {
+        std::string wire = resp.FormatWireResponse(/*keep_alive=*/true, /*is_head_request=*/true);
+        benchmark::DoNotOptimize(wire);
+    }
+}
+BENCHMARK(BmFormatWireResponseHeadLargeBody);
 
 }  // namespace
 }  // namespace goldfish::http
