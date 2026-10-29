@@ -726,11 +726,39 @@ TEST_F(AudioInputMuxTest, RenamingAnInjectorToAnotherInputsSourceIdFails) {
               absl::StatusCode::kAlreadyExists);
     EXPECT_EQ(mux.ReconfigureInjector(&owner_b, kMono48kS16, "host").code(),
               absl::StatusCode::kInvalidArgument);
+    EXPECT_EQ(mux.ReconfigureInjector(&owner_b, kMono48kS16, "webrtc").code(),
+              absl::StatusCode::kInvalidArgument);
     EXPECT_TRUE(mux.ReconfigureInjector(&owner_b, kMono48kS16, "c").ok());
     EXPECT_EQ(InputIds(mux.GetStateSnapshot()), (std::vector<std::string>{"host", "a", "c"}));
 
     mux.UnregisterInjector(&owner_a);
     mux.UnregisterInjector(&owner_b);
+}
+
+TEST_F(AudioInputMuxTest, OnlyAWebRtcInjectorMayUseTheWebRtcSourceId) {
+    FakeHostAudioInput host;
+    AudioInputMux mux(&host);
+    int agent = 1;
+    int unlabeled = 2;
+    int webrtc = 3;
+
+    EXPECT_EQ(
+            mux.RegisterInjector(&agent, kMono48kS16, ConstantSource(0), nullptr,
+                                 {.source_id = "webrtc", .kind = MicrophoneInputKind::kGrpcStream})
+                    .status()
+                    .code(),
+            absl::StatusCode::kInvalidArgument);
+    EXPECT_EQ(mux.RegisterInjector(&unlabeled, kMono48kS16, ConstantSource(0), nullptr,
+                                   {.source_id = "webrtc"})
+                      .status()
+                      .code(),
+              absl::StatusCode::kInvalidArgument);
+    ASSERT_TRUE(mux.RegisterInjector(&webrtc, kMono48kS16, ConstantSource(0), nullptr,
+                                     {.source_id = "webrtc", .kind = MicrophoneInputKind::kWebRtc})
+                        .ok());
+
+    EXPECT_EQ(InputIds(mux.GetStateSnapshot()), (std::vector<std::string>{"host", "webrtc"}));
+    mux.UnregisterInjector(&webrtc);
 }
 
 TEST_F(AudioInputMuxTest, AnActiveCallbackThatUnregistersAnotherInjectorSilencesIt) {

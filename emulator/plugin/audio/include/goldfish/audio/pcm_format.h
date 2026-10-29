@@ -32,6 +32,13 @@ inline constexpr uint32_t kMaxAudioChannels = 16;
 inline constexpr std::string_view kHostMicrophoneSourceId = "host";
 
 /**
+ * Reserved mixer channel identifier for the microphone audio WebRTC clients send. Only an
+ * injector of kind `MicrophoneInputKind::kWebRtc` may use it, so clients such as a gRPC agent
+ * cannot impersonate a browser microphone.
+ */
+inline constexpr std::string_view kWebRtcMicrophoneSourceId = "webrtc";
+
+/**
  * Minimum and maximum allowed linear gain multiplier for a virtual microphone input channel.
  */
 inline constexpr float kMinMicrophoneInputGain = 0.0F;
@@ -59,7 +66,8 @@ enum class MicrophoneInputKind : uint8_t {
  */
 struct MicrophoneSourceMetadata {
     /// Mixer channel identifier. When empty, `AudioInputMux` assigns `"stream-<id>"`.
-    /// Passing `"host"` is rejected with `absl::InvalidArgumentError`.
+    /// Passing `"host"`, or `"webrtc"` with a kind other than `kWebRtc`, is rejected with
+    /// `absl::InvalidArgumentError`.
     std::string source_id;
     MicrophoneInputKind kind = MicrophoneInputKind::kUnspecified;
 

@@ -187,7 +187,8 @@ class AudioInputMux {
      *
      * @param metadata Mixer channel identity. An empty `source_id` is replaced by `"stream-<n>"`.
      * @return The mixer `source_id` of the registered injector, or:
-     * - `InvalidArgumentError` for an invalid @p config or `source_id == "host"`.
+     * - `InvalidArgumentError` for an invalid @p config, `source_id == "host"`, or
+     *   `source_id == "webrtc"` with a kind other than `kWebRtc`.
      * - `FailedPreconditionError` after `Shutdown()`.
      * - `AlreadyExistsError` if another injector already uses the `source_id`.
      * - `ResourceExhaustedError` if `kMaxConcurrentMicrophoneStreams` injectors are registered.

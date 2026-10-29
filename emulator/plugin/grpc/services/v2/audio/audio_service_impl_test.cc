@@ -1537,6 +1537,36 @@ TEST_F(AudioServiceTest, AudioStateEnforcesPreconditionsReadOnlyAndValidationErr
     }
 }
 
+// "webrtc" names the microphone WebRTC clients send; an agent must not impersonate it.
+TEST_F(AudioServiceTest, InjectionCannotTakeTheWebRtcSourceId) {
+    InstallDefaultAudioInputMux();
+    AudioChunk chunk;
+    chunk.set_sample_rate_hz(16000);
+    chunk.set_channel_count(1);
+    chunk.set_format(SampleFormat::SAMPLE_FORMAT_PCM16_BIT);
+    chunk.set_source_id("webrtc");
+    chunk.set_pcm_data(MakePcm16Bytes({100, -100}));
+    {
+        ServerContext clip_ctx;
+        InjectAudioClipResponse clip_reply;
+        Status status = service_->InjectAudioClip(&clip_ctx, &chunk, &clip_reply);
+        EXPECT_EQ(status.error_code(), StatusCode::INVALID_ARGUMENT);
+        EXPECT_TRUE(absl::StrContains(status.error_message(), "'webrtc' is reserved"))
+                << status.error_message();
+    }
+    {
+        ClientContext stream_ctx;
+        stream_ctx.AddMetadata("x-client-id", "webrtc");
+        StreamMicrophoneAudioResponse stream_reply;
+        auto writer = stub_->StreamMicrophoneAudio(&stream_ctx, &stream_reply);
+        chunk.clear_source_id();
+        writer->Write(chunk);
+        writer->WritesDone();
+        EXPECT_EQ(writer->Finish().error_code(), StatusCode::INVALID_ARGUMENT);
+    }
+    EXPECT_EQ(guest_mux_.GetStateSnapshot().microphone_inputs.size(), 1U);
+}
+
 TEST_F(AudioServiceTest, DisablingHostMicrophoneFeedsPacedSilenceWhenIdleAndAllowsClipInjection) {
     InstallDefaultAudioInputMux();
 

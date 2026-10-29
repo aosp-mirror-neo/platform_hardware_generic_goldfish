@@ -61,6 +61,17 @@ absl::Status MuxShutdownError(std::string_view action) {
             action));
 }
 
+absl::Status ValidateWebRtcReservation(std::string_view action, std::string_view source_id,
+                                       MicrophoneInputKind kind) {
+    if (source_id != kWebRtcMicrophoneSourceId || kind == MicrophoneInputKind::kWebRtc) {
+        return absl::OkStatus();
+    }
+    return absl::InvalidArgumentError(absl::StrFormat(
+            "Failed to %s: source_id 'webrtc' is reserved for the microphone audio WebRTC "
+            "clients send. Specify a distinct source_id or leave it empty.",
+            action));
+}
+
 absl::Status ValidateInjector(std::string_view action, const AudioStreamConfig& config,
                               std::string_view source_id) {
     if (source_id == kHostMicrophoneSourceId) {
@@ -346,6 +357,11 @@ absl::StatusOr<std::string> AudioInputMux::RegisterInjector(const void* owner,
         !valid.ok()) {
         return valid;
     }
+    if (absl::Status reserved = ValidateWebRtcReservation("start microphone injection",
+                                                          metadata.source_id, metadata.kind);
+        !reserved.ok()) {
+        return reserved;
+    }
     if (shutdown_) {
         return MuxShutdownError("start microphone injection");
     }
@@ -405,6 +421,13 @@ absl::Status AudioInputMux::ReconfigureInjector(const void* owner, const AudioSt
     }
     const bool renaming = new_source_id.has_value() && !new_source_id->empty() &&
                           *new_source_id != injector->input.source_id;
+    if (renaming) {
+        if (absl::Status reserved = ValidateWebRtcReservation("rename microphone injection",
+                                                              *new_source_id, injector->input.kind);
+            !reserved.ok()) {
+            return reserved;
+        }
+    }
     if (renaming && FindInput(*new_source_id) != nullptr) {
         return absl::AlreadyExistsError(absl::StrFormat(
                 "Failed to rename microphone input '%s' to '%s': another microphone input already "
