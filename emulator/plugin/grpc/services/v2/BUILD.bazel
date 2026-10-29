@@ -30,6 +30,74 @@ collect_plugins(
 )
 
 cc_library(
+    name = "audio_service",
+    srcs = ["audio/audio_service_impl.cc"],
+    hdrs = ["audio/audio_service_impl.h"],
+    includes = ["."],
+    local_defines = select({
+        "@platforms//os:windows": ["NOGDI"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "//emulator/libs/SocketBuffer",
+        "//emulator/libs/eventing",
+        "//emulator/libs/grpc_utils:absl_translate",
+        "//emulator/libs/grpc_utils:async",
+        "//emulator/libs/grpc_utils:event-stream",
+        "//emulator/libs/system:clock",
+        "//emulator/plugin/audio:audio_input_mux",
+        "//emulator/plugin/audio:pcm_format",
+        "//emulator/plugin/audio:qemu_audio_capture",
+        "//emulator/plugin/audio:qemu_audio_inject",
+        "//emulator/plugin/vminterface:vm_lock",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/cleanup",
+        "@abseil-cpp//absl/functional:any_invocable",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@aemu//protos/services_v2:audio_service_cc_grpc",
+        "@grpc//:grpc++",
+    ],
+)
+
+cc_test(
+    name = "audio_service_test",
+    size = "small",
+    srcs = [
+        "audio/audio_service_impl_test.cc",
+        "test/grpc_v2_service_test.h",
+    ],
+    includes = ["."],
+    local_defines = select({
+        "@platforms//os:windows": ["NOGDI"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":audio_service",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/audio:audio_input_mux",
+        "//emulator/plugin/audio:pcm_format",
+        "//emulator/plugin/audio:qemu_audio_inject",
+        "//emulator/plugin/audio:test_bql",
+        "//emulator/plugin/audio:test_qemu_audio_stub",
+        "//emulator/plugin/vminterface:vm_lock",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@aemu//protos/services_v2:audio_service_cc_grpc",
+        "@googletest//:gtest",
+        "@grpc//:grpc++",
+    ],
+)
+
+cc_library(
     name = "battery_service",
     srcs = ["battery/battery_service_impl.cc"],
     hdrs = ["battery/battery_service_impl.h"],
@@ -87,6 +155,7 @@ cc_library(
         "//conditions:default": [],
     }),
     deps = [
+        "//emulator/plugin/audio:pcm_format",
         "//emulator/plugin/avd:avd_properties",
         "//emulator/plugin/avd:avd_universe",
         "@aemu//protos/services_v2:capabilities_service_cc_grpc",
@@ -534,6 +603,7 @@ cc_library(
         "//conditions:default": [],
     }),
     deps = [
+        ":audio_service",
         ":battery_service",
         ":capabilities_service",
         ":hypervisor_service",
@@ -553,6 +623,8 @@ cc_library(
 clang_tidy_test(
     name = "tidy",
     targets = [
+        ":audio_service",
+        ":audio_service_test",
         ":battery_service",
         ":battery_service_test",
         ":capabilities_service",

@@ -34,6 +34,7 @@
 #include "android/crashreport/debug.h"
 #include "emulator/plugin/webrtc/webrtc_device.h"
 #include "goldfish/adb_device/adb_device.h"
+#include "goldfish/audio/goldfish_audio_mux.h"
 #include "goldfish/avd/avd_finalize.h"
 #include "goldfish/avd/avd_start.h"
 #include "goldfish/avd/global_event_loop.h"
@@ -208,6 +209,7 @@ void setup_logging() {
 
 extern "C" void GF_REGISTER_TYPES_FUNC(void) {
     VLOG(1) << "Enter GF_REGISTER_TYPES";
+    goldfish::audio::audio_mux_register_types();
     goldfish_battery_register_types();
     vsock_port_fwd_register_types();
     vsock_low_level_register_types();

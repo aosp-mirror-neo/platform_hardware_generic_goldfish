@@ -17,6 +17,7 @@
 #include <memory>
 #include <vector>
 
+#include "audio/audio_service_impl.h"
 #include "battery/battery_service_impl.h"
 #include "discovery/capabilities_service_impl.h"
 #include "environment/sensors_service_impl.h"
@@ -53,6 +54,8 @@ std::vector<std::shared_ptr<Service>> CreateV2Services(AvdUniverse& avd_universe
                                          .event_loop = ::goldfish::avd::globalEventLoop()}));
     services.emplace_back(std::make_shared<BatteryServiceImpl>(
             avd_universe.GetBattery(), BatteryServiceImpl::Options{.has_battery = hw.hw_battery}));
+    services.emplace_back(std::make_shared<AudioServiceImpl>(AudioServiceImpl::Options{
+        .has_audio_output = hw.hw_audioOutput, .has_audio_input = hw.hw_audioInput}));
     services.emplace_back(std::make_shared<InputServiceImpl>(
             avd_universe.GetInputDispatcher(), avd_universe.GetMultiDisplay(),
             InputServiceImpl::Options{.hw_sensor_hinge = hw.hw_sensor_hinge,

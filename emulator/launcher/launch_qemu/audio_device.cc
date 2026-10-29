@@ -38,14 +38,17 @@ absl::Status AudioDevice::initialize(const EmulatorConfig& emulator) {
 
 std::vector<std::string> AudioDevice::getQemuParameters(const EmulatorConfig& emulator) const {
     using namespace std::literals;
-    const std::string_view kID = "id=mainaudiodev"sv;
+    const std::string_view kHostId = "id=hostaudiodev"sv;
 
     std::string audioBackend = getAudioBackend(emulator.opts());
     std::string_view audioSettings;
-    if (audioBackend.empty()) {
+    if (emulator.opts().noaudio) {
         audioBackend = "none"s;
         audioSettings = "out.mixing-engine=off,in.mixing-engine=off"sv;
     } else {
+        if (audioBackend.empty()) {
+            audioBackend = "none"s;
+        }
         audioSettings =
                 "out.mixing-engine=on,out.fixed-settings=on,"
                 "out.frequency=48000,out.format=s16,out.channels=2,"
@@ -53,14 +56,18 @@ std::vector<std::string> AudioDevice::getQemuParameters(const EmulatorConfig& em
                 "in.frequency=48000,in.format=s16,in.channels=1"sv;
     }
 
+    // The host microphone stays muted unless the user opts in with -allow-host-audio.
+    const std::string muxDevice =
+            absl::StrCat("goldfish-audio-mux,host-audiodev=hostaudiodev,audiodev-id=mainaudiodev"sv,
+                         emulator.opts().allow_host_audio ? ",allow-host-audio=on"sv : ""sv);
+
     switch (emulator.avd().Arch()) {
     case Avd::CpuArchitecture::kArm:
     case Avd::CpuArchitecture::kX86:
         return {
-            "-audiodev"s,
-            absl::StrFormat("%s,%s,%s", audioBackend, kID, audioSettings),
-            "-device"s,
-            absl::StrCat("virtio-sound-pci,audiodev=mainaudiodev,addr="sv, addr()),
+            "-audiodev"s, absl::StrFormat("%s,%s,%s", audioBackend, kHostId, audioSettings),
+            "-device"s,   muxDevice,
+            "-device"s,   absl::StrCat("virtio-sound-pci,audiodev=mainaudiodev,addr="sv, addr()),
         };
 
     case Avd::CpuArchitecture::kRiscV:
@@ -82,7 +89,10 @@ std::string AudioDevice::getAudioBackend(const AndroidOptions& opts) {
     } else {
         std::string backend = detectHostAudioBackend();
         if (backend.empty()) {
-            LOG(WARNING) << "No audio backend detected, there will be no audio.";
+            LOG(WARNING) << "No host audio backend detected; host audio playback/capture is "
+                            "disabled and QEMU is falling back to the 'none' driver with software "
+                            "mixing enabled (pass '-audio <backend>' to select a host driver, or "
+                            "'-no-audio' to disable audio and suppress this warning).";
         }
         return backend;
     }
