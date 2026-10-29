@@ -1,5 +1,6 @@
 load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("//emulator/tools:cc_binary_with_manifest.bzl", "cc_binary_with_manifest")
 
 cc_library(
     name = "core",
@@ -155,11 +156,27 @@ cc_test(
     ],
 )
 
+cc_binary_with_manifest(
+    name = "cpu_read_pipeline_perf",
+    srcs = ["cpu_read_pipeline_perf.cc"],
+    tags = ["benchmark"],
+    deps = [
+        ":core",
+        ":cpu_pipeline",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/types:span",
+        "@google_benchmark//:benchmark",
+        "@libyuv",
+    ],
+)
+
 clang_tidy_test(
     name = "tidy",
     targets = [
         ":core",
         ":cpu_pipeline",
+        ":cpu_read_pipeline_perf",
         ":testing",
         ":core_test",
         ":cpu_pipeline_test",
