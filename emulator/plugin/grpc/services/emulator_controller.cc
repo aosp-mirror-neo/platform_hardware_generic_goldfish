@@ -18,11 +18,11 @@
 
 #include <memory>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/log/log.h"
+#include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 
-#include "android/emulation/control/absl_status_translate.h"
-#include "android/emulation/control/event_sender.h"
-#include "android/emulation/control/keyboard/key_event_sender.h"
 #include "android/emulation/control/simple_async_grpc.h"
 #include "android/goldfish/hardware_config.h"
 #include "android/goldfish/vm_interface.h"
@@ -124,25 +124,30 @@ class EmulatorControllerImpl final
                                           EmulatorController::WithCallbackMethod_streamNotification<
                                                   EmulatorController::Service>>>>> {
   public:
-    EmulatorControllerImpl(VmOperations* vm, QemuConsole* keyboard_console,
-                           AvdUniverse* avd_universe, IMultiDisplay* multidisplay)
+    EmulatorControllerImpl(VmOperations* vm_interface, AvdUniverse* avd_universe,
+                           IMultiDisplay* multi_display)
             : avd_universe_(avd_universe)
-            , multi_display_(multidisplay)
-            , vm_service_(vm)
+            , multi_display_(multi_display)
+            , vm_service_(vm_interface)
             , grpc_notification_channel_(avd_universe->GetGrpcNotificationChannel())
             , notification_store_(&grpc_notification_channel_)
             , microphone_service_(grpc_notification_channel_, *::goldfish::avd::globalEventLoop())
-            , key_event_sender_(keyboard::createKeyEventSender(keyboard_console,
-                                                               &avd_universe->GetQemuEventLoop()))
             , status_service_(avd_universe->GetGuestStatus(), avd_universe->Props(), avd_universe)
             , battery_service_(avd_universe->GetBattery())
             , sensor_service_(avd_universe->GetSensorsPhysicalModel(), &grpc_notification_channel_)
             , gps_service_(avd_universe->GetLocation())
             , fingerprint_service_(avd_universe->GetFingerprintSensor())
             , clipboard_service_(avd_universe->GetClipboardChannel())
-            , input_event_sender_(multidisplay)
-            , display_service_(multidisplay, &avd_universe->GetSensorsPhysicalModel(),
-                               GetResizableConfig(*avd_universe)) {}
+            , display_service_(multi_display, &avd_universe->GetSensorsPhysicalModel(),
+                               GetResizableConfig(*avd_universe))
+            , unary_session_(avd_universe->GetInputDispatcher(),
+                             IInputDispatcher::SessionOptions{
+                                 .human = true,
+                                 .source_id = 0,
+                                 .reject_down_on_held = false,
+                                 .idle_timeout = absl::Seconds(60),
+                             })
+            , unary_translator_(*multi_display, avd_universe->Props().hw_config.hw_sensor_hinge) {}
 
     Status getBattery(ServerContext* /*context*/, const Empty* /*request*/,
                       BatteryState* reply) override {
@@ -227,18 +232,33 @@ class EmulatorControllerImpl final
         return fingerprint_service_.sendFingerprint(*request);
     }
 
-    Status sendKey(ServerContext* context, const KeyboardEvent* request,
-                   Empty* /*reply*/) override {
-        key_event_sender_->send(*request);
+    Status sendKey(ServerContext* /*context*/, const KeyboardEvent* request,
+                   Empty* /*reply*/) override ABSL_LOCKS_EXCLUDED(unary_input_mutex_) {
+        const absl::MutexLock unary_lock(unary_input_mutex_);
+        for (const auto& event : unary_translator_.TranslateKeyboard(*request)) {
+            unary_session_.Dispatch(event, LogRejectedV1InputEvent);
+        }
         return Status::OK;
     }
 
-    Status sendMouse(ServerContext* context, const MouseEvent* request, Empty* /*reply*/) override {
-        return AbslStatusToGrpcStatus(input_event_sender_.Send(*request));
+    Status sendMouse(ServerContext* /*context*/, const MouseEvent* request,
+                     Empty* /*reply*/) override ABSL_LOCKS_EXCLUDED(unary_input_mutex_) {
+        const absl::MutexLock unary_lock(unary_input_mutex_);
+        unary_translator_.SyncResetTracker(unary_session_.ResetTracker());
+        if (const auto event = unary_translator_.TranslateMouse(*request); event.has_value()) {
+            unary_session_.Dispatch(*event, LogRejectedV1InputEvent);
+        }
+        return Status::OK;
     }
 
-    Status sendTouch(ServerContext* context, const TouchEvent* request, Empty* /*reply*/) override {
-        return AbslStatusToGrpcStatus(input_event_sender_.Send(*request));
+    Status sendTouch(ServerContext* /*context*/, const TouchEvent* request,
+                     Empty* /*reply*/) override ABSL_LOCKS_EXCLUDED(unary_input_mutex_) {
+        const absl::MutexLock unary_lock(unary_input_mutex_);
+        unary_translator_.SyncResetTracker(unary_session_.ResetTracker());
+        for (const auto& event : unary_translator_.TranslateTouch(*request)) {
+            unary_session_.Dispatch(event, LogRejectedV1InputEvent);
+        }
+        return Status::OK;
     }
 
     ::grpc::ServerReadReactor<WheelEvent>* injectWheel(::grpc::CallbackServerContext* /*context*/,
@@ -321,23 +341,24 @@ class EmulatorControllerImpl final
     NotificationStore notification_store_;
     // After notification_store_, so the store hears its first notification.
     MicrophoneServiceImpl microphone_service_;
-    const std::unique_ptr<keyboard::IKeyEventSender> key_event_sender_;
     StatusServiceImpl status_service_;
     BatteryServiceImpl battery_service_;
     SensorServiceImpl sensor_service_;
     GpsServiceImpl gps_service_;
     FingerprintServiceImpl fingerprint_service_;
     ClipboardServiceImpl clipboard_service_;
-    InputEventSender input_event_sender_;
     DisplayServiceImpl display_service_;
+    // Serializes both V1InputTranslator state transitions and posting to `unary_session_` so
+    // `InputDispatcher` applies unary DOWN/MOVE/UP events in their exact translation order.
+    absl::Mutex unary_input_mutex_;
+    DispatcherSession unary_session_ ABSL_GUARDED_BY(unary_input_mutex_);
+    V1InputTranslator unary_translator_ ABSL_GUARDED_BY(unary_input_mutex_);
 };
 
-std::shared_ptr<grpc::Service> getEmulatorController(VmOperations* vm,
-                                                     QemuConsole* keyboard_console,
+std::shared_ptr<grpc::Service> getEmulatorController(VmOperations* vm_interface,
                                                      AvdUniverse* avd_universe,
-                                                     IMultiDisplay* multidisplay) {
-    return std::make_shared<EmulatorControllerImpl>(vm, keyboard_console, avd_universe,
-                                                    multidisplay);
+                                                     IMultiDisplay* multi_display) {
+    return std::make_shared<EmulatorControllerImpl>(vm_interface, avd_universe, multi_display);
 }
 
 }  // namespace control

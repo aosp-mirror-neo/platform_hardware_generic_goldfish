@@ -56,13 +56,6 @@
 extern "C" {
 // NOLINTNEXTLINE(readability-identifier-naming)
 AudioBackend* audio_be_by_name(const char* name, void* errp);
-struct QemuConsole {
-    int dummy;
-};
-// NOLINTNEXTLINE(readability-identifier-naming)
-QemuConsole* qemu_console_lookup_by_index(int index) {
-    return nullptr;
-}
 }
 
 namespace android::emulation::control {
@@ -107,14 +100,6 @@ class TestAvdUniverse : private TestAvdClockHolder, public ::goldfish::avd::AvdU
     ::goldfish::async::EventLoop& loop_;
     std::shared_ptr<RecordingInputDispatcher> input_dispatcher_ =
             std::make_shared<RecordingInputDispatcher>();
-};
-
-#undef send
-class FakeKeyEventSender : public keyboard::IKeyEventSender {
-  public:
-    void send(const KeyboardEvent request) override { sent_events.push_back(request); }
-
-    std::vector<KeyboardEvent> sent_events;
 };
 
 TEST(InProcessRtcServiceTest, CreatesServicesFromAvdUniverse) {
@@ -252,10 +237,8 @@ TEST(InProcessRtcServiceTest, InputSenderDispatchesKeyEvent) {
     ::goldfish::display::test::FakeMultiDisplay fake_multidisplay(
             ::goldfish::avd::globalEventLoop());
     TestAvdUniverse universe(&fake_multidisplay, *::goldfish::avd::globalEventLoop());
-    auto key_event_sender = std::make_shared<FakeKeyEventSender>();
     auto dispatcher = std::make_shared<RecordingInputDispatcher>();
-    auto factory =
-            CreateInProcessInputSenderFactory(fake_multidisplay, key_event_sender, dispatcher);
+    auto factory = CreateInProcessInputSenderFactory(fake_multidisplay, dispatcher);
     auto sender = factory(DataChannelLabel::kInput);
     ASSERT_NE(sender, nullptr);
     EXPECT_TRUE(sender->Start().ok());
@@ -277,17 +260,14 @@ TEST(InProcessRtcServiceTest, InputSenderDispatchesKeyEvent) {
     // Subsequent sender destruction does not double-close.
     sender.reset();
     EXPECT_THAT(dispatcher->calls, ::testing::ElementsAre("key 7 KeyA", "key 7 KeyA", "close 7"));
-    EXPECT_TRUE(key_event_sender->sent_events.empty());
 }
 
 TEST(InProcessRtcServiceTest, InputSenderDispatchesTouchAndMouseEvent) {
     ::goldfish::display::test::FakeMultiDisplay fake_multidisplay(
             ::goldfish::avd::globalEventLoop());
     TestAvdUniverse universe(&fake_multidisplay, *::goldfish::avd::globalEventLoop());
-    auto key_event_sender = std::make_shared<FakeKeyEventSender>();
     auto dispatcher = std::make_shared<RecordingInputDispatcher>();
-    auto factory =
-            CreateInProcessInputSenderFactory(fake_multidisplay, key_event_sender, dispatcher);
+    auto factory = CreateInProcessInputSenderFactory(fake_multidisplay, dispatcher);
     auto sender = factory(DataChannelLabel::kInput);
     ASSERT_NE(sender, nullptr);
     EXPECT_TRUE(sender->Start().ok());
@@ -344,9 +324,7 @@ TEST(InProcessRtcServiceTest, MultipleWebRtcPeersIsolatePointerZeroAndReleaseOnC
             [](const ::android::emulation::v2::KeyEvent& key) {
                 return keyboard::dom_code_to_evdev(key.dom_code());
             });
-    auto key_event_sender = std::make_shared<FakeKeyEventSender>();
-    auto factory =
-            CreateInProcessInputSenderFactory(fake_multidisplay, key_event_sender, dispatcher);
+    auto factory = CreateInProcessInputSenderFactory(fake_multidisplay, dispatcher);
 
     auto count_active_slots = [&]() {
         int active_slots = 0;
@@ -423,10 +401,8 @@ TEST(InProcessRtcServiceTest, InputSenderV2DispatchesToAHumanSessionClosedWithTh
     ::goldfish::display::test::FakeMultiDisplay fake_multidisplay(
             ::goldfish::avd::globalEventLoop());
     TestAvdUniverse universe(&fake_multidisplay, *::goldfish::avd::globalEventLoop());
-    auto key_event_sender = std::make_shared<FakeKeyEventSender>();
     auto dispatcher = std::make_shared<RecordingInputDispatcher>();
-    auto factory =
-            CreateInProcessInputSenderFactory(fake_multidisplay, key_event_sender, dispatcher);
+    auto factory = CreateInProcessInputSenderFactory(fake_multidisplay, dispatcher);
     auto sender = factory(DataChannelLabel::kInputV2);
     ASSERT_NE(sender, nullptr);
     EXPECT_TRUE(sender->Start().ok());
@@ -460,17 +436,14 @@ TEST(InProcessRtcServiceTest, InputSenderV2DispatchesToAHumanSessionClosedWithTh
     sender.reset();
     EXPECT_THAT(dispatcher->calls,
                 ::testing::ElementsAre("pointer 7 display 0", "text 7 测试_🚀_é", "close 7"));
-    EXPECT_TRUE(key_event_sender->sent_events.empty());
 }
 
 TEST(InProcessRtcServiceTest, InputSenderV2DropsInvalidEventsBeforeDispatch) {
     ::goldfish::display::test::FakeMultiDisplay fake_multidisplay(
             ::goldfish::avd::globalEventLoop());
     TestAvdUniverse universe(&fake_multidisplay, *::goldfish::avd::globalEventLoop());
-    auto key_event_sender = std::make_shared<FakeKeyEventSender>();
     auto dispatcher = std::make_shared<RecordingInputDispatcher>();
-    auto factory =
-            CreateInProcessInputSenderFactory(fake_multidisplay, key_event_sender, dispatcher);
+    auto factory = CreateInProcessInputSenderFactory(fake_multidisplay, dispatcher);
     auto sender = factory(DataChannelLabel::kInputV2);
     ASSERT_NE(sender, nullptr);
     EXPECT_TRUE(sender->Start().ok());

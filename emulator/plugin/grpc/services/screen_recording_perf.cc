@@ -114,6 +114,7 @@ class BenchmarkDisplay final : public ::goldfish::display::IDisplay {
     void WriteEvDevReportOnLoop(
             absl::Span<const ::goldfish::display::EvDevEvent> /*events*/) override {}
     bool IsInputActive() const override { return true; }
+    uint64_t InputActiveGeneration() const override { return 0; }
 
   private:
     ::goldfish::display::Dimensions dims_;
