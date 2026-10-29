@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -26,6 +27,7 @@
 
 #include "android/emulation/control/screen_recording_constants.h"
 #include "goldfish/display/abstract_multi_display.h"
+#include "goldfish/display/frame.h"
 #include "goldfish/display/video_recorder.h"
 #include "screen_recording_service.grpc.pb.h"
 
@@ -45,6 +47,30 @@ using android::emulation::control::kMaxFPS;
 using android::emulation::control::kMaxTimeLimit;
 using android::emulation::control::kMaxVideoBitrate;
 using android::emulation::control::kMinVideoBitrate;
+
+// Populates VideoRecorder's persistent RGB888 frame buffer from the active
+// display without maintaining a duplicate full-frame copy.
+class ScreenRecordingFrameGenerator {
+  public:
+    explicit ScreenRecordingFrameGenerator(::goldfish::display::SharedDisplay display);
+
+    void operator()(uint8_t* pixels, int w, int h, int frame_index, double time);
+
+    ::goldfish::display::FrameId LastFrameId() const { return last_frame_id_; }
+    size_t BufferedBytes() const { return resize_scratch_.capacity(); }
+
+  private:
+    bool HasSameInitializedBuffer(const uint8_t* pixels, size_t dst_bytes) const;
+    void RetainLastOrClear(uint8_t* pixels, size_t dst_bytes);
+    void RecordFrame(::goldfish::display::FrameId frame_id, const uint8_t* pixels, size_t dst_bytes,
+                     int frame_index);
+
+    ::goldfish::display::SharedDisplay display_;
+    ::goldfish::display::FrameId last_frame_id_ = 0;
+    const uint8_t* initialized_buffer_ = nullptr;
+    size_t initialized_bytes_ = 0;
+    std::vector<uint8_t> resize_scratch_;
+};
 
 class ScreenRecordingServiceImpl final : public ScreenRecording::Service {
   public:
