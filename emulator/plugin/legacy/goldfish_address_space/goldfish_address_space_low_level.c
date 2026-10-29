@@ -550,6 +550,7 @@ static void goldfish_address_space_realize(PCIDevice* pci_dev, Error** errp) {
     env.bar1.host_page_size = GoldfishAddressSpaceHostPageSize();
 
     s->core = GoldfishAddressSpaceCoreCreate(&env);
+    add_deletable_object(OBJECT(pci_dev));
 }
 
 /**
