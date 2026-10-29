@@ -36,6 +36,7 @@
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_replace.h"
 #include "absl/strings/str_split.h"
+#include "absl/strings/strip.h"
 #include "google/protobuf/text_format.h"
 
 #include "android/base/system.h"
@@ -232,7 +233,9 @@ std::vector<std::pair<std::string, std::string>> getUserspaceBootProperties(
     std::string systemui_renderer =
             opts.systemui_renderer ? opts.systemui_renderer : "skiavkthreaded";
 
-    params.push_back({qemuUirendererProp, systemui_renderer});
+    // HWUI only recognizes "skiagl" and "skiavk"; "threaded" variants are for RenderEngine.
+    params.push_back(
+            {qemuUirendererProp, std::string(absl::StripSuffix(systemui_renderer, "threaded"))});
     params.push_back({qemuRenderengineProp, systemui_renderer});
 
     params.push_back({androidbootLogcatProp,

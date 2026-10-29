@@ -75,6 +75,8 @@ TEST(BootProperties, Basic) {
                 testing::IsSupersetOf(std::vector{
                     std::pair{"androidboot.hardware", "ranchu"},
                     std::pair{"androidboot.logcat", "*:V"},
+                    std::pair{"androidboot.debug.hwui.renderer", "skiavk"},
+                    std::pair{"androidboot.debug.renderengine.backend", "skiavkthreaded"},
                 }));
 }
 
