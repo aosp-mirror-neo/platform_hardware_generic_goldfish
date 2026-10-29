@@ -15,8 +15,7 @@
 | `fps_calculator.cc` | Implements the ring buffer logic for timestamp storage and FPS calculation. |
 
 ## Dependencies
-* **Upstream:** `@abseil-cpp//absl/time` (Time primitives).
-* **Internal:** `//emulator/libs/system:clock` (Time source).
+* **Upstream:** `@abseil-cpp//absl/time`, `@abseil-cpp//absl/time:clock_interface` (Time primitives and clock interface).
 
 ## Threading Model
 * **Not Thread Safe:** The `FpsCalculator` class is **not** thread-safe.

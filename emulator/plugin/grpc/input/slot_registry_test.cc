@@ -20,9 +20,9 @@
 #include <vector>
 
 #include "absl/time/clock.h"
+#include "absl/time/simulated_clock.h"
 #include "absl/time/time.h"
 
-#include "android/base/testing/test_clock.h"
 #include "standard-headers/linux/input-event-codes.h"
 
 namespace android {
@@ -30,11 +30,10 @@ namespace emulation {
 namespace control {
 
 using namespace std::chrono_literals;
-using android::base::TestClock;
 
 TEST(SlotRegistryTest, AcquireReleaseSlot) {
-    TestClock clock;
-    SlotRegistry registry(absl::Milliseconds(10), &clock);
+    absl::SimulatedClock clock;
+    SlotRegistry registry(absl::Milliseconds(10), clock);
     int slot1 = registry.AcquireSlot(1);
     ASSERT_GE(slot1, 0);
     ASSERT_TRUE(registry.IsSlotRegistered(slot1));
@@ -46,8 +45,8 @@ TEST(SlotRegistryTest, AcquireReleaseSlot) {
 }
 
 TEST(SlotRegistryTest, AcquireMultipleSlots) {
-    TestClock clock;
-    SlotRegistry registry(absl::Milliseconds(10), &clock);
+    absl::SimulatedClock clock;
+    SlotRegistry registry(absl::Milliseconds(10), clock);
     std::vector<int> slots;
     for (int i = 0; i < kMtsPointersNum; ++i) {
         int slot = registry.AcquireSlot(i);
@@ -69,8 +68,8 @@ TEST(SlotRegistryTest, AcquireMultipleSlots) {
 }
 
 TEST(SlotRegistryTest, ReacquireSlot) {
-    TestClock clock;
-    SlotRegistry registry(absl::Milliseconds(10), &clock);
+    absl::SimulatedClock clock;
+    SlotRegistry registry(absl::Milliseconds(10), clock);
     int slot1 = registry.AcquireSlot(1);
     ASSERT_GE(slot1, 0);
     registry.ReleaseSlot(1);
@@ -81,8 +80,8 @@ TEST(SlotRegistryTest, ReacquireSlot) {
 }
 
 TEST(SlotRegistryTest, ExpireOldSlots) {
-    TestClock clock;
-    SlotRegistry registry(absl::Milliseconds(10), &clock);
+    absl::SimulatedClock clock;
+    SlotRegistry registry(absl::Milliseconds(10), clock);
 
     int slot1 = registry.AcquireSlot(1);
     int slot2 = registry.AcquireSlot(2);
@@ -90,7 +89,7 @@ TEST(SlotRegistryTest, ExpireOldSlots) {
     registry.UpdateSlotExpiration(1);
     registry.UpdateSlotExpiration(2);
     // Advance time past expiration
-    clock.Advance(absl::Milliseconds(20));
+    clock.AdvanceTime(absl::Milliseconds(20));
 
     std::vector<EvDevEvent> events = registry.ExpireOldSlots();
     ASSERT_EQ(events.size(), 4);
@@ -123,14 +122,14 @@ TEST(SlotRegistryTest, ExpireOldSlots) {
 }
 
 TEST(SlotRegistryTest, ExpireOldSlotsOne) {
-    TestClock clock;
-    SlotRegistry registry(absl::Milliseconds(10), &clock);
+    absl::SimulatedClock clock;
+    SlotRegistry registry(absl::Milliseconds(10), clock);
 
     int slot1 = registry.AcquireSlot(1);
 
     registry.UpdateSlotExpiration(1);
     // Advance time past expiration
-    clock.Advance(absl::Milliseconds(20));
+    clock.AdvanceTime(absl::Milliseconds(20));
 
     std::vector<EvDevEvent> events = registry.ExpireOldSlots();
     ASSERT_EQ(events.size(), 2);
@@ -147,14 +146,14 @@ TEST(SlotRegistryTest, ExpireOldSlotsOne) {
     ASSERT_FALSE(registry.IsIdentifierRegistered(1));
 }
 TEST(SlotRegistryTest, AcquireExtendsExpiration) {
-    TestClock clock;
+    absl::SimulatedClock clock;
     // 100ms expiration
-    SlotRegistry registry(absl::Milliseconds(100), &clock);
+    SlotRegistry registry(absl::Milliseconds(100), clock);
 
     int slot1 = registry.AcquireSlot(1);
 
     // Advance time by 50ms
-    clock.Advance(absl::Milliseconds(50));
+    clock.AdvanceTime(absl::Milliseconds(50));
 
     // Re-acquire (should extend expiration)
     registry.AcquireSlot(1);
@@ -162,20 +161,20 @@ TEST(SlotRegistryTest, AcquireExtendsExpiration) {
     // Advance time by another 60ms.
     // Total 110ms since first acquire, but only 60ms since second.
     // If second acquire extended expiration, it should NOT be expired.
-    clock.Advance(absl::Milliseconds(60));
+    clock.AdvanceTime(absl::Milliseconds(60));
 
     std::vector<EvDevEvent> events = registry.ExpireOldSlots();
     EXPECT_EQ(events.size(), 0);
 
     // Advance another 50ms (total 110ms since second acquire)
-    clock.Advance(absl::Milliseconds(50));
+    clock.AdvanceTime(absl::Milliseconds(50));
     events = registry.ExpireOldSlots();
     EXPECT_EQ(events.size(), 2);
 }
 
 TEST(SlotRegistryTest, ReleaseAllSlots) {
-    TestClock clock;
-    SlotRegistry registry(absl::Seconds(120), &clock);
+    absl::SimulatedClock clock;
+    SlotRegistry registry(absl::Seconds(120), clock);
 
     int s1 = registry.AcquireSlot(10);
     int s2 = registry.AcquireSlot(20);

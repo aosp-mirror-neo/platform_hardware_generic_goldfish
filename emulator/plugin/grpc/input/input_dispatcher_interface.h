@@ -74,10 +74,10 @@ class IInputDispatcher {
         absl::Status status;
         /**
          * @brief When the operation reached the guest: the `dispatched_at_nanos`
-         * of its activity. Unset if it reported none, such as when it was
-         * rejected or changed nothing.
+         * of its activity (elapsed on the host monotonic clock). Unset if it
+         * reported none, such as when it was rejected or changed nothing.
          */
-        std::optional<absl::Time> dispatched_at;
+        std::optional<absl::Duration> dispatched_at;
     };
 
     /** @brief Called once with the result of the operation; see `DispatchPointer()`. */

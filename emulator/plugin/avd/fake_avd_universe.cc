@@ -67,7 +67,7 @@ uint32_t ResolveEvdevCode(const ::android::emulation::v2::KeyEvent& key) {
 }  // namespace
 
 FakeAvdUniverse::FakeAvdUniverse()
-        : AvdUniverse(std::make_unique<AvdProperties>())
+        : AvdUniverse(std::make_unique<AvdProperties>(), virtual_clock_)
         , input_loop_(async::testing::TestEventLoop::Create("FakeAvdUniverseInput"))
         , touch_devices_(std::make_unique<NoTouchDevices>())
         , keyboard_(std::make_unique<NoOpKeyboard>())

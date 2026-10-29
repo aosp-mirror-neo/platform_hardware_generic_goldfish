@@ -23,7 +23,6 @@
 #include <utility>
 #include <vector>
 
-#include "android/base/abseil_clock.h"
 #include "annotation_streambuf.h"
 #include "client/annotation.h"
 #include "simple_string_annotation.h"
@@ -134,7 +133,7 @@ HangDetector& CrashReporter::GetCrashingHangDetector() {
                 const std::string copy(message);
                 CrashReporter::Get().Die(copy);
             },
-            HangDetector::DefaultTiming(), std::make_unique<android::base::AbseilClock>());
+            HangDetector::DefaultTiming());
     return *hang_detector;
 }
 

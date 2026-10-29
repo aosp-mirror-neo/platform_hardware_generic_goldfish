@@ -22,17 +22,16 @@
 #include <ostream>
 #include <thread>
 
+#include "absl/time/simulated_clock.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 
-#include "android/base/testing/test_clock.h"
 #include "goldfish/async/testing/test_event_loop.h"
 #include "goldfish/display/test/mock_display.h"
 #include "slot_registry.h"
 #include "standard-headers/linux/input-event-codes.h"
 #include "standard-headers/linux/input.h"
 
-using android::base::TestClock;
 using android::emulation::control::EvDevEvent;
 using ::goldfish::async::testing::TestEventLoop;
 using ::testing::_;
@@ -152,8 +151,8 @@ TEST(PenTouchEventTest, SendEventsWithOldSlots) {
     ::testing::NiceMock<MockDisplay> display(evloop.get(), 0, 1024, 768);
 
     // Create a PointerEventDispatcher.
-    TestClock clock;
-    PointerEventDispatcherUnderTest dispatcher(&clock);
+    absl::SimulatedClock clock;
+    PointerEventDispatcherUnderTest dispatcher(clock);
     dispatcher.registry()->SetSlotExpiration(absl::Milliseconds(100));
 
     // Create a PenTouchEvent.
@@ -172,7 +171,7 @@ TEST(PenTouchEventTest, SendEventsWithOldSlots) {
 
     // Call SendEvents.
     dispatcher.SendEvents(display, pen_event);
-    clock.Advance(absl::Milliseconds(500));
+    clock.AdvanceTime(absl::Milliseconds(500));
 
     // Expect the release of the expired slot as one report on the mock display.
     EXPECT_CALL(display,
@@ -323,8 +322,8 @@ TEST(MultiTouchEventTest, SendEventsWithOldSlots) {
     ::testing::NiceMock<MockDisplay> display(evloop.get(), 0, 1024, 768);
 
     // Create a PointerEventDispatcher.
-    TestClock clock;
-    PointerEventDispatcherUnderTest dispatcher(&clock);
+    absl::SimulatedClock clock;
+    PointerEventDispatcherUnderTest dispatcher(clock);
     dispatcher.registry()->SetSlotExpiration(absl::Milliseconds(100));
 
     // Create a MultiTouchEvent.
@@ -341,7 +340,7 @@ TEST(MultiTouchEventTest, SendEventsWithOldSlots) {
 
     // Call SendEvents.
     dispatcher.SendEvents(display, touch_event);
-    clock.Advance(absl::Milliseconds(500));
+    clock.AdvanceTime(absl::Milliseconds(500));
 
     // Expect the release of the expired slot as one report on the mock display.
     EXPECT_CALL(display,

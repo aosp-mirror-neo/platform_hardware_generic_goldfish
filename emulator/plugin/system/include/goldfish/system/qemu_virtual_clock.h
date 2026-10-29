@@ -1,4 +1,4 @@
-// Copyright (C) 2025 The Android Open Source Project
+// Copyright (C) 2026 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,20 +13,12 @@
 // limitations under the License.
 #pragma once
 
-#include "android/base/clock.h"
+#include "goldfish/system/virtual_clock.h"
 
-namespace android::base {
+namespace goldfish::system {
 
-/**
- * @brief A concrete implementation of the IClock interface that uses
- * absl::Now() as its source of truth.
- *
- * This implementation treats all clock types as equivalent to the host
- * system's wall-clock time.
- */
-class AbseilClock : public IClock {
-  public:
-    absl::Time Now(ClockType type) const override;
-};
+// Returns a VirtualClock backed by QEMU's QEMU_CLOCK_VIRTUAL timer domain.
+// Only targets linked into the QEMU plugin binary may depend on this library.
+const VirtualClock& GetQemuVirtualClock();
 
-}  // namespace android::base
+}  // namespace goldfish::system

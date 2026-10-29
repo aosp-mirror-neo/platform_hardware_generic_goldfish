@@ -38,7 +38,6 @@
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 
-#include "android/base/clock.h"
 #include "android/emulation/control/keyboard/key_code_resolver.h"
 #include "emulator/plugin/grpc/input/contact_table.h"
 #include "emulator/plugin/grpc/input/dispatcher_session.h"
@@ -50,6 +49,7 @@
 #include "goldfish/async/threaded_event_loop.h"
 #include "goldfish/display/test/fake_multi_display.h"
 #include "goldfish/display/test/fake_pixman_display.h"
+#include "goldfish/system/steady_clock.h"
 #include "standard-headers/linux/input-event-codes.h"
 
 // Necessary on Windows where winsock/windows headers define send as a macro.
@@ -58,7 +58,6 @@
 namespace goldfish::grpc::v2 {
 namespace {
 
-using ::android::base::ClockType;
 using ::android::emulation::control::kMtsPointerUp;
 using ::android::emulation::control::keyboard::ResolveEvdevKeyCode;
 using ::android::emulation::v2::AxisType;
@@ -134,14 +133,14 @@ class RecordingKeyboard : public KeyboardSink {
 };
 
 // The dispatcher's clock too, so dispatch times follow the paced time.
-class FakePacingClock : public ::android::base::IClock {
+class FakePacingClock : public ::goldfish::system::SteadyClock {
   public:
-    explicit FakePacingClock(absl::Time initial = absl::FromUnixNanos(1'000'000'000LL))
+    explicit FakePacingClock(absl::Duration initial = absl::Nanoseconds(1'000'000'000LL))
             : current_time_(initial) {}
 
-    absl::Time Now(ClockType /*type*/) const override {
+    absl::Duration Now() const override {
         absl::MutexLock time_lock(time_mutex_);
-        const absl::Time now = current_time_;
+        const absl::Duration now = current_time_;
         current_time_ += auto_advance_;
         return now;
     }
@@ -164,7 +163,7 @@ class FakePacingClock : public ::android::base::IClock {
 
   private:
     mutable absl::Mutex time_mutex_;
-    mutable absl::Time current_time_ ABSL_GUARDED_BY(time_mutex_);
+    mutable absl::Duration current_time_ ABSL_GUARDED_BY(time_mutex_);
     absl::Duration auto_advance_ ABSL_GUARDED_BY(time_mutex_) = absl::ZeroDuration();
     std::vector<absl::Duration> sleep_calls_ ABSL_GUARDED_BY(time_mutex_);
 };
@@ -369,7 +368,7 @@ class InputServiceImplTest : public ::testing::Test {
         touch_devices_ =
                 std::make_unique<MultiDisplayTouchDevices>(*multi_display_, /*has_hinge=*/false);
         dispatcher_ = std::make_shared<InputDispatcher>(*dispatcher_loop_, *touch_devices_,
-                                                        &keyboard_, ResolveEvdevKeyCode, &clock_);
+                                                        &keyboard_, ResolveEvdevKeyCode, clock_);
         // Never removed: the dispatcher's event source drops it on destruction.
         dispatcher_->activity().AddCallback(
                 [this](const InputActivity& activity) { recorder_.Record(activity); });
@@ -392,7 +391,7 @@ class InputServiceImplTest : public ::testing::Test {
     InputServiceImpl::Options DefaultOptions() {
         InputServiceImpl::Options opts;
         opts.event_loop = loop_.get();
-        opts.now_fn = [this]() { return clock_.Now(ClockType::kRealtime); };
+        opts.clock = clock_;
         // Lets the dispatcher apply what was posted before time moves on, so
         // dispatch times are deterministic.
         opts.sleep_fn = [this](absl::Duration d) {

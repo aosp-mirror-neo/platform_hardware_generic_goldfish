@@ -19,9 +19,9 @@
 #include <string_view>
 
 #include "absl/status/status.h"
+#include "absl/time/clock_interface.h"
 #include "absl/time/time.h"
 
-#include "android/base/clock.h"
 #include "goldfish/async/event_loop.h"
 
 namespace android::crashreport {
@@ -83,8 +83,9 @@ class HangDetector {
 
     virtual void Stop() = 0;
 
-    static std::unique_ptr<HangDetector> Create(HangCallback hang_callback, Timing timing,
-                                                std::unique_ptr<android::base::IClock> clock);
+    static std::unique_ptr<HangDetector> Create(
+            HangCallback hang_callback, Timing timing,
+            absl::Clock& clock = absl::Clock::GetRealClock());
 };
 
 }  // namespace android::crashreport

@@ -41,6 +41,7 @@
 #include "goldfish/sensors/physical_parameter.h"
 #include "goldfish/sensors/sensor_data.h"
 #include "goldfish/sensors/virtual_scene_camera.h"
+#include "goldfish/system/virtual_clock.h"
 
 namespace goldfish::sensors {
 
@@ -95,7 +96,8 @@ class PhysicalModel : public CallbackEventSource<PhysicalModelChangeEvent> {
   public:
     static constexpr size_t kNumSensors = static_cast<size_t>(AndroidSensor::MAX_SENSORS);
 
-    explicit PhysicalModel(const android::goldfish::HardwareConfig& hw);
+    PhysicalModel(const android::goldfish::HardwareConfig& hw,
+                  const ::goldfish::system::VirtualClock& virtual_clock);
     virtual ~PhysicalModel() = default;
 
     SensorData GetSensorData(AndroidSensor) const;

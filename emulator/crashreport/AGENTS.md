@@ -26,7 +26,7 @@
 
 ## 3. Testing
 
-- **Hang detection:** use `ThreadedEventLoop::Create(LibuvEventLoop::Create())` and a private detector from `HangDetector::Create(callback, HangDetector::Timing{...}, std::make_unique<android::base::TestClock>())`, advancing time with `TestClock::Advance()` (see [hang_detector_test.cc](hang_detector_test.cc)). Never use `CrashReporter::GetCrashingHangDetector()` in tests: its callback calls `Die()`.
+- **Hang detection:** use `ThreadedEventLoop::Create(LibuvEventLoop::Create())` and a private detector from `HangDetector::Create(callback, HangDetector::Timing{...}, simulated_clock)`, advancing time with `absl::SimulatedClock::AdvanceTime()` (see [hang_detector_test.cc](hang_detector_test.cc)). Never use `CrashReporter::GetCrashingHangDetector()` in tests: its callback calls `Die()`.
 - **Minidumps:** [crash_dump_test.cc](crash_dump_test.cc) runs `:crash-me` with `AEMU_CRASHPAD_HANDLER` set and `ANDROID_EMU_CRASH_REPORTING_DATABASE` pointing at a temporary directory, and asserts that a new report appears (Bazel only; skipped on Windows). Breadcrumb and annotation coverage lives in `breadcrumb_proto_test.cc`, `binary_annotation_test.cc`, and `annotation_buffer_test.cc` (all in `//emulator/crashreport:crashreport_test`).
 
 ```bash

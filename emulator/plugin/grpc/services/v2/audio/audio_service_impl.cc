@@ -170,11 +170,11 @@ MicrophoneInput::Kind ToProtoMicrophoneInputKind(MicrophoneInputKind kind) {
     }
 }
 
-void PopulateAudioStateFromSnapshot(const AudioInputStateSnapshot& snapshot, absl::Time now,
+void PopulateAudioStateFromSnapshot(const AudioInputStateSnapshot& snapshot, absl::Duration now,
                                     AudioState* out) {
     out->set_microphone_muted(snapshot.microphone_muted);
     out->set_microphone_in_use_by_guest(snapshot.microphone_in_use_by_guest);
-    out->set_timestamp_nanos(absl::ToUnixNanos(now));
+    out->set_timestamp_nanos(absl::ToInt64Nanoseconds(now));
     out->clear_microphone_inputs();
     out->mutable_microphone_inputs()->Reserve(static_cast<int>(snapshot.microphone_inputs.size()));
     for (const MicrophoneInputInfo& channel : snapshot.microphone_inputs) {
@@ -389,11 +389,11 @@ class SinkMicrophoneSession final {
     using ChunkValidator = absl::Status (*)(const AudioChunk&, absl::string_view);
 
     SinkMicrophoneSession(std::shared_ptr<AudioInputMux> mux, AudioServiceImpl::MicrophoneSink sink,
-                          AudioServiceImpl::NowFn now_fn, std::string initial_source_id,
-                          ChunkValidator validator)
+                          const ::goldfish::system::SteadyClock& clock,
+                          std::string initial_source_id, ChunkValidator validator)
             : mux_(std::move(mux))
             , sink_(std::move(sink))
-            , now_fn_(std::move(now_fn))
+            , clock_(clock)
             , initial_source_id_(std::move(initial_source_id))
             , validator_(validator) {}
 
@@ -458,15 +458,15 @@ class SinkMicrophoneSession final {
                 }
             }
 
-            const absl::Time now = now_fn_();
-            int64_t rebased_nanos = absl::ToUnixNanos(now);
+            const absl::Duration now = clock_.Now();
+            int64_t rebased_nanos = absl::ToInt64Nanoseconds(now);
             if (!first_client_timestamp_nanos_.has_value()) {
                 first_client_timestamp_nanos_ = chunk.timestamp_nanos();
                 first_host_time_ = now;
             } else if (chunk.timestamp_nanos() > *first_client_timestamp_nanos_) {
                 const absl::Duration client_delta =
                         absl::Nanoseconds(chunk.timestamp_nanos() - *first_client_timestamp_nanos_);
-                rebased_nanos = absl::ToUnixNanos(first_host_time_ + client_delta);
+                rebased_nanos = absl::ToInt64Nanoseconds(first_host_time_ + client_delta);
             }
             rebased.set_timestamp_nanos(rebased_nanos);
             if (!active_source_id_.empty()) {
@@ -493,7 +493,7 @@ class SinkMicrophoneSession final {
   private:
     const std::shared_ptr<AudioInputMux> mux_;
     const AudioServiceImpl::MicrophoneSink sink_;
-    const AudioServiceImpl::NowFn now_fn_;
+    const ::goldfish::system::SteadyClock& clock_;
     const std::string initial_source_id_;
     const ChunkValidator validator_;
 
@@ -503,7 +503,7 @@ class SinkMicrophoneSession final {
     AudioStreamConfig active_config_ ABSL_GUARDED_BY(session_mutex_) = kDefaultMicrophoneConfig;
     std::string active_source_id_ ABSL_GUARDED_BY(session_mutex_);
     std::optional<int64_t> first_client_timestamp_nanos_ ABSL_GUARDED_BY(session_mutex_);
-    absl::Time first_host_time_ ABSL_GUARDED_BY(session_mutex_) = absl::InfinitePast();
+    absl::Duration first_host_time_ ABSL_GUARDED_BY(session_mutex_) = absl::ZeroDuration();
 };
 
 /**
@@ -697,7 +697,8 @@ struct AudioServiceImpl::SinkMuxState {
     std::shared_ptr<AudioInputMux> mux;
 };
 
-AudioServiceImpl::AudioServiceImpl(Options options) : options_(std::move(options)) {
+AudioServiceImpl::AudioServiceImpl(Options options)
+        : options_(std::move(options)), clock_(options_.clock.get()) {
     if (options_.microphone_sink != nullptr && options_.has_audio_input) {
         sink_mux_state_ = std::make_shared<SinkMuxState>();
         (void)BindActiveMux();
@@ -799,9 +800,9 @@ void AudioServiceImpl::OnMuxStateChanged() const {
 }
 
 void AudioServiceImpl::PopulateAudioState(AudioState* out) const {
-    const absl::Time now = options_.now_fn();
+    const absl::Duration now = clock_.Now();
     out->clear_microphone_inputs();
-    out->set_timestamp_nanos(absl::ToUnixNanos(now));
+    out->set_timestamp_nanos(absl::ToInt64Nanoseconds(now));
 
     if (!options_.has_audio_input) {
         out->set_microphone_muted(false);
@@ -883,7 +884,7 @@ Status AudioServiceImpl::UpdateAudioState(ServerContext* /*context*/,
         return AbslStatusToGrpcStatus(updated.status());
     }
 
-    PopulateAudioStateFromSnapshot(*updated, options_.now_fn(), reply);
+    PopulateAudioStateFromSnapshot(*updated, clock_.Now(), reply);
     return Status::OK;
 }
 
@@ -1002,12 +1003,12 @@ absl::StatusOr<AudioServiceImpl::ResolvedSpeakerConfig> AudioServiceImpl::Resolv
     };
 }
 
-bool AudioServiceImpl::SleepUntil(const ServerContext* context, absl::Time target) const {
+bool AudioServiceImpl::SleepUntil(const ServerContext* context, absl::Duration target) const {
     while (true) {
         if (context != nullptr && context->IsCancelled()) {
             return false;
         }
-        const absl::Time now = options_.now_fn();
+        const absl::Duration now = clock_.Now();
         if (now >= target) {
             return true;
         }
@@ -1053,10 +1054,10 @@ Status AudioServiceImpl::InjectClipViaSink(ServerContext* context, const AudioCh
             1, static_cast<size_t>((sample_rate * absl::ToInt64Milliseconds(kClipSliceDuration)) /
                                    kMillisPerSecond));
 
-    const absl::Time start_time = options_.now_fn();
+    const absl::Duration start_time = clock_.Now();
     for (size_t offset_frames = 0; offset_frames < total_frames;
          offset_frames += frames_per_slice) {
-        const absl::Time slice_target =
+        const absl::Duration slice_target =
                 start_time + absl::Nanoseconds((offset_frames * kNanosPerSecond) / sample_rate);
         if (!SleepUntil(context, slice_target)) {
             return CancelledClipStatus();
@@ -1067,7 +1068,7 @@ Status AudioServiceImpl::InjectClipViaSink(ServerContext* context, const AudioCh
         slice.set_sample_rate_hz(request.sample_rate_hz());
         slice.set_channel_count(request.channel_count());
         slice.set_format(request.format());
-        slice.set_timestamp_nanos(absl::ToUnixNanos(options_.now_fn()));
+        slice.set_timestamp_nanos(absl::ToInt64Nanoseconds(clock_.Now()));
         if (!active_source_id.empty()) {
             slice.set_source_id(active_source_id);
         }
@@ -1085,7 +1086,7 @@ Status AudioServiceImpl::InjectClipViaSink(ServerContext* context, const AudioCh
         }
     }
 
-    const absl::Time end_target =
+    const absl::Duration end_target =
             start_time + absl::Nanoseconds((total_frames * kNanosPerSecond) / sample_rate);
     if (!SleepUntil(context, end_target)) {
         return CancelledClipStatus();
@@ -1118,18 +1119,18 @@ Status AudioServiceImpl::InjectClipViaQemuAudioInject(ServerContext* context,
         return TranslateInjectorStartStatus(start_status, "InjectAudioClip", config);
     }
 
-    const absl::Time start_time = options_.now_fn();
-    const absl::Time end_target =
+    const absl::Duration start_time = clock_.Now();
+    const absl::Duration end_target =
             start_time + absl::Nanoseconds((total_frames * kNanosPerSecond) / sample_rate);
     if (!SleepUntil(context, end_target)) {
         injector.Stop();
         return CancelledClipStatus();
     }
 
-    const absl::Time grace_deadline = end_target + kClipDrainGraceDuration;
-    while (source.NeedsDrainGrace() && options_.now_fn() < grace_deadline) {
-        const absl::Time step_target =
-                std::min(grace_deadline, options_.now_fn() + kClipDrainPollInterval);
+    const absl::Duration grace_deadline = end_target + kClipDrainGraceDuration;
+    while (source.NeedsDrainGrace() && clock_.Now() < grace_deadline) {
+        const absl::Duration step_target =
+                std::min(grace_deadline, clock_.Now() + kClipDrainPollInterval);
         if (!SleepUntil(context, step_target)) {
             injector.Stop();
             return CancelledClipStatus();
@@ -1163,7 +1164,7 @@ Status AudioServiceImpl::InjectAudioClip(ServerContext* context, const AudioChun
 AudioServiceImpl::MicrophoneStreamStart AudioServiceImpl::StartSinkMicrophoneStream(
         absl::string_view client_source_id) const {
     auto session = std::make_shared<SinkMicrophoneSession>(
-            sink_mux_state_->mux, options_.microphone_sink, options_.now_fn,
+            sink_mux_state_->mux, options_.microphone_sink, clock_,
             std::string(client_source_id), &ValidateMicrophoneChunk);
     if (Status start_status = session->StartInitial(); !start_status.ok()) {
         return MicrophoneStreamStart{.status = std::move(start_status)};

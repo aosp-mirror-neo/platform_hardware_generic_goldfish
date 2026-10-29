@@ -36,7 +36,6 @@
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 
-#include "android/base/clock.h"
 #include "android/emulation/control/absl_status_translate.h"
 #include "android/emulation/control/grpc_event_stream_support.h"
 #include "android/emulation/control/simple_async_grpc.h"
@@ -44,6 +43,7 @@
 #include "goldfish/audio/audio_input_mux.h"
 #include "goldfish/audio/qemu_audio_capture.h"
 #include "goldfish/eventing/event_sources.h"
+#include "goldfish/system/steady_clock.h"
 
 extern "C" {
 typedef struct AudioBackend AudioBackend;
@@ -106,7 +106,6 @@ class AudioServiceImpl final : public AudioServiceBase {
     using UpdateAudioStateRequest = ::android::emulation::v2::UpdateAudioStateRequest;
 
     using MicrophoneSink = std::function<absl::Status(const AudioChunk&)>;
-    using NowFn = std::function<absl::Time()>;
     using SleepFn = std::function<void(absl::Duration)>;
 
     static constexpr int32_t kDefaultSpeakerSampleRateHz = 48000;
@@ -132,7 +131,8 @@ class AudioServiceImpl final : public AudioServiceBase {
         bool read_only{false};
         AudioBackend* audio_backend{nullptr};
         MicrophoneSink microphone_sink{nullptr};
-        NowFn now_fn{[]() { return ::android::base::IClock::RealtimeNow(); }};
+        std::reference_wrapper<const ::goldfish::system::SteadyClock> clock{
+                ::goldfish::system::SteadyClock::GetRealClock()};
         SleepFn sleep_fn{[](absl::Duration d) { absl::SleepFor(d); }};
     };
 
@@ -144,11 +144,12 @@ class AudioServiceImpl final : public AudioServiceBase {
             : public ::WithSimpleQueueWriter<Reactor, kMaxPendingSpeakerChunks> {
       public:
         SpeakerAudioWriter(int32_t sample_rate_hz, int32_t channel_count, SampleFormat format,
-                           AudioBackend* audio_backend, NowFn now_fn)
+                           AudioBackend* audio_backend,
+                           const ::goldfish::system::SteadyClock& clock)
                 : sample_rate_hz_(sample_rate_hz)
                 , channel_count_(channel_count)
                 , format_(format)
-                , now_fn_(std::move(now_fn)) {
+                , clock_(clock) {
             capture_ = std::make_unique<::goldfish::audio::QemuAudioCapture>(
                     [this](const int16_t* pcm_data, size_t num_samples) {
                         OnAudioData(pcm_data, num_samples);
@@ -202,7 +203,7 @@ class AudioServiceImpl final : public AudioServiceBase {
             chunk.set_sample_rate_hz(sample_rate_hz_);
             chunk.set_channel_count(channel_count_);
             chunk.set_format(format_);
-            chunk.set_timestamp_nanos(absl::ToUnixNanos(now_fn_()));
+            chunk.set_timestamp_nanos(absl::ToInt64Nanoseconds(clock_.Now()));
 
             if (format_ == SampleFormat::SAMPLE_FORMAT_F32_BIT) {
                 std::string* out = chunk.mutable_pcm_data();
@@ -222,7 +223,7 @@ class AudioServiceImpl final : public AudioServiceBase {
         const int32_t sample_rate_hz_;
         const int32_t channel_count_;
         const SampleFormat format_;
-        const NowFn now_fn_;
+        const ::goldfish::system::SteadyClock& clock_;
         std::unique_ptr<::goldfish::audio::QemuAudioCapture> capture_;
     };
 
@@ -282,7 +283,7 @@ class AudioServiceImpl final : public AudioServiceBase {
                                    int32_t channel_count = kDefaultSpeakerChannelCount,
                                    SampleFormat format = kDefaultSpeakerFormat) {
         return new SpeakerAudioWriter<Reactor>(sample_rate_hz, channel_count, format,
-                                               options_.audio_backend, options_.now_fn);
+                                               options_.audio_backend, clock_);
     }
 
     ::grpc::ServerWriteReactor<AudioChunk>* StreamSpeakerAudio(
@@ -385,9 +386,10 @@ class AudioServiceImpl final : public AudioServiceBase {
                                                 absl::string_view operation);
     static absl::StatusOr<ResolvedSpeakerConfig> ResolveSpeakerRequest(
             const StreamSpeakerAudioRequest& request);
-    bool SleepUntil(const ::grpc::ServerContext* context, absl::Time target) const;
+    bool SleepUntil(const ::grpc::ServerContext* context, absl::Duration target) const;
 
     const Options options_;
+    const ::goldfish::system::SteadyClock& clock_;
     std::shared_ptr<SinkMuxState> sink_mux_state_;
     mutable AudioStateEventSource state_events_;
 

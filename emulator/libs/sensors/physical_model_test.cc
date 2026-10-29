@@ -19,12 +19,15 @@
 
 #include <memory>
 
+#include "absl/time/time.h"
+
 #include "android/goldfish/fake_hardware_config.h"
 #include "android/goldfish/hardware_config.h"
 #include "goldfish/archive/deque_archive.h"
 #include "goldfish/eventing/event_sources.h"
 #include "goldfish/eventing/with_callbacks.h"
 #include "goldfish/physics/glm_helpers.h"
+#include "goldfish/system/testing/fake_clocks.h"
 
 namespace goldfish::sensors {
 
@@ -43,9 +46,10 @@ class PhysicalModelTest : public ::testing::Test {
   protected:
     void SetUp() override {
         model = std::make_unique<PhysicalModel>(
-                android::goldfish::FakeHardwareConfig::GetHwConfig());
+                android::goldfish::FakeHardwareConfig::GetHwConfig(), virtual_clock_);
     }
 
+    ::goldfish::system::testing::FakeVirtualClock virtual_clock_;
     std::unique_ptr<PhysicalModel> model;
 };
 
@@ -633,7 +637,7 @@ TEST_F(PhysicalModelTest, FoldableInitialize) {
     hw.hw_sensor_hinge_angles_posture_definitions =
             (char*)"0-30&0-15,  30-150 & 15-75,150-330&75-165, 330-360&165-180";
 
-    model = std::make_unique<PhysicalModel>(hw);
+    model = std::make_unique<PhysicalModel>(hw, virtual_clock_);
 
     model->SetCurrentTime(1000000000L);
 
@@ -703,8 +707,8 @@ TEST_F(PhysicalModelTest, SnapshotSaveLoad) {
     archive::DequeArchive archive;
     archive << *model;
 
-    auto loaded_model =
-            std::make_unique<PhysicalModel>(android::goldfish::FakeHardwareConfig::GetHwConfig());
+    auto loaded_model = std::make_unique<PhysicalModel>(
+            android::goldfish::FakeHardwareConfig::GetHwConfig(), virtual_clock_);
     ASSERT_TRUE(ReadValue(archive, *loaded_model).ok());
     EXPECT_TRUE(archive.Empty());
 
@@ -723,7 +727,7 @@ TEST_F(PhysicalModelTest, SnapshotRejectsCorruptedState) {
         truncated.storage.pop_back();
 
         auto loaded_model = std::make_unique<PhysicalModel>(
-                android::goldfish::FakeHardwareConfig::GetHwConfig());
+                android::goldfish::FakeHardwareConfig::GetHwConfig(), virtual_clock_);
         EXPECT_FALSE(ReadValue(truncated, *loaded_model).ok());
     }
 
@@ -737,7 +741,7 @@ TEST_F(PhysicalModelTest, SnapshotRejectsCorruptedState) {
         bad_archive << im << ae << bm << uint64_t{0} << invalid_override_bits << false << false;
 
         auto loaded_model = std::make_unique<PhysicalModel>(
-                android::goldfish::FakeHardwareConfig::GetHwConfig());
+                android::goldfish::FakeHardwareConfig::GetHwConfig(), virtual_clock_);
         EXPECT_FALSE(ReadValue(bad_archive, *loaded_model).ok());
     }
 }
@@ -837,6 +841,35 @@ TEST_F(PhysicalModelTest, VirtualSceneCamera_RotateAndVelocity) {
     camera.RemoveSceneUser();
     EXPECT_VEC3_NEAR((vec3{0.0F, 0.0F, 0.0F}),
                      model->GetParameterVelocity(ParameterValueType::kTarget), 1e-4F);
+}
+
+TEST_F(PhysicalModelTest, VirtualSceneCamera_UsesInjectedVirtualClock) {
+    ::goldfish::system::testing::FakeVirtualClock virtual_clock(absl::Seconds(5));
+    PhysicalModel timed_model(android::goldfish::FakeHardwareConfig::GetHwConfig(), virtual_clock);
+    auto& camera = timed_model.GetVirtualSceneCamera();
+
+    auto read_timestamp = [&timed_model]() {
+        float tx = 0.0F;
+        float ty = 0.0F;
+        float tz = 0.0F;
+        float rx = 0.0F;
+        float ry = 0.0F;
+        float rz = 0.0F;
+        int64_t ts = 0;
+        timed_model.GetTransform(&tx, &ty, &tz, &rx, &ry, &rz, &ts);
+        return ts;
+    };
+
+    camera.AddSceneUser();
+    EXPECT_EQ(read_timestamp(), 5'000'000'000LL);
+
+    virtual_clock.Advance(absl::Milliseconds(250));
+    camera.Rotate(vec3(0.0F, glm::radians(15.0F), 0.0F));
+    EXPECT_EQ(read_timestamp(), 5'250'000'000LL);
+
+    virtual_clock.Advance(absl::Milliseconds(750));
+    camera.RemoveSceneUser();
+    EXPECT_EQ(read_timestamp(), 6'000'000'000LL);
 }
 
 }  // namespace goldfish::sensors

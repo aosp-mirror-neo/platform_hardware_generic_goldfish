@@ -46,6 +46,8 @@
 #include "goldfish/audio/audio_input_mux.h"
 #include "goldfish/audio/pcm_format.h"
 #include "goldfish/audio/qemu_audio_inject.h"
+#include "goldfish/system/steady_clock.h"
+#include "goldfish/system/testing/fake_clocks.h"
 #include "test/grpc_v2_service_test.h"
 
 extern "C" {
@@ -282,11 +284,7 @@ class AudioServiceTest : public ::testing::Test {
     void SetUp() override {
         test_reset_audio_stubs();
         host_input_.Reset();
-        {
-            absl::MutexLock clock_lock(clock_mu_);
-            current_time_ = absl::FromUnixNanos(1'000'000'000LL);
-            total_slept_ = absl::ZeroDuration();
-        }
+        clock_.Set(absl::Nanoseconds(1'000'000'000LL));
         RecreateService(MakeDefaultOptions());
     }
 
@@ -321,15 +319,8 @@ class AudioServiceTest : public ::testing::Test {
         opts.has_audio_output = true;
         opts.has_audio_input = true;
         opts.read_only = false;
-        opts.now_fn = [this]() {
-            absl::MutexLock clock_lock(clock_mu_);
-            return current_time_;
-        };
-        opts.sleep_fn = [this](absl::Duration d) {
-            absl::MutexLock clock_lock(clock_mu_);
-            current_time_ += d;
-            total_slept_ += d;
-        };
+        opts.clock = clock_;
+        opts.sleep_fn = [this](absl::Duration d) { clock_.Advance(d); };
         opts.microphone_sink = [this](const AudioChunk& chunk) {
             absl::MutexLock sink_lock(sink_mu_);
             if (!sink_status_.ok()) {
@@ -360,10 +351,7 @@ class AudioServiceTest : public ::testing::Test {
         stub_.reset();
     }
 
-    void AdvanceClock(absl::Duration delta) {
-        absl::MutexLock clock_lock(clock_mu_);
-        current_time_ += delta;
-    }
+    void AdvanceClock(absl::Duration delta) { clock_.Advance(delta); }
 
     std::vector<AudioChunk> GetInjectedChunks() const {
         absl::MutexLock sink_lock(sink_mu_);
@@ -378,9 +366,7 @@ class AudioServiceTest : public ::testing::Test {
     // Declared first so it outlives the service and the mux.
     ::goldfish::audio::TestBql bql_;
 
-    mutable absl::Mutex clock_mu_;
-    absl::Time current_time_ ABSL_GUARDED_BY(clock_mu_);
-    absl::Duration total_slept_ ABSL_GUARDED_BY(clock_mu_);
+    ::goldfish::system::testing::FakeSteadyClock clock_{absl::Nanoseconds(1'000'000'000LL)};
 
     mutable absl::Mutex sink_mu_;
     std::vector<AudioChunk> injected_chunks_ ABSL_GUARDED_BY(sink_mu_);

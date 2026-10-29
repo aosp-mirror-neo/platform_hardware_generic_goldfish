@@ -1,4 +1,4 @@
-// Copyright (C) 2025 The Android Open Source Project
+// Copyright (C) 2026 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,7 +11,10 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#include "android/base/qemu_clock.h"
+#include "goldfish/system/qemu_virtual_clock.h"
+
+#include "absl/base/no_destructor.h"
+#include "absl/time/time.h"
 
 extern "C" {
 // clang-format off
@@ -22,23 +25,21 @@ extern "C" {
 // clang-format on
 }
 
-namespace android::base {
+namespace goldfish::system {
+namespace {
 
-absl::Time QemuClock::Now(ClockType type) const {
-    QEMUClockType qemu_type;
-    switch (type) {
-    case ClockType::kVirtual:
-        qemu_type = QEMU_CLOCK_VIRTUAL;
-        break;
-    case ClockType::kHost:
-        qemu_type = QEMU_CLOCK_HOST;
-        break;
-    case ClockType::kRealtime:
-        qemu_type = QEMU_CLOCK_REALTIME;
-        break;
+class QemuVirtualClock final : public VirtualClock {
+  public:
+    absl::Duration Now() const override {
+        return absl::Nanoseconds(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     }
-    int64_t ns = qemu_clock_get_ns(qemu_type);
-    return absl::FromUnixNanos(ns);
+};
+
+}  // namespace
+
+const VirtualClock& GetQemuVirtualClock() {
+    static const absl::NoDestructor<QemuVirtualClock> kClock;
+    return *kClock;
 }
 
-}  // namespace android::base
+}  // namespace goldfish::system

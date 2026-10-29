@@ -33,7 +33,6 @@ namespace goldfish::grpc::v2 {
 
 namespace {
 
-using ::android::base::ClockType;
 using ::android::emulation::control::EvDevEvents;
 using ::android::emulation::v2::InputActivity;
 using ::android::emulation::v2::InputEvent;
@@ -135,7 +134,8 @@ InputEvent KeyUpEvent(int32_t source_id, uint32_t code) {
 
 InputDispatcher::InputDispatcher(::goldfish::async::EventLoop& loop, TouchDevices& devices,
                                  KeyboardSink* keyboard, KeyCodeResolver resolve_key_code,
-                                 ::android::base::IClock* clock, size_t max_pending_per_session)
+                                 const ::goldfish::system::SteadyClock& clock,
+                                 size_t max_pending_per_session)
         : loop_(loop)
         , devices_(devices)
         , resolve_key_code_(std::move(resolve_key_code))
@@ -738,13 +738,13 @@ void InputDispatcher::ReportCancels(const ReleasedContacts& released) {
 
 void InputDispatcher::Report(InputEvent event, bool synthesized) {
     DCHECK(loop_.IsOnLoopThread());
-    const absl::Time now = clock_->Now(ClockType::kRealtime);
+    const absl::Duration now = clock_.Now();
     if (!synthesized) {
         reported_at_ = now;
     }
     InputActivity activity;
     *activity.mutable_event() = std::move(event);
-    activity.set_dispatched_at_nanos(absl::ToUnixNanos(now));
+    activity.set_dispatched_at_nanos(absl::ToInt64Nanoseconds(now));
     activity.set_synthesized(synthesized);
     absl::MutexLock outbox_lock(outbox_mutex_);
     outbox_.push_back({next_sequence_++, std::move(activity)});

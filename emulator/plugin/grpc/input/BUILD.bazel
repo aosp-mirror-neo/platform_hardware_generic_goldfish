@@ -27,11 +27,11 @@ cc_library(
     hdrs = ["slot_registry.h"],
     deps = [
         ":ev_dev_event",
-        "//emulator/libs/system:clock",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/time:clock_interface",
         "@qemu//:qemu-headers-exported",
     ],
 )
@@ -45,6 +45,7 @@ cc_library(
         ":slot_registry",
         "//emulator/plugin/display",
         "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/time:clock_interface",
         "@abseil-cpp//absl/types:span",
         "@aemu//protos/services/emulator-controller:emulator_controller_cc_grpc",
         "@qemu//:qemu-headers-exported",
@@ -77,9 +78,9 @@ cc_test(
     visibility = ["//visibility:public"],
     deps = [
         ":slot_registry",
-        "//emulator/libs/system:test-headers",
         "//emulator/libs/test:googletest_main",
         "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/time:simulated_clock",
     ],
 )
 
@@ -97,6 +98,8 @@ cc_test(
         "//emulator/plugin/display:test-display",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/time:simulated_clock",
         "@bazel_tools//tools/cpp/runfiles",
     ],
 )
@@ -348,7 +351,7 @@ cc_library(
         "//emulator/libs/async:async_api",
         "//emulator/libs/eventing",
         "//emulator/libs/status_macros",
-        "//emulator/libs/system:clock",
+        "//emulator/libs/system:steady_clock",
         "@abseil-cpp//absl/base",
         "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -373,7 +376,7 @@ cc_test(
         ":input_dispatcher",
         ":keyboard_sink",
         "//emulator/libs/async:async_testing",
-        "//emulator/libs/system:clock",
+        "//emulator/libs/system:steady_clock",
         "//emulator/libs/test:googletest_main",
         "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/container:flat_hash_map",

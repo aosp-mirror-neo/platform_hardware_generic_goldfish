@@ -98,6 +98,7 @@ cc_test(
     deps = [
         ":sensor_service_incubating",
         "//emulator/libs/hardware_config:fake_hardware_config",
+        "//emulator/libs/system:test-headers",
         "//emulator/libs/test:googletest_main",
         "@abseil-cpp//absl/time",
     ],
@@ -307,6 +308,7 @@ cc_test(
         ":in_process_rtc_service",
         "//emulator/libs/async:async_testing",
         "//emulator/libs/async:libuv_event_loop",
+        "//emulator/libs/system:test-headers",
         "//emulator/libs/test:googletest_main",
         "//emulator/plugin/audio:audio_input_mux",
         "//emulator/plugin/audio:test_bql",

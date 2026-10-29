@@ -101,6 +101,7 @@ cc_test(
         "//emulator/libs/display_pipeline:cpu_pipeline",
         "//emulator/libs/hardware_config:fake_hardware_config",
         "//emulator/libs/process",
+        "//emulator/libs/system:test-headers",
         "//emulator/libs/test:googletest_main",
         "//emulator/plugin/audio:test_qemu_audio_stub",
         "//emulator/plugin/avd:fake_avd_universe",

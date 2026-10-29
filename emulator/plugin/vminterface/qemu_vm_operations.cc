@@ -29,9 +29,9 @@
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
+#include "absl/time/clock_interface.h"
 #include "absl/time/time.h"
 
-#include "android/base/clock.h"
 #include "android/crashreport/hang_detector.h"
 #include "android/goldfish/vm_interface.h"
 #include "android/status/status_macros.h"
@@ -251,15 +251,14 @@ class QemuVmOperations : public VmOperations {
     // both the QEMU main thread as well as external threads during startup/teardown.
     QemuVmOperations(::goldfish::async::EventLoop* event_loop,
                      ::goldfish::async::EventLoop* qemu_loop, QemuSnapshotConfig snapshot_config,
-                     ::android::crashreport::HangDetector* hang_detector,
-                     ::android::base::IClock* clock)
+                     ::android::crashreport::HangDetector* hang_detector, absl::Clock& clock)
             : VmOperations(event_loop)
             , event_loop_(event_loop)
             , qemu_loop_(qemu_loop)
             , snapshot_store_(std::move(snapshot_config.store))
             , snapshots_enabled_(snapshot_config.enabled)
             , hang_detector_(hang_detector)
-            , clock_(clock != nullptr ? clock : &::android::base::IClock::Get()) {
+            , clock_(clock) {
         DCHECK(event_loop_ != nullptr);
         DCHECK(qemu_loop_ != nullptr);
         DCHECK(event_loop_ != qemu_loop_)
@@ -721,7 +720,7 @@ class QemuVmOperations : public VmOperations {
                 self->last_forwarded_transfer_time_ = absl::InfinitePast();
                 self->transfer_flush_pending_ = false;
             } else if (progress.phase == SnapshotPhase::Transferring) {
-                const absl::Time now = self->clock_->Now(::android::base::ClockType::kRealtime);
+                const absl::Time now = self->clock_.TimeNow();
                 const absl::Duration elapsed = now - self->last_forwarded_transfer_time_;
                 if (elapsed < kMinTransferEventInterval) {
                     should_forward = false;
@@ -833,7 +832,7 @@ class QemuVmOperations : public VmOperations {
                 transfer_flush_pending_ = false;
                 return;
             }
-            const absl::Time now = clock_->Now(::android::base::ClockType::kRealtime);
+            const absl::Time now = clock_.TimeNow();
             const absl::Duration elapsed = now - last_forwarded_transfer_time_;
             if (elapsed < kMinTransferEventInterval) {
                 remaining = kMinTransferEventInterval - elapsed;
@@ -857,7 +856,7 @@ class QemuVmOperations : public VmOperations {
     const std::unique_ptr<::goldfish::snapshot::SnapshotStore> snapshot_store_;
     const bool snapshots_enabled_;
     ::android::crashreport::HangDetector* const hang_detector_;
-    ::android::base::IClock* const clock_;
+    absl::Clock& clock_;
     std::shared_ptr<::goldfish::async::EventLoop::Timer> transfer_flush_timer_;
     VMChangeStateEntry* change_state_entry_{nullptr};
     QemuSnapshotProgressEntry* snapshot_progress_entry_{nullptr};
@@ -877,7 +876,7 @@ class QemuVmOperations : public VmOperations {
 std::unique_ptr<VmOperations> CreateQemuVmOperations(
         ::goldfish::async::EventLoop* event_loop, ::goldfish::async::EventLoop* qemu_loop,
         QemuSnapshotConfig snapshot_config, ::android::crashreport::HangDetector* hang_detector,
-        ::android::base::IClock* clock) {
+        absl::Clock& clock) {
     return std::make_unique<QemuVmOperations>(event_loop, qemu_loop, std::move(snapshot_config),
                                               hang_detector, clock);
 }

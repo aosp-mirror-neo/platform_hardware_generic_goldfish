@@ -40,6 +40,7 @@
 #include "goldfish/devices/vehicle/vehicle_device.h"
 #include "goldfish/display/abstract_multi_display.h"
 #include "goldfish/snapshot/snapshot_store.h"
+#include "goldfish/system/qemu_virtual_clock.h"
 #include "goldfish/tools/aemu_version.h"
 #include "goldfish/vsock/clear.h"
 
@@ -115,7 +116,7 @@ absl::StatusOr<std::unique_ptr<AvdExtendedUniverse>> AvdExtendedUniverse::Create
 }
 
 AvdExtendedUniverse::AvdExtendedUniverse(Private, std::unique_ptr<AvdProperties> props)
-        : AvdUniverse(std::move(props)) {}
+        : AvdUniverse(std::move(props), ::goldfish::system::GetQemuVirtualClock()) {}
 
 template <>
 void AvdExtendedUniverse::OnVmStateChanged(void* opaque, bool running, RunState /*state*/) {
@@ -194,9 +195,10 @@ absl::Status AvdExtendedUniverse::Initialize() {
     avd_universe.GetGuestStatus().SetGrpcNotificationChannel(
             &avd_universe.GetGrpcNotificationChannel());
 
-    DEVS::sensor::ISensorDevice::RegisterDevice(&avd_universe.GetSensorsPhysicalModel(), registry,
-                                                avd_props.avd_type, avd_props.avd_api,
-                                                avd_props.hw_config, client_loop, qemu_loop.get());
+    DEVS::sensor::ISensorDevice::RegisterDevice(
+            &avd_universe.GetSensorsPhysicalModel(), registry, avd_props.avd_type,
+            avd_props.avd_api, avd_props.hw_config, client_loop, qemu_loop.get(),
+            ::goldfish::system::GetQemuVirtualClock());
     DEVS::clipboard::IClipboardDevice::RegisterDevice(&avd_universe.GetClipboardChannel(), registry,
                                                       client_loop, qemu_loop.get());
     DEVS::vehicle::IVehicleDevice::RegisterDevice(&avd_universe.GetVehicleChannel(), registry,

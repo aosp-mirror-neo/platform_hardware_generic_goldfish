@@ -203,13 +203,13 @@ LocationServiceImpl::LocationServiceImpl(ObservableLocation& observable_location
 LocationServiceImpl::LocationServiceImpl(ObservableLocation& observable_location, Options options)
         : observable_location_(observable_location)
         , options_(std::move(options))
+        , clock_(options_.clock.get())
         , route_state_(std::make_shared<RouteState>(&observable_location, options_.event_loop)) {
-    DCHECK(options_.now_fn != nullptr);
     if (options_.has_gps) {
         location_callback_id_ = observable_location_.AddCallback(
                 [this](const Location& location) { OnLocationUpdated(location); });
         const Location initial = observable_location_.GetValue();
-        const int64_t now_nanos = absl::ToUnixNanos(options_.now_fn());
+        const int64_t now_nanos = absl::ToInt64Nanoseconds(clock_.Now());
         absl::MutexLock state_lock(&state_mutex_);
         if (!has_location_snapshot_) {
             PopulateLocationProto(initial, now_nanos, &current_location_);
@@ -255,7 +255,7 @@ void LocationServiceImpl::PopulateLocationState(LocationState* state) const {
 }
 
 void LocationServiceImpl::OnLocationUpdated(const Location& location) {
-    const int64_t now_nanos = absl::ToUnixNanos(options_.now_fn());
+    const int64_t now_nanos = absl::ToInt64Nanoseconds(clock_.Now());
     {
         absl::MutexLock state_lock(&state_mutex_);
         PopulateLocationProto(location, now_nanos, &current_location_);

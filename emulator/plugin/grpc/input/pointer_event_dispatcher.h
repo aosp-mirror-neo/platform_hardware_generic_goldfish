@@ -16,6 +16,7 @@
 #include <memory>
 #include <vector>
 
+#include "absl/time/clock_interface.h"
 #include "absl/types/span.h"
 
 #include "android/emulation/control/ev_dev_event.h"
@@ -146,9 +147,9 @@ class PointerEventDispatcher {
     /**
      * @brief Constructs a PointerEventDispatcher.
      *
-     * @param clock The clock to use for timing. Defaults to the global IClock instance.
+     * @param clock The clock to use for timing. Defaults to absl::Clock::GetRealClock().
      */
-    explicit PointerEventDispatcher(base::IClock* clock = &base::IClock::Get())
+    explicit PointerEventDispatcher(absl::Clock& clock = absl::Clock::GetRealClock())
             : registry_(SlotRegistry::kTouchExpireAfter120S, clock) {}
 
     /**

@@ -35,6 +35,7 @@
 #include "emulator/plugin/grpc/input/v2_input_validator.h"
 #include "goldfish/async/event_loop.h"
 #include "goldfish/display/abstract_multi_display.h"
+#include "goldfish/system/steady_clock.h"
 #include "input_service.grpc.pb.h"
 
 namespace goldfish::grpc::v2 {
@@ -53,7 +54,7 @@ using InputServiceBase =
  *
  * ### Pacing & Timelines:
  * - `SendInputEvents` validates batch monotonicity and duration bounds up front,
- *   then paces events in real time against the host monotonic clock (`NowFn`)
+ *   then paces events in real time against the host monotonic clock (`SteadyClock`)
  *   according to `timestamp_nanos` deltas.
  * - `StreamInputEvents` rebases client `timestamp_nanos` deltas onto the host
  *   clock, caps stale inter-burst gaps to prevent artificial lag, and schedules
@@ -100,7 +101,6 @@ class InputServiceImpl final : public InputServiceBase {
     using InputActivity = ::android::emulation::v2::InputActivity;
 
     using ActivityEventSource = IInputDispatcher::ActivityEventSource;
-    using NowFn = std::function<absl::Time()>;
     using SleepFn = std::function<void(absl::Duration)>;
 
     template <typename Reactor = ::grpc::ServerWriteReactor<InputActivity>>
@@ -118,7 +118,8 @@ class InputServiceImpl final : public InputServiceBase {
         absl::Duration max_stream_step_duration{kDefaultMaxStreamStepDuration};
         absl::Duration held_input_idle_timeout{kDefaultHeldInputIdleTimeout};
         ::goldfish::async::EventLoop* event_loop{nullptr};
-        NowFn now_fn{[]() { return absl::Now(); }};
+        std::reference_wrapper<const ::goldfish::system::SteadyClock> clock{
+                ::goldfish::system::SteadyClock::GetRealClock()};
         SleepFn sleep_fn{[](absl::Duration d) { absl::SleepFor(d); }};
     };
 
@@ -180,10 +181,11 @@ class InputServiceImpl final : public InputServiceBase {
     //     share, which stays open as long as the service and expires held input
     //     after `held_input_idle_timeout` of inactivity.
     DispatcherSession& BatchSession(int32_t source_id) ABSL_LOCKS_EXCLUDED(batch_sessions_mutex_);
-    void SleepUntil(absl::Time target) const;
+    void SleepUntil(absl::Duration target) const;
 
     const std::shared_ptr<IInputDispatcher> dispatcher_;
     const Options options_;
+    const ::goldfish::system::SteadyClock& clock_;
     const V2InputValidator validator_;
 
     absl::Mutex batch_sessions_mutex_;

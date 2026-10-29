@@ -24,7 +24,6 @@
 #include <utility>
 
 #include "absl/status/statusor.h"
-#include "absl/time/clock.h"
 #include "absl/time/time.h"
 
 #include "android/emulation/control/absl_status_translate.h"
@@ -171,12 +170,13 @@ constexpr std::array<std::pair<AndroidSensor, SensorType>, 7> kImuOverrideSensor
 
 }  // namespace
 
-SensorsServiceImpl::SensorsServiceImpl(PhysicalModel& physical_model)
-        : physical_model_(physical_model) {}
+SensorsServiceImpl::SensorsServiceImpl(PhysicalModel& physical_model,
+                                       const ::goldfish::system::SteadyClock& clock)
+        : physical_model_(physical_model), clock_(clock) {}
 
 SensorsState SensorsServiceImpl::BuildSensorsState() const {
     SensorsState state;
-    state.set_timestamp_nanos(absl::ToUnixNanos(absl::Now()));
+    state.set_timestamp_nanos(absl::ToInt64Nanoseconds(clock_.Now()));
 
     auto* pose = state.mutable_pose();
     PopulateVector3f(physical_model_.GetParameterRotation(::ParameterValueType::kCurrent),
@@ -234,7 +234,7 @@ SensorsState SensorsServiceImpl::BuildSensorsState() const {
 
 PostureState SensorsServiceImpl::BuildPostureState() const {
     PostureState state;
-    state.set_timestamp_nanos(absl::ToUnixNanos(absl::Now()));
+    state.set_timestamp_nanos(absl::ToInt64Nanoseconds(clock_.Now()));
     if (!physical_model_.HasFoldableModel()) {
         return state;
     }

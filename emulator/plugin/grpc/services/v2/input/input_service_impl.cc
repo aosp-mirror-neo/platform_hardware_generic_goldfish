@@ -191,15 +191,17 @@ class DispatchedEvents : public std::enable_shared_from_this<DispatchedEvents> {
             ABSL_LOCKS_EXCLUDED(results_mutex_) {
         absl::MutexLock results_lock(results_mutex_);
         if (first_dispatched_.has_value()) {
-            response.set_first_event_dispatched_at_nanos(absl::ToUnixNanos(first_dispatched_->at));
-            response.set_last_event_dispatched_at_nanos(absl::ToUnixNanos(last_dispatched_->at));
+            response.set_first_event_dispatched_at_nanos(
+                    absl::ToInt64Nanoseconds(first_dispatched_->at));
+            response.set_last_event_dispatched_at_nanos(
+                    absl::ToInt64Nanoseconds(last_dispatched_->at));
         }
     }
 
   private:
     struct Dispatched {
         int index;
-        absl::Time at;
+        absl::Duration at;
     };
 
     void Record(int index, int32_t source_id, DispatchResult result)
@@ -269,6 +271,7 @@ InputServiceImpl::InputServiceImpl(std::shared_ptr<IInputDispatcher> dispatcher,
                                    IMultiDisplay& multi_display, Options options)
         : dispatcher_(std::move(dispatcher))
         , options_(std::move(options))
+        , clock_(options_.clock.get())
         , validator_(multi_display,
                      V2InputValidator::Options{.hw_sensor_hinge = options_.hw_sensor_hinge,
                                                .hw_keyboard = options_.hw_keyboard,
@@ -348,8 +351,8 @@ DispatcherSession& InputServiceImpl::BatchSession(int32_t source_id) {
     return *batch_sessions_.try_emplace(source_id, std::move(opened)).first->second;
 }
 
-void InputServiceImpl::SleepUntil(absl::Time target) const {
-    const absl::Time now = options_.now_fn();
+void InputServiceImpl::SleepUntil(absl::Duration target) const {
+    const absl::Duration now = clock_.Now();
     if (target > now) {
         options_.sleep_fn(target - now);
     }
@@ -371,14 +374,14 @@ void InputServiceImpl::SleepUntil(absl::Time target) const {
     // held instead of sharing a persistent session across callers.
     std::unique_ptr<DispatcherSession> anonymous_session;
     auto dispatched = std::make_shared<DispatchedEvents>();
-    // Host time corresponding to client timestamp 0, anchored at the first timed event.
-    std::optional<absl::Time> client_epoch;
+    // Host monotonic time corresponding to client timestamp 0, anchored at the first timed event.
+    std::optional<absl::Duration> client_epoch;
     for (int i = 0; i < request->events_size(); ++i) {
         const InputEvent& event = request->events(i);
         if (event.has_timestamp_nanos()) {
             const absl::Duration client_time = absl::Nanoseconds(event.timestamp_nanos());
             if (!client_epoch.has_value()) {
-                client_epoch = options_.now_fn() - client_time;
+                client_epoch = clock_.Now() - client_time;
             }
             SleepUntil(*client_epoch + client_time);
         }
@@ -492,8 +495,8 @@ class InputServiceImpl::StreamInputReader final : public ::SimpleServerReader<In
             // Preserve the client's inter-event spacing, but cap each step so that a pause
             // between bursts (or a timestamp going backwards) rebases onto the host clock
             // instead of delaying dispatch.
-            const absl::Time now = service_.options_.now_fn();
-            absl::Time target = now;
+            const absl::Duration now = service_.clock_.Now();
+            absl::Duration target = now;
             if (prev_client_ts_.has_value() && event->timestamp_nanos() > *prev_client_ts_) {
                 const absl::Duration step =
                         std::min(absl::Nanoseconds(event->timestamp_nanos() - *prev_client_ts_),
@@ -778,7 +781,7 @@ class InputServiceImpl::StreamInputReader final : public ::SimpleServerReader<In
     const std::shared_ptr<CallbackGate> gate_ = std::make_shared<CallbackGate>();
 
     std::optional<int64_t> prev_client_ts_;
-    absl::Time prev_target_time_;
+    absl::Duration prev_target_time_ = absl::ZeroDuration();
 
     int32_t dispatched_count_ ABSL_GUARDED_BY(this->reactor_lock_){0};
     StreamSessions sessions_ ABSL_GUARDED_BY(this->reactor_lock_);

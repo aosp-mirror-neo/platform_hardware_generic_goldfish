@@ -25,6 +25,7 @@
 
 #include "android/goldfish/hardware_config.h"
 #include "goldfish/sensors/physical_model.h"
+#include "goldfish/system/testing/fake_clocks.h"
 
 namespace goldfish::grpc::v2 {
 namespace {
@@ -51,8 +52,9 @@ class SensorsServiceImplTest : public ::testing::Test {
 
     void StartServer(const ::android::goldfish::HardwareConfig& hw) {
         StopServer();
-        physical_model_ = std::make_unique<::goldfish::sensors::PhysicalModel>(hw);
-        service_ = std::make_unique<SensorsServiceImpl>(*physical_model_);
+        physical_model_ =
+                std::make_unique<::goldfish::sensors::PhysicalModel>(hw, virtual_clock_);
+        service_ = std::make_unique<SensorsServiceImpl>(*physical_model_, clock_);
         ::grpc::ServerBuilder builder;
         builder.RegisterService(service_.get());
         server_ = builder.BuildAndStart();
@@ -74,6 +76,8 @@ class SensorsServiceImplTest : public ::testing::Test {
     }
 
     ::android::goldfish::HardwareConfig hw_{};
+    ::goldfish::system::testing::FakeVirtualClock virtual_clock_;
+    ::goldfish::system::testing::FakeSteadyClock clock_{absl::Seconds(1)};
     std::unique_ptr<::goldfish::sensors::PhysicalModel> physical_model_;
     std::unique_ptr<SensorsServiceImpl> service_;
     std::unique_ptr<::grpc::Server> server_;
@@ -88,11 +92,17 @@ TEST_F(SensorsServiceImplTest, GetSensorsStateReturnsInitialPhysicsSnapshot) {
 
     const auto status = service_->GetSensorsState(&ctx, &req, &resp);
     ASSERT_TRUE(status.ok()) << status.error_message();
-    EXPECT_GT(resp.timestamp_nanos(), 0);
+    EXPECT_EQ(resp.timestamp_nanos(), 1'000'000'000LL);
     EXPECT_TRUE(resp.has_pose());
     EXPECT_TRUE(resp.has_environment());
     EXPECT_TRUE(resp.has_imu());
     EXPECT_EQ(resp.imu().active_overrides_size(), 0);
+
+    clock_.Advance(absl::Milliseconds(250));
+    ::grpc::ServerContext next_ctx;
+    SensorsState next_resp;
+    ASSERT_TRUE(service_->GetSensorsState(&next_ctx, &req, &next_resp).ok());
+    EXPECT_EQ(next_resp.timestamp_nanos(), 1'250'000'000LL);
 }
 
 TEST_F(SensorsServiceImplTest, UpdatePoseRotationStepUpdatesSynthesizedImu) {
@@ -227,8 +237,10 @@ TEST_F(SensorsServiceImplTest, PostureUpdatesHingeAngleAndPostureWhenFoldable) {
     h0->set_angle_degrees(90.0F);
 
     PostureState resp;
+    clock_.Set(absl::Milliseconds(4200));
     const auto status = service_->UpdatePostureState(&ctx, &req, &resp);
     ASSERT_TRUE(status.ok()) << status.error_message();
+    EXPECT_EQ(resp.timestamp_nanos(), 4'200'000'000LL);
     ASSERT_GE(resp.hinges_size(), 1);
     EXPECT_FLOAT_EQ(resp.hinges(0).angle_degrees(), 90.0F);
     EXPECT_EQ(resp.posture(), PostureType::POSTURE_TYPE_HALF_OPENED);

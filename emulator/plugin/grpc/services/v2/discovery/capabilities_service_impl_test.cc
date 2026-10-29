@@ -23,6 +23,7 @@
 #include "capabilities_service.grpc.pb.h"
 #include "goldfish/avd/avd_properties.h"
 #include "goldfish/avd/avd_universe.h"
+#include "goldfish/system/testing/fake_clocks.h"
 
 #ifdef DeviceCapabilities
 #undef DeviceCapabilities
@@ -50,9 +51,15 @@ using ::testing::Contains;
 using ::testing::ElementsAre;
 using ::testing::Not;
 
-class TestUniverse : public AvdUniverse {
+class TestUniverseClockHolder {
+  protected:
+    ::goldfish::system::testing::FakeVirtualClock virtual_clock_;
+};
+
+class TestUniverse : private TestUniverseClockHolder, public AvdUniverse {
   public:
-    explicit TestUniverse(std::unique_ptr<AvdProperties> props) : AvdUniverse(std::move(props)) {}
+    explicit TestUniverse(std::unique_ptr<AvdProperties> props)
+            : AvdUniverse(std::move(props), virtual_clock_) {}
 
     async::EventLoop& GetQemuEventLoop() override {
         LOG(FATAL) << "GetQemuEventLoop not implemented in test";

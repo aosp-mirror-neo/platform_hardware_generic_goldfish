@@ -24,15 +24,17 @@
 #include "absl/log/log.h"
 #include "absl/time/time.h"
 
-#include "android/base/clock.h"
 #include "goldfish/physics/glm_helpers.h"
 #include "goldfish/physics/physics.h"
 #include "goldfish/sensors/physical_model.h"
 
 namespace goldfish::sensors {
 
-VirtualSceneCamera::VirtualSceneCamera(PhysicalModel* physical_model, bool enable_ambient_motion)
-        : physical_model_(physical_model), enable_ambient_motion_(enable_ambient_motion) {
+VirtualSceneCamera::VirtualSceneCamera(PhysicalModel* physical_model, bool enable_ambient_motion,
+                                       const ::goldfish::system::VirtualClock& virtual_clock)
+        : physical_model_(physical_model)
+        , enable_ambient_motion_(enable_ambient_motion)
+        , virtual_clock_(virtual_clock) {
     CHECK(physical_model_ != nullptr);
 }
 
@@ -98,7 +100,7 @@ void VirtualSceneCamera::SetVelocity(glm::vec3 velocity) {
 }
 
 void VirtualSceneCamera::AdvanceTime() {
-    physical_model_->SetCurrentTime(absl::ToUnixNanos(::android::base::IClock::VirtualNow()));
+    physical_model_->SetCurrentTime(absl::ToInt64Nanoseconds(virtual_clock_.Now()));
 }
 
 void VirtualSceneCamera::OnEnable() {

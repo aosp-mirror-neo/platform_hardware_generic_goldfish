@@ -39,8 +39,8 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 
-#include "android/base/clock.h"
 #include "goldfish/async/testing/test_event_loop.h"
+#include "goldfish/system/steady_clock.h"
 #include "keyboard_sink.h"
 #include "standard-headers/linux/input-event-codes.h"
 #include "standard-headers/linux/input.h"
@@ -50,7 +50,6 @@ namespace {
 
 using ::absl_testing::IsOk;
 using ::absl_testing::StatusIs;
-using ::android::base::ClockType;
 using ::android::emulation::control::EvDevEvent;
 using ::android::emulation::v2::InputActivity;
 using ::android::emulation::v2::InputEvent;
@@ -297,11 +296,10 @@ constexpr PointerAction kUp = PointerAction::POINTER_ACTION_UP;
 
 // Advances one microsecond on every read, so each activity gets a distinct
 // timestamp.
-class TickingClock : public ::android::base::IClock {
+class TickingClock : public ::goldfish::system::SteadyClock {
   public:
-    absl::Time Now(ClockType type) const override {
-        EXPECT_EQ(type, ClockType::kRealtime);
-        return absl::UnixEpoch() + absl::Microseconds(ticks_.fetch_add(1) + 1);
+    absl::Duration Now() const override {
+        return absl::Microseconds(ticks_.fetch_add(1) + 1);
     }
 
   private:
@@ -462,7 +460,7 @@ class InputDispatcherTest : public ::testing::Test {
     FakeKeyboard keyboard_{*loop_, log_};
     TickingClock clock_;
     ActivityRecorder recorder_{*loop_};
-    InputDispatcher dispatcher_{*loop_, devices_, &keyboard_, ResolveEvdevOnly, &clock_};
+    InputDispatcher dispatcher_{*loop_, devices_, &keyboard_, ResolveEvdevOnly, clock_};
 };
 
 TEST_F(InputDispatcherTest, SessionIdsStartAtOneAndAreUnique) {
@@ -636,7 +634,7 @@ TEST_F(InputDispatcherTest, CloseSessionAfterDriverResetWritesNoRelease) {
 
 TEST_F(InputDispatcherTest, DriverResetPushSafeWhenDispatcherDestroyedBeforeLoopDrains) {
     auto dispatcher = std::make_unique<InputDispatcher>(*loop_, devices_, &keyboard_,
-                                                        ResolveEvdevOnly, &clock_);
+                                                        ResolveEvdevOnly, clock_);
     const InputSessionId a = dispatcher->OpenSession({.source_id = 1});
     dispatcher->DispatchPointer(a, Touch(kDown, {{0}}));
     loop_->RunAll();
@@ -1241,7 +1239,7 @@ TEST_F(InputDispatcherTest, CompletionCarriesTheTimeOfItsActivity) {
     for (size_t i = 0; i < observed.size(); ++i) {
         EXPECT_THAT(results[i].status, IsOk());
         ASSERT_TRUE(results[i].dispatched_at.has_value()) << i;
-        EXPECT_EQ(absl::ToUnixNanos(*results[i].dispatched_at),
+        EXPECT_EQ(absl::ToInt64Nanoseconds(*results[i].dispatched_at),
                   observed[i].activity.dispatched_at_nanos());
     }
     for (size_t i = observed.size(); i < results.size(); ++i) {
@@ -1264,7 +1262,7 @@ TEST_F(InputDispatcherTest, PartlyAppliedEventCompletesWithErrorAndTime) {
     ASSERT_TRUE(result.has_value());
     EXPECT_THAT(result->status, StatusIs(absl::StatusCode::kResourceExhausted));
     ASSERT_TRUE(result->dispatched_at.has_value());
-    EXPECT_EQ(absl::ToUnixNanos(*result->dispatched_at),
+    EXPECT_EQ(absl::ToInt64Nanoseconds(*result->dispatched_at),
               observed[0].activity.dispatched_at_nanos());
 }
 
@@ -1284,7 +1282,7 @@ TEST_F(InputDispatcherTest, CallbacksRunOnDeliveryThread) {
 
 TEST_F(InputDispatcherTest, DestructorDeliversQueuedActivity) {
     auto dispatcher = std::make_unique<InputDispatcher>(*loop_, devices_, &keyboard_,
-                                                        ResolveEvdevOnly, &clock_);
+                                                        ResolveEvdevOnly, clock_);
     ActivityRecorder recorder(*loop_);
     absl::Notification first_arrived;
     absl::Notification release_first;
@@ -1418,7 +1416,7 @@ TEST_F(InputDispatcherTest, ShutdownDeliversQueuedActivityAndJoins) {
 TEST_F(InputDispatcherTest, DestructorShutsDownAfterLoopStopped) {
     Completion pending;
     auto dispatcher = std::make_unique<InputDispatcher>(*loop_, devices_, &keyboard_,
-                                                        ResolveEvdevOnly, &clock_);
+                                                        ResolveEvdevOnly, clock_);
     const InputSessionId a = dispatcher->OpenSession({});
     loop_->RunAll();
     dispatcher->DispatchText(a, "x", pending.Callback());
@@ -1435,7 +1433,7 @@ TEST_F(InputDispatcherTest, DestructorShutsDownAfterLoopStopped) {
 TEST_F(InputDispatcherTest, SessionAtCapIsRejectedOnCallingThreadWhileOthersPost) {
     std::array<Completion, 4> done;
     Completion again;
-    InputDispatcher capped(*loop_, devices_, &keyboard_, ResolveEvdevOnly, &clock_,
+    InputDispatcher capped(*loop_, devices_, &keyboard_, ResolveEvdevOnly, clock_,
                            /*max_pending_per_session=*/2);
     const InputSessionId a = capped.OpenSession({});
     const InputSessionId b = capped.OpenSession({});
@@ -1467,7 +1465,7 @@ TEST_F(InputDispatcherTest, SessionAtCapIsRejectedOnCallingThreadWhileOthersPost
 }
 
 TEST_F(InputDispatcherTest, CloseSessionRunsWhenSessionIsAtCap) {
-    InputDispatcher capped(*loop_, devices_, &keyboard_, ResolveEvdevOnly, &clock_,
+    InputDispatcher capped(*loop_, devices_, &keyboard_, ResolveEvdevOnly, clock_,
                            /*max_pending_per_session=*/1);
     const InputSessionId a = capped.OpenSession({});
     loop_->RunAll();
@@ -1481,7 +1479,7 @@ TEST_F(InputDispatcherTest, CloseSessionRunsWhenSessionIsAtCap) {
 }
 
 TEST_F(InputDispatcherTest, KeysWaitForInstalledKeyboard) {
-    InputDispatcher late(*loop_, devices_, /*keyboard=*/nullptr, ResolveEvdevOnly, &clock_);
+    InputDispatcher late(*loop_, devices_, /*keyboard=*/nullptr, ResolveEvdevOnly, clock_);
     const InputSessionId a = late.OpenSession({});
     std::array<Completion, 4> done;
     late.DispatchKey(a, Key(kKeyPress, KEY_A), done[0].Callback());
@@ -1759,7 +1757,7 @@ TEST_F(InputDispatcherTest, IdleTimerFiringBeforeItsGenerationIsArmedIsStale) {
 
 TEST_F(InputDispatcherTest, IdleTimerFiringAfterShutdownOrDestructionIsIgnored) {
     auto dispatcher = std::make_unique<InputDispatcher>(*loop_, devices_, &keyboard_,
-                                                        ResolveEvdevOnly, &clock_);
+                                                        ResolveEvdevOnly, clock_);
     const InputSessionId a = dispatcher->OpenSession({
         .source_id = 7,
         .idle_timeout = absl::Seconds(60),

@@ -32,7 +32,6 @@
 #include "absl/strings/str_split.h"
 #include "absl/time/time.h"
 
-#include "android/base/clock.h"
 #include "android/goldfish/device_type.h"
 #include "android/goldfish/hardware_config.h"
 #include "goldfish/async/event_loop.h"
@@ -139,7 +138,7 @@ class SensorDevice : public ISensorDevice {
   public:
     SensorDevice(PhysicalModel* pm, android::goldfish::DeviceType avd_type, int avd_api,
                  const android::goldfish::HardwareConfig& hw, EventLoop* event_loop,
-                 ::android::base::IClock* clock)
+                 const ::goldfish::system::VirtualClock& clock)
             : physical_model_(pm)
             , loop_(event_loop)
             , clock_(clock)
@@ -378,8 +377,8 @@ class SensorDevice : public ISensorDevice {
         if (absl::ConsumePrefix(&msg, "time:")) {
             int64_t guest_time_ns;
             if (absl::SimpleAtoi(msg, &guest_time_ns)) {
-                auto now = clock_->Now(::android::base::ClockType::kVirtual);
-                time_offset_ = absl::FromUnixNanos(guest_time_ns) - now;
+                const absl::Duration now = clock_.Now();
+                time_offset_ = absl::Nanoseconds(guest_time_ns) - now;
                 return true;
             }
             VLOG(1) << "Ignoring 'time' command with invalid timestamp value: '" << msg << "'";
@@ -419,8 +418,8 @@ class SensorDevice : public ISensorDevice {
         // time of the sensor event arrival. Since the CTS enforces this property,
         // other code may also rely on it.
         DCHECK(loop_->IsOnLoopThread()) << "Tick must be called from the event loop!";
-        const auto now = clock_->Now(::android::base::ClockType::kVirtual);
-        physical_model_->SetCurrentTime(absl::ToUnixNanos(now));
+        const absl::Duration now = clock_.Now();
+        physical_model_->SetCurrentTime(absl::ToInt64Nanoseconds(now));
         for (size_t sensor_id = 0; sensor_id < static_cast<size_t>(AndroidSensor::MAX_SENSORS);
              ++sensor_id) {
             if (!Enabled(sensor_id)) {
@@ -435,8 +434,8 @@ class SensorDevice : public ISensorDevice {
             Send(std::string_view(s.serialized.value, s.serialized.length));
         }
 
-        Send(absl::StrFormat("guest-sync:%d", absl::ToUnixNanos(now + time_offset_)));
-        Send(absl::StrFormat("sync:%d", absl::ToUnixMicros(now)));
+        Send(absl::StrFormat("guest-sync:%d", absl::ToInt64Nanoseconds(now + time_offset_)));
+        Send(absl::StrFormat("sync:%d", absl::ToInt64Microseconds(now)));
 
         if (enabled_mask_ == 0) return;
 
@@ -462,7 +461,7 @@ class SensorDevice : public ISensorDevice {
 
     PhysicalModel* const physical_model_;
     EventLoop* const loop_;
-    ::android::base::IClock* const clock_;
+    const ::goldfish::system::VirtualClock& clock_;
     qemud::Parser qemud_parser_;
     std::shared_ptr<EventLoop::Timer> timer_;
     absl::Duration time_offset_;
@@ -487,22 +486,13 @@ void ISensorDevice::RegisterDevice(PhysicalModel* pm, IConnectorRegistry* regist
                                    android::goldfish::DeviceType avd_type, int avd_api,
                                    const android::goldfish::HardwareConfig& hw,
                                    EventLoop* client_loop, EventLoop* qemu_loop,
-                                   ::android::base::IClock* clock) {
+                                   const ::goldfish::system::VirtualClock& clock) {
     registry->RegisterHalQemuDevice(
             std::string(ISensorDevice::kServiceName), client_loop, qemu_loop,
-            [pm, avd_type, avd_api, &hw, client_loop, clock](std::string_view /*args*/) {
+            [pm, avd_type, avd_api, &hw, client_loop, &clock](std::string_view /*args*/) {
                 return std::make_shared<SensorDevice>(pm, avd_type, avd_api, hw, client_loop,
                                                       clock);
             });
-}
-
-// Registers the sensor device with the registry
-void ISensorDevice::RegisterDevice(PhysicalModel* pm, IConnectorRegistry* registry,
-                                   android::goldfish::DeviceType avd_type, int avd_api,
-                                   const android::goldfish::HardwareConfig& hw,
-                                   EventLoop* client_loop, EventLoop* qemu_loop) {
-    RegisterDevice(pm, registry, avd_type, avd_api, hw, client_loop, qemu_loop,
-                   &::android::base::IClock::Get());
 }
 
 }  // namespace goldfish::devices::sensor

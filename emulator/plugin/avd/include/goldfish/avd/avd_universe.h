@@ -33,6 +33,7 @@
 #include "goldfish/display/abstract_multi_display.h"
 #include "goldfish/sensors/physical_model.h"
 #include "goldfish/snapshottable/snapshottable.h"
+#include "goldfish/system/virtual_clock.h"
 
 namespace goldfish::avd {
 
@@ -100,7 +101,8 @@ struct AvdUniverse : public snapshottable::Snapshottable {
     }
     bool IsGenericSnapshotInProgress() const { return generic_snapshot_in_progress_; }
 
-    explicit AvdUniverse(std::unique_ptr<AvdProperties> props);
+    AvdUniverse(std::unique_ptr<AvdProperties> props,
+                const ::goldfish::system::VirtualClock& virtual_clock);
     AvdUniverse(const AvdUniverse&) = delete;
     AvdUniverse(AvdUniverse&&) = delete;
     AvdUniverse& operator=(const AvdUniverse&) = delete;

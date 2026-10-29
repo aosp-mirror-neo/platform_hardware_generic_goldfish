@@ -19,11 +19,10 @@
 
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "google/protobuf/message.h"
 #include "google/protobuf/text_format.h"
-
-#include "android/base/clock.h"
 
 // #define DEBUG 0
 /* set  for very verbose debugging */
@@ -35,7 +34,6 @@
 
 namespace android::control::interceptor {
 
-using android::base::IClock;
 using grpc::experimental::ClientRpcInfo;
 using grpc::experimental::InterceptorBatchMethods;
 using grpc::experimental::ServerRpcInfo;
@@ -92,7 +90,7 @@ LoggingInterceptor::LoggingInterceptor(ServerRpcInfo* info, ReportingFunction re
         loginfo_.type = ToCallType(info->type());
         loginfo_.direction = Direction::kIncoming;
     }
-    loginfo_.timestamps[InvocationRecord::kStartTimeIdx] = absl::ToUnixMicros(IClock::HostNow());
+    loginfo_.timestamps[InvocationRecord::kStartTimeIdx] = absl::ToUnixMicros(absl::Now());
 }
 
 LoggingInterceptor::LoggingInterceptor(ClientRpcInfo* info, ReportingFunction reporter)
@@ -103,11 +101,11 @@ LoggingInterceptor::LoggingInterceptor(ClientRpcInfo* info, ReportingFunction re
         loginfo_.direction = Direction::kOutgoing;
         loginfo_.peer = info->client_context()->peer();
     }
-    loginfo_.timestamps[InvocationRecord::kStartTimeIdx] = absl::ToUnixMicros(IClock::HostNow());
+    loginfo_.timestamps[InvocationRecord::kStartTimeIdx] = absl::ToUnixMicros(absl::Now());
 }
 
 LoggingInterceptor::~LoggingInterceptor() {
-    auto ts = absl::ToUnixMicros(IClock::HostNow());
+    auto ts = absl::ToUnixMicros(absl::Now());
     loginfo_.duration = ts - loginfo_.timestamps[InvocationRecord::kStartTimeIdx];
     reporter_(loginfo_);
 }
@@ -148,7 +146,7 @@ Phase: [POST_SEND_MESSAGE]
 Phase: [POST_RECV_CLOSE]
  */
 void LoggingInterceptor::Intercept(InterceptorBatchMethods* methods) {
-    auto ts = absl::ToUnixMicros(IClock::HostNow());
+    auto ts = absl::ToUnixMicros(absl::Now());
     DD("Intercepting -- %d", ts);
 
     if (methods->QueryInterceptionHookPoint(InterceptionHookPoints::POST_RECV_MESSAGE)) {

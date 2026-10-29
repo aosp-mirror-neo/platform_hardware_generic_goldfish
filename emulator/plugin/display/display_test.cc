@@ -37,6 +37,7 @@
 #include "goldfish/display/frame.h"
 #include "goldfish/display/test/fake_multi_display.h"
 #include "goldfish/sensors/physical_model.h"
+#include "goldfish/system/testing/fake_clocks.h"
 
 using goldfish::async::EventLoop;
 using goldfish::display::Dimensions;
@@ -384,7 +385,8 @@ TEST_F(DisplayTest, SetRotationEmitsFrameWithUpdatedRotation) {
 
 TEST_F(DisplayTest, MultiDisplayPropagatesPhysicalModelRotationToDisplays) {
     android::goldfish::HardwareConfig hw = android::goldfish::FakeHardwareConfig::GetHwConfig();
-    goldfish::sensors::PhysicalModel physical_model(hw);
+    goldfish::system::testing::FakeVirtualClock virtual_clock;
+    goldfish::sensors::PhysicalModel physical_model(hw, virtual_clock);
     goldfish::display::test::FakeMultiDisplay multi_display(loop_.get());
     auto sub = multi_display.RegisterPhysicalModel(physical_model);
 

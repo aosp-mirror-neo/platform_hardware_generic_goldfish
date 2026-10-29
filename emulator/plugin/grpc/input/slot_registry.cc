@@ -39,7 +39,7 @@ int SlotRegistry::AcquireSlot(uint32_t identifier) {
         slot = id_map_[identifier];
     }
 
-    auto now = clock_->Now(base::ClockType::kHost);
+    auto now = clock_.TimeNow();
     id_last_used_epoch_[identifier] = now + slot_expiration_;
 
     return static_cast<int>(slot);
@@ -55,7 +55,7 @@ bool SlotRegistry::IsSlotRegistered(uint32_t slot) {
 
 void SlotRegistry::UpdateSlotExpiration(uint32_t identifier) {
     DCHECK(id_last_used_epoch_.count(identifier) > 0);
-    auto now = clock_->Now(base::ClockType::kHost);
+    auto now = clock_.TimeNow();
     id_last_used_epoch_[identifier] = now + slot_expiration_;
 }
 
@@ -86,7 +86,7 @@ std::vector<EvDevEvent> SlotRegistry::ReleaseAllSlots() {
 std::vector<EvDevEvent> SlotRegistry::ExpireOldSlots() {
     std::vector<EvDevEvent> events;
 
-    const absl::Time now = clock_->Now(base::ClockType::kHost);
+    const absl::Time now = clock_.TimeNow();
     for (auto it = id_last_used_epoch_.begin(); it != id_last_used_epoch_.end();) {
         if (it->second < now) {
             DCHECK(id_map_.count(it->first) > 0);

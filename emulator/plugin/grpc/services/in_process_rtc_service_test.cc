@@ -43,6 +43,7 @@
 #include "goldfish/avd/global_event_loop.h"
 #include "goldfish/display/test/fake_multi_display.h"
 #include "goldfish/display/test/fake_pixman_display.h"
+#include "goldfish/system/testing/fake_clocks.h"
 #include "input_service.pb.h"
 
 extern "C" {
@@ -63,11 +64,17 @@ namespace {
 using ::goldfish::grpc::v2::IInputDispatcher;
 using ::goldfish::grpc::v2::testing::RecordingInputDispatcher;
 
-class TestAvdUniverse : public ::goldfish::avd::AvdUniverse {
+class TestAvdClockHolder {
+  protected:
+    ::goldfish::system::testing::FakeVirtualClock virtual_clock_;
+};
+
+class TestAvdUniverse : private TestAvdClockHolder, public ::goldfish::avd::AvdUniverse {
   public:
     explicit TestAvdUniverse(::goldfish::display::IMultiDisplay* multi_display,
                              ::goldfish::async::EventLoop& loop)
-            : ::goldfish::avd::AvdUniverse(std::make_unique<::goldfish::avd::AvdProperties>())
+            : ::goldfish::avd::AvdUniverse(std::make_unique<::goldfish::avd::AvdProperties>(),
+                                           virtual_clock_)
             , multi_display_(multi_display)
             , loop_(loop) {
         ::goldfish::avd::SetGlobalAvdUniverse(this);

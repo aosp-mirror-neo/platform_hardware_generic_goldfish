@@ -16,15 +16,14 @@
 #include <functional>
 
 #include "absl/log/log.h"
+#include "absl/time/clock.h"
 #include "absl/time/time.h"
 
-#include "android/base/clock.h"
 #include "android/process/process.h"
 #include "goldfish/async/event_loop.h"
 
 namespace android::control::interceptor {
 
-using android::base::IClock;
 using goldfish::async::EventLoop;
 using grpc::experimental::Interceptor;
 using grpc::experimental::InterceptorBatchMethods;
@@ -38,7 +37,7 @@ IdleInterceptor::IdleInterceptor(std::chrono::seconds timeout,
         , active_requests_(active_requests) {}
 
 IdleInterceptor::~IdleInterceptor() {
-    const uint64_t idle_time = absl::ToUnixSeconds(IClock::HostNow() + absl::FromChrono(timeout_));
+    const uint64_t idle_time = absl::ToUnixSeconds(absl::Now() + absl::FromChrono(timeout_));
     termination_unix_time_->store(idle_time);
     active_requests_->fetch_sub(1);
 }
@@ -50,7 +49,7 @@ void IdleInterceptor::Intercept(InterceptorBatchMethods* methods) {
 IdleInterceptorFactory::IdleInterceptorFactory(std::chrono::seconds timeout, EventLoop* event_loop)
         : timeout_(timeout)
         , termination_unix_time_(static_cast<uint64_t>(
-                  absl::ToUnixSeconds(IClock::HostNow() + absl::FromChrono(timeout)))) {
+                  absl::ToUnixSeconds(absl::Now() + absl::FromChrono(timeout)))) {
     timeout_checker_ = event_loop->ScheduleRepeating(
             [this]() {
                 CheckIdleTimeout();
@@ -65,7 +64,7 @@ Interceptor* IdleInterceptorFactory::CreateServerInterceptor(ServerRpcInfo* /* i
 }
 
 bool IdleInterceptorFactory::CheckIdleTimeout() {
-    auto epoch = absl::ToUnixSeconds(IClock::HostNow());
+    auto epoch = absl::ToUnixSeconds(absl::Now());
     if (active_requests_ > 0U || static_cast<uint64_t>(epoch) < termination_unix_time_.load()) {
         return true;
     }

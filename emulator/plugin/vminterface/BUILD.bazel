@@ -64,7 +64,6 @@ cc_library(
         "//emulator/libs/metrics:snapshot_metrics",
         "//emulator/libs/snapshot:snapshot_store",
         "//emulator/libs/status_macros",
-        "//emulator/libs/system:clock",
         "//emulator/plugin/avd:avd_info",
         "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/cleanup",
@@ -75,6 +74,7 @@ cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/time:clock_interface",
         "@qemu//:qemu-headers-exported",
     ],
 )
@@ -95,7 +95,6 @@ cc_library(
         "//emulator/libs/metrics:snapshot_metrics",
         "//emulator/libs/snapshot:snapshot_store",
         "//emulator/libs/status_macros",
-        "//emulator/libs/system:clock",
         "//emulator/plugin/avd:fake_avd_universe",
         "//emulator/plugin/display:test-display",
         "@abseil-cpp//absl/base:core_headers",
@@ -107,6 +106,7 @@ cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/time:clock_interface",
     ],
 )
 
@@ -160,7 +160,6 @@ cc_test(
         "//emulator/libs/file",
         "//emulator/libs/snapshot:snapshot_store",
         "//emulator/libs/status_macros:status_matcher_macros",
-        "//emulator/libs/system:clock",
         "//emulator/libs/system:test-headers",
         "//emulator/libs/test:googletest_main",
         "//emulator/plugin/avd:fake_avd_universe",
@@ -171,6 +170,7 @@ cc_test(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/time:simulated_clock",
         "@glib//glib:glib_import",
         "@glib//gmodule:gmodule_import",
     ],

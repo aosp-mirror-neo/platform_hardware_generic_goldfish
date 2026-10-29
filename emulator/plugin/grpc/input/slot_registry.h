@@ -18,9 +18,9 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/time/clock_interface.h"
 #include "absl/time/time.h"
 
-#include "android/base/clock.h"
 #include "android/emulation/control/ev_dev_event.h"
 
 namespace android::emulation::control {
@@ -63,10 +63,10 @@ class SlotRegistry {
      *
      * @param slot_expiration The duration after which a slot is considered expired.
      *                       Defaults to kTouchExpireAfter120S (120 seconds).
-     * @param clock The clock to use for timing. Defaults to the global IClock instance.
+     * @param clock The clock to use for timing. Defaults to absl::Clock::GetRealClock().
      */
     explicit SlotRegistry(absl::Duration slot_expiration = kTouchExpireAfter120S,
-                          base::IClock* clock = &base::IClock::Get())
+                          absl::Clock& clock = absl::Clock::GetRealClock())
             : slot_expiration_(slot_expiration), clock_(clock) {}
 
     /**
@@ -172,6 +172,6 @@ class SlotRegistry {
     /**
      * @brief The clock used for timing.
      */
-    base::IClock* clock_;
+    absl::Clock& clock_;
 };
 }  // namespace android::emulation::control

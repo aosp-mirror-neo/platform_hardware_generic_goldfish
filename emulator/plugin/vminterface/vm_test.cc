@@ -33,9 +33,9 @@
 #include "absl/status/status_matchers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/simulated_clock.h"
 #include "absl/time/time.h"
 
-#include "android/base/testing/test_clock.h"
 #include "android/base/testing/test_temp_dir.h"
 #include "android/crashreport/hang_detector.h"
 #include "android/goldfish/qemu_vm_operations.h"
@@ -151,7 +151,7 @@ class QemuVmOperationsTest : public ::testing::Test {
         vm_ops_ = CreateQemuVmOperations(
                 /*event_loop=*/loop_.get(), /*qemu_loop=*/qemu_loop_.get(),
                 QemuSnapshotConfig{.store = std::move(store), .enabled = snapshots_enabled},
-                /*hang_detector=*/&hang_detector_, /*clock=*/&clock_);
+                /*hang_detector=*/&hang_detector_, /*clock=*/clock_);
     }
 
     // Marks `name` as a snapshot this emulator can load.
@@ -191,7 +191,7 @@ class QemuVmOperationsTest : public ::testing::Test {
         mock_snapshot_list_set(/*entries=*/nullptr, /*count=*/-1);
     }
 
-    android::base::TestClock clock_;
+    absl::SimulatedClock clock_;
     TestHangDetector hang_detector_;
     std::function<void(std::string_view)> snapshot_op_hook_;
     TestVmLock* test_vm_lock_ = nullptr;
@@ -1003,25 +1003,25 @@ TEST_F(QemuVmOperationsTest, SnapshotEventsAreDeliveredOnLoopAndFilteredAt250Ms)
     mock_fire_snapshot_progress(&qprog);
 
     // First TRANSFERRING event (phase change from PREPARING -> TRANSFERRING) is always forwarded.
-    clock_.Advance(absl::Milliseconds(10));
+    clock_.AdvanceTime(absl::Milliseconds(10));
     qprog.phase = QEMU_SNAPSHOT_PHASE_TRANSFERRING;
     qprog.transferred_bytes = 100;
     mock_fire_snapshot_progress(&qprog);
 
     // Subsequent TRANSFERRING event within 250 ms is throttled out of SnapshotEvents(),
     // though GetSnapshotProgress() still reflects the latest counters immediately.
-    clock_.Advance(absl::Milliseconds(100));
+    clock_.AdvanceTime(absl::Milliseconds(100));
     qprog.transferred_bytes = 300;
     mock_fire_snapshot_progress(&qprog);
     EXPECT_EQ(vm_ops_->GetSnapshotProgress().transferred_bytes, 300);
 
     // After 250 ms from the last forwarded TRANSFERRING event, the next one is forwarded.
-    clock_.Advance(absl::Milliseconds(150));
+    clock_.AdvanceTime(absl::Milliseconds(150));
     qprog.transferred_bytes = 600;
     mock_fire_snapshot_progress(&qprog);
 
     // COMPLETED is always forwarded even if < 250 ms since the last TRANSFERRING event.
-    clock_.Advance(absl::Milliseconds(20));
+    clock_.AdvanceTime(absl::Milliseconds(20));
     qprog.phase = QEMU_SNAPSHOT_PHASE_COMPLETED;
     qprog.transferred_bytes = 1000;
     mock_fire_snapshot_progress(&qprog);
@@ -1043,18 +1043,18 @@ TEST_F(QemuVmOperationsTest, SnapshotEventsAreDeliveredOnLoopAndFilteredAt250Ms)
     // Next operation resets the 250 ms filter on PREPARING so its first TRANSFERRING
     // and FAILED events are immediately forwarded.
     events.clear();
-    clock_.Advance(absl::Milliseconds(10));
+    clock_.AdvanceTime(absl::Milliseconds(10));
     qprog.operation = QEMU_SNAPSHOT_OP_LOAD;
     qprog.phase = QEMU_SNAPSHOT_PHASE_PREPARING;
     qprog.transferred_bytes = 0;
     mock_fire_snapshot_progress(&qprog);
 
-    clock_.Advance(absl::Milliseconds(5));
+    clock_.AdvanceTime(absl::Milliseconds(5));
     qprog.phase = QEMU_SNAPSHOT_PHASE_TRANSFERRING;
     qprog.transferred_bytes = 250;
     mock_fire_snapshot_progress(&qprog);
 
-    clock_.Advance(absl::Milliseconds(5));
+    clock_.AdvanceTime(absl::Milliseconds(5));
     qprog.phase = QEMU_SNAPSHOT_PHASE_FAILED;
     qprog.error_message = "Corrupt qcow2 vmstate";
     mock_fire_snapshot_progress(&qprog);
@@ -1082,18 +1082,18 @@ TEST_F(QemuVmOperationsTest, TrailingFlushDeliversLatestThrottledTransferringUpd
     mock_fire_snapshot_progress(&qprog);
 
     // First TRANSFERRING event at t = 10 ms is forwarded immediately.
-    clock_.Advance(absl::Milliseconds(10));
+    clock_.AdvanceTime(absl::Milliseconds(10));
     qprog.phase = QEMU_SNAPSHOT_PHASE_TRANSFERRING;
     qprog.active_component = "ram";
     qprog.transferred_bytes = 100;
     mock_fire_snapshot_progress(&qprog);
 
     // Two rapid updates within the 250 ms window (at t = 100 ms and t = 180 ms) are throttled.
-    clock_.Advance(absl::Milliseconds(90));
+    clock_.AdvanceTime(absl::Milliseconds(90));
     qprog.transferred_bytes = 500;
     mock_fire_snapshot_progress(&qprog);
 
-    clock_.Advance(absl::Milliseconds(80));
+    clock_.AdvanceTime(absl::Milliseconds(80));
     qprog.active_component = "0000:00:02.0/virtio-gpu-rutabaga";
     qprog.transferred_bytes = 1000;
     qprog.completed_devices = 8;
@@ -1108,14 +1108,14 @@ TEST_F(QemuVmOperationsTest, TrailingFlushDeliversLatestThrottledTransferringUpd
     // The trailing flush was scheduled at t = 100 ms with a 160 ms delay (due at t = 260 ms).
     // Advancing 159 ms on the loop (and 79 ms on clock_ from t = 180 ms to t = 259 ms) does not
     // flush yet.
-    clock_.Advance(absl::Milliseconds(79));
+    clock_.AdvanceTime(absl::Milliseconds(79));
     loop_->AdvanceClock(absl::Milliseconds(159));
     loop_->RunAll();
     EXPECT_EQ(events.size(), 2U);
 
     // Reaching t = 260 ms (250 ms after the first forwarded Transferring event) flushes the
     // latest suppressed state (transferred_bytes = 1000, completed_devices = 8).
-    clock_.Advance(absl::Milliseconds(1));
+    clock_.AdvanceTime(absl::Milliseconds(1));
     loop_->AdvanceClock(absl::Milliseconds(1));
     loop_->RunAll();
     ASSERT_EQ(events.size(), 3U);
@@ -1126,11 +1126,11 @@ TEST_F(QemuVmOperationsTest, TrailingFlushDeliversLatestThrottledTransferringUpd
 
     // A subsequent throttled update followed by COMPLETED before the timer fires must not emit a
     // stale TRANSFERRING event after COMPLETED.
-    clock_.Advance(absl::Milliseconds(40));
+    clock_.AdvanceTime(absl::Milliseconds(40));
     qprog.completed_devices = 9;
     mock_fire_snapshot_progress(&qprog);
 
-    clock_.Advance(absl::Milliseconds(20));
+    clock_.AdvanceTime(absl::Milliseconds(20));
     qprog.phase = QEMU_SNAPSHOT_PHASE_COMPLETED;
     qprog.completed_devices = 10;
     mock_fire_snapshot_progress(&qprog);
@@ -1139,7 +1139,7 @@ TEST_F(QemuVmOperationsTest, TrailingFlushDeliversLatestThrottledTransferringUpd
     ASSERT_EQ(events.size(), 4U);
     EXPECT_EQ(events[3].phase, VmOperations::SnapshotPhase::Completed);
 
-    clock_.Advance(absl::Milliseconds(300));
+    clock_.AdvanceTime(absl::Milliseconds(300));
     loop_->AdvanceClock(absl::Milliseconds(300));
     loop_->RunAll();
     EXPECT_EQ(events.size(), 4U);

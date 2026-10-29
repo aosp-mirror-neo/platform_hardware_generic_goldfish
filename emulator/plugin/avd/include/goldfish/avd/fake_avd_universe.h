@@ -21,6 +21,7 @@
 #include "goldfish/async/testing/test_event_loop.h"
 #include "goldfish/avd/avd_universe.h"
 #include "goldfish/metrics/metrics_reporter.h"
+#include "goldfish/system/testing/fake_clocks.h"
 
 namespace goldfish::grpc::v2 {
 class KeyboardSink;
@@ -28,6 +29,13 @@ class TouchDevices;
 }  // namespace goldfish::grpc::v2
 
 namespace goldfish::avd {
+
+namespace detail {
+class FakeAvdVirtualClockHolder {
+  protected:
+    system::testing::FakeVirtualClock virtual_clock_;
+};
+}  // namespace detail
 
 /**
  * @brief Minimal implementation of `AvdUniverse` for unit tests.
@@ -40,7 +48,7 @@ namespace goldfish::avd {
  * their `evdev_code`. It runs on `input_loop()`, which runs only when the test
  * runs it.
  */
-class FakeAvdUniverse : public AvdUniverse {
+class FakeAvdUniverse : private detail::FakeAvdVirtualClockHolder, public AvdUniverse {
   public:
     FakeAvdUniverse();
     ~FakeAvdUniverse() override;
@@ -53,6 +61,9 @@ class FakeAvdUniverse : public AvdUniverse {
 
     /** @brief Returns the test event loop driving `GetInputDispatcher()`. */
     async::testing::TestEventLoop& input_loop() { return *input_loop_; }
+
+    /** @brief Returns the fake virtual clock backing `GetSensorsPhysicalModel()`. */
+    system::testing::FakeVirtualClock& virtual_clock() { return virtual_clock_; }
 
     absl::Status OnSave(archive::IWriter&) const override;
     absl::Status OnLoad(archive::IReader&) override;

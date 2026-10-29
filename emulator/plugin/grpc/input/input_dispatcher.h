@@ -34,9 +34,9 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 
-#include "android/base/clock.h"
 #include "contact_table.h"
 #include "goldfish/async/event_loop.h"
+#include "goldfish/system/steady_clock.h"
 #include "input_dispatcher_interface.h"
 #include "input_service.pb.h"
 #include "keyboard_sink.h"
@@ -94,14 +94,15 @@ class InputDispatcher final : public IInputDispatcher {
     /**
      * @brief Constructs an `InputDispatcher` running on `loop`.
      * @param keyboard Receives keys and text; null until `InstallKeyboardSink()`.
-     * @param clock Stamps `dispatched_at_nanos` from its realtime clock.
+     * @param clock Stamps `dispatched_at_nanos` from the host monotonic clock.
      * @param max_pending_per_session The operations a session may have posted
      *     but not yet run; `Dispatch*()` rejects more. Bounds the loop's queue
      *     while it is stalled, for example by a snapshot save.
      */
     InputDispatcher(::goldfish::async::EventLoop& loop, TouchDevices& devices,
                     KeyboardSink* keyboard, KeyCodeResolver resolve_key_code,
-                    ::android::base::IClock* clock = &::android::base::IClock::Get(),
+                    const ::goldfish::system::SteadyClock& clock =
+                            ::goldfish::system::SteadyClock::GetRealClock(),
                     size_t max_pending_per_session = kDefaultMaxPendingPerSession);
     /** @brief Calls `Shutdown()`. */
     ~InputDispatcher() override;
@@ -315,7 +316,7 @@ class InputDispatcher final : public IInputDispatcher {
     ::goldfish::async::EventLoop& loop_;
     TouchDevices& devices_;
     const KeyCodeResolver resolve_key_code_;
-    ::android::base::IClock* const clock_;
+    const ::goldfish::system::SteadyClock& clock_;
     const size_t max_pending_per_session_;
     std::atomic<InputSessionId> next_session_{1};
     absl::once_flag shutdown_once_;
@@ -343,7 +344,7 @@ class InputDispatcher final : public IInputDispatcher {
     absl::flat_hash_map<TouchDeviceId, StaleDeviceSlots> stale_slots_;
     // When the activity of the running Dispatch*() operation, which reports
     // at most one, was stamped; unset until it reports it.
-    std::optional<absl::Time> reported_at_;
+    std::optional<absl::Duration> reported_at_;
 
     ActivityEventSource activity_events_;
     absl::Mutex outbox_mutex_;

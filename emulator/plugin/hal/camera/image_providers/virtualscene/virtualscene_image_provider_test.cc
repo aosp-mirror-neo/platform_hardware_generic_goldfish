@@ -27,6 +27,7 @@
 #include "android/goldfish/fake_hardware_config.h"
 #include "goldfish/camera_image_providers/virtualscene/virtualscene.h"
 #include "goldfish/sensors/physical_model.h"
+#include "goldfish/system/testing/fake_clocks.h"
 
 namespace goldfish::camera_image_providers::virtualscene {
 
@@ -134,7 +135,9 @@ TEST(VirtualsceneImageProvider, CreateStartCaptureStopMultiStream) {
             ::android::base::Bazel::RunfilesPath("goldfish+/emulator/libs/ver/lib64/vulkan");
     ASSERT_TRUE(ver_initialize({tempRoot}, vulkanDir));
 
-    sensors::PhysicalModel physicalModel(android::goldfish::FakeHardwareConfig::GetHwConfig());
+    system::testing::FakeVirtualClock virtualClock;
+    sensors::PhysicalModel physicalModel(android::goldfish::FakeHardwareConfig::GetHwConfig(),
+                                         virtualClock);
     VirtualsceneImageProvider::CreateArgs createArgs{
         .sceneConfig = VerSceneConfig(VerSceneConfig::Mode::Mesh3D, ""),
         .physicalModel = &physicalModel,
@@ -402,7 +405,9 @@ TEST(VirtualsceneImageProvider, Capture2DImageFile_RotatesAccordingToDeviceOrien
     ASSERT_TRUE(fs::exists(posterRunfile));
     ASSERT_TRUE(ver_initialize({posterRunfile.parent_path()}));
 
-    sensors::PhysicalModel physicalModel(android::goldfish::FakeHardwareConfig::GetHwConfig());
+    system::testing::FakeVirtualClock virtualClock;
+    sensors::PhysicalModel physicalModel(android::goldfish::FakeHardwareConfig::GetHwConfig(),
+                                         virtualClock);
     VirtualsceneImageProvider::CreateArgs createArgs{
         .sceneConfig = VerSceneConfig(VerSceneConfig::Mode::ImageFile, posterRunfile.string()),
         .physicalModel = &physicalModel,

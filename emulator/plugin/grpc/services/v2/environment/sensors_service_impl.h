@@ -18,6 +18,7 @@
 #include "absl/status/status.h"
 
 #include "goldfish/sensors/physical_model.h"
+#include "goldfish/system/steady_clock.h"
 #include "sensors_service.grpc.pb.h"
 
 namespace goldfish::grpc::v2 {
@@ -61,7 +62,9 @@ using SensorsServiceBase =
  */
 class SensorsServiceImpl final : public SensorsServiceBase {
   public:
-    explicit SensorsServiceImpl(::goldfish::sensors::PhysicalModel& physical_model);
+    explicit SensorsServiceImpl(::goldfish::sensors::PhysicalModel& physical_model,
+                                const ::goldfish::system::SteadyClock& clock =
+                                        ::goldfish::system::SteadyClock::GetRealClock());
     ~SensorsServiceImpl() override = default;
 
     ::grpc::Status GetSensorsState(::grpc::ServerContext* context,
@@ -110,6 +113,7 @@ class SensorsServiceImpl final : public SensorsServiceBase {
     ::android::emulation::v2::PostureState BuildPostureState() const;
 
     ::goldfish::sensors::PhysicalModel& physical_model_;
+    const ::goldfish::system::SteadyClock& clock_;
 };
 
 }  // namespace goldfish::grpc::v2
