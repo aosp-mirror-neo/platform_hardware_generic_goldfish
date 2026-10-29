@@ -42,32 +42,39 @@ void DispatchIfStarted(bool started, const Dispatcher& dispatcher, const Event& 
 
 InProcessInputSender::InProcessInputSender(EventDispatcher dispatcher,
                                            V2EventDispatcher v2_dispatcher,
-                                           V2SensorsDispatcher v2_sensors_dispatcher)
+                                           V2SensorsDispatcher v2_sensors_dispatcher,
+                                           StopCallback on_stop)
         : dispatcher_(std::move(dispatcher))
         , v2_dispatcher_(std::move(v2_dispatcher))
-        , v2_sensors_dispatcher_(std::move(v2_sensors_dispatcher)) {}
+        , v2_sensors_dispatcher_(std::move(v2_sensors_dispatcher))
+        , on_stop_(std::move(on_stop)) {}
 
 absl::Status InProcessInputSender::Start() {
-    started_ = true;
+    started_.store(true, std::memory_order_release);
     VLOG(1) << "InProcessInputSender started.";
     return absl::OkStatus();
 }
 
 void InProcessInputSender::SendEvent(const InputEvent& event) {
-    DispatchIfStarted(started_, dispatcher_, event, "input event");
+    DispatchIfStarted(started_.load(std::memory_order_acquire), dispatcher_, event, "input event");
 }
 
 void InProcessInputSender::SendV2Event(const V2InputEvent& event) {
-    DispatchIfStarted(started_, v2_dispatcher_, event, "v2 input event");
+    DispatchIfStarted(started_.load(std::memory_order_acquire), v2_dispatcher_, event,
+                      "v2 input event");
 }
 
 void InProcessInputSender::SendV2SensorsUpdate(const V2SensorsUpdateRequest& request) {
-    DispatchIfStarted(started_, v2_sensors_dispatcher_, request, "v2 sensors update");
+    DispatchIfStarted(started_.load(std::memory_order_acquire), v2_sensors_dispatcher_, request,
+                      "v2 sensors update");
 }
 
 void InProcessInputSender::Stop() {
-    started_ = false;
+    const bool was_started = started_.exchange(false, std::memory_order_acq_rel);
     VLOG(1) << "InProcessInputSender stopped.";
+    if (was_started && on_stop_) {
+        on_stop_();
+    }
 }
 
 }  // namespace goldfish::videobridge

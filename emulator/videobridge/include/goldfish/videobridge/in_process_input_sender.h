@@ -25,17 +25,20 @@ namespace goldfish::videobridge {
  * @brief In-process implementation of InputSender interface for direct memory injection.
  *
  * Delegates InputEvent dispatching directly to in-process C++ callbacks
- * (e.g. InputEventSender / KeyEventSender).
+ * (e.g. InputDispatcher / SensorsServiceImpl) and invokes an optional stop
+ * callback when an active data channel transitions to closing/closed.
  */
 class InProcessInputSender : public InputSender {
   public:
     using EventDispatcher = std::function<absl::Status(const InputEvent&)>;
     using V2EventDispatcher = std::function<absl::Status(const V2InputEvent&)>;
     using V2SensorsDispatcher = std::function<absl::Status(const V2SensorsUpdateRequest&)>;
+    using StopCallback = std::function<void()>;
 
     explicit InProcessInputSender(EventDispatcher dispatcher,
                                   V2EventDispatcher v2_dispatcher = nullptr,
-                                  V2SensorsDispatcher v2_sensors_dispatcher = nullptr);
+                                  V2SensorsDispatcher v2_sensors_dispatcher = nullptr,
+                                  StopCallback on_stop = nullptr);
     ~InProcessInputSender() override = default;
 
     absl::Status Start() override;
@@ -48,6 +51,7 @@ class InProcessInputSender : public InputSender {
     EventDispatcher dispatcher_;
     V2EventDispatcher v2_dispatcher_;
     V2SensorsDispatcher v2_sensors_dispatcher_;
+    StopCallback on_stop_;
     std::atomic_bool started_{false};
 };
 
