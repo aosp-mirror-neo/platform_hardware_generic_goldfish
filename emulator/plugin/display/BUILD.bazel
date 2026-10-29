@@ -1,5 +1,6 @@
 load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("//emulator/tools:cc_binary_with_manifest.bzl", "cc_binary_with_manifest")
 
 cc_library(
     name = "write_png",
@@ -181,6 +182,31 @@ cc_library(
     ],
 )
 
+cc_test(
+    name = "webm_encoder_test",
+    size = "small",
+    srcs = ["webm_encoder_test.cc"],
+    deps = [
+        ":video_recorder",
+        "//emulator/libs/file",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_binary_with_manifest(
+    name = "webm_encoder_perf",
+    testonly = True,
+    srcs = ["webm_encoder_perf.cc"],
+    tags = ["benchmark"],
+    deps = [
+        ":video_recorder",
+        "//emulator/libs/file",
+        "@google_benchmark//:benchmark",
+        "@google_benchmark//:benchmark_main",
+    ],
+)
+
 cc_library(
     name = "test-display",
     testonly = True,
@@ -249,6 +275,8 @@ clang_tidy_test(
     targets = [
         ":primary_display",
         ":video_recorder",
+        ":webm_encoder_perf",
+        ":webm_encoder_test",
         ":write_png",
         ":write_png_test",
         ":base",
