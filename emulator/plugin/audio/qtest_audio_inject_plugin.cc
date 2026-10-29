@@ -130,16 +130,22 @@ bool ctrl_get_has_pulled_frames(Object* obj, Error** /*errp*/) {
            (dev->state->frames_pulled.load(std::memory_order_acquire) > 0);
 }
 
-bool ctrl_get_conflict_rejected(Object* /*obj*/, Error** /*errp*/) {
+// True if a second injector reusing the running injector's source_id is rejected.
+bool ctrl_get_duplicate_rejected(Object* obj, Error** /*errp*/) {
+    auto* dev = AUDIO_INJECT_TEST_CTRL_DEV(obj);
+    if (dev->state == nullptr || !dev->state->injector) {
+        return false;
+    }
     AudioStreamConfig cfg{
         .sample_rate_hz = kTestInputSampleRateHz,
         .channels = kTestInputChannels,
         .format = SampleFormat::kS16,
     };
-    QemuAudioInject second([](void* /*dst*/, size_t /*max_frames*/) -> size_t { return 0; }, cfg);
-    absl::Status status = second.Start();
+    QemuAudioInject duplicate([](void* /*dst*/, size_t /*max_frames*/) -> size_t { return 0; }, cfg,
+                              nullptr, nullptr, dev->state->injector->metadata());
+    absl::Status status = duplicate.Start();
     const bool rejected = absl::IsAlreadyExists(status);
-    second.Stop();
+    duplicate.Stop();
     return rejected;
 }
 
@@ -168,7 +174,7 @@ void test_ctrl_class_init(ObjectClass* oc, const void* /*data*/) {
                                    ctrl_set_inject_enabled);
     object_class_property_add_bool(oc, "guest-active", ctrl_get_guest_active, nullptr);
     object_class_property_add_bool(oc, "has-pulled-frames", ctrl_get_has_pulled_frames, nullptr);
-    object_class_property_add_bool(oc, "conflict-rejected", ctrl_get_conflict_rejected, nullptr);
+    object_class_property_add_bool(oc, "duplicate-rejected", ctrl_get_duplicate_rejected, nullptr);
     object_class_property_add_bool(oc, "host-mic-muted", ctrl_get_host_mic_muted, nullptr);
 }
 

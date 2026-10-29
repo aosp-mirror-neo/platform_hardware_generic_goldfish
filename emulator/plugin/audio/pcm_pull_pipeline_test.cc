@@ -14,9 +14,11 @@
 
 #include "goldfish/audio/pcm_pull_pipeline.h"
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -27,7 +29,7 @@
 namespace goldfish::audio {
 namespace {
 
-TEST(PcmPullPipelineTest, DirectPassthroughCopiesExactSamplesAndPadsUnderrun) {
+TEST(PcmPullPipelineTest, MatchingFormatsKeepExactSamplesAndPadUnderrun) {
     PcmPullPipeline pipeline(
             AudioStreamConfig{.sample_rate_hz = 48000, .channels = 1, .format = SampleFormat::kS16},
             GuestAudioConfig{
@@ -315,14 +317,14 @@ TEST(PcmPullPipelineTest, EncodesBigEndianGuestFormatsAndSanitizesNonFiniteFloat
 }
 
 TEST(PcmPullPipelineTest, InputMutedAdvancesSourceWhileOutputtingGuestFormatSilence) {
-    PcmPullPipeline passthrough_pipeline(
+    PcmPullPipeline same_format_pipeline(
             AudioStreamConfig{.sample_rate_hz = 48000, .channels = 1, .format = SampleFormat::kS16},
             GuestAudioConfig{
                 .sample_rate_hz = 48000, .channels = 1, .format = GuestPcmFormat::kS16});
 
     size_t pulled_frames = 0;
     std::vector<int16_t> s16_out(8, 1234);
-    passthrough_pipeline.Pull(
+    same_format_pipeline.Pull(
             s16_out.size(), s16_out.data(),
             [&pulled_frames](void* dst, size_t max_frames) -> size_t {
                 pulled_frames += max_frames;
@@ -444,6 +446,78 @@ TEST(PcmPullPipelineTest, ScaleGuestPcmBufferScalesAndClampsInPlace) {
     EXPECT_FLOAT_EQ(f32_samples[1], 0.0F);
     EXPECT_FLOAT_EQ(f32_samples[2], 1.0F);
     EXPECT_FLOAT_EQ(f32_samples[3], -1.0F);
+}
+
+// Returns a source that fills every requested frame with @p value and counts the frames.
+PcmPullPipeline::PullSourceFn ConstantS16(int16_t value, size_t* pulled) {
+    return [value, pulled](void* dst, size_t max_frames) -> size_t {
+        auto* samples = static_cast<int16_t*>(dst);
+        std::fill(samples, samples + max_frames, value);
+        *pulled += max_frames;
+        return max_frames;
+    };
+}
+
+TEST(PcmPullPipelineTest, MixIntoSumsSourcesOfDifferentFormats) {
+    const GuestAudioConfig guest{
+        .sample_rate_hz = 48000, .channels = 2, .format = GuestPcmFormat::kS16};
+    PcmPullPipeline mono_s16(
+            AudioStreamConfig{.sample_rate_hz = 48000, .channels = 1, .format = SampleFormat::kS16},
+            guest);
+    PcmPullPipeline stereo_f32(
+            AudioStreamConfig{.sample_rate_hz = 48000, .channels = 2, .format = SampleFormat::kF32},
+            guest);
+    constexpr size_t kFrames = 4;
+    std::vector<float> mix(kFrames * 2, 0.0F);
+    size_t pulled = 0;
+
+    mono_s16.MixInto(kFrames, mix.data(), ConstantS16(8192, &pulled));  // 0.25 on both channels.
+    stereo_f32.MixInto(kFrames, mix.data(), [](void* dst, size_t max_frames) -> size_t {
+        auto* samples = static_cast<float*>(dst);
+        for (size_t i = 0; i < max_frames; ++i) {
+            samples[2 * i] = 0.5F;
+            samples[2 * i + 1] = -0.5F;
+        }
+        return max_frames;
+    });
+
+    EXPECT_EQ(pulled, kFrames);
+    for (size_t i = 0; i < kFrames; ++i) {
+        EXPECT_FLOAT_EQ(mix[2 * i], 0.75F);
+        EXPECT_FLOAT_EQ(mix[2 * i + 1], -0.25F);
+    }
+}
+
+TEST(PcmPullPipelineTest, MixIntoAppliesInputGainAndGuestVolumeWithoutClamping) {
+    PcmPullPipeline pipeline(
+            AudioStreamConfig{.sample_rate_hz = 48000, .channels = 1, .format = SampleFormat::kS16},
+            GuestAudioConfig{
+                .sample_rate_hz = 48000, .channels = 2, .format = GuestPcmFormat::kS16});
+    GuestChannelVolume volume{.channels = 2};
+    volume.gain[1] = 0;  // Right channel muted by guest volume.
+    pipeline.SetVolume(volume);
+    std::vector<float> mix = {0.5F, 0.5F};
+    size_t pulled = 0;
+
+    pipeline.MixInto(1, mix.data(), ConstantS16(16384, &pulled), /*input_muted=*/false,
+                     /*input_gain=*/4.0F);
+
+    EXPECT_FLOAT_EQ(mix[0], 2.5F);  // 0.5 + 0.5 * 4: sums are clamped only when encoding.
+    EXPECT_FLOAT_EQ(mix[1], 0.5F);
+}
+
+TEST(PcmPullPipelineTest, MutedMixIntoAdvancesSourceAndResamplerButAddsNothing) {
+    PcmPullPipeline pipeline(
+            AudioStreamConfig{.sample_rate_hz = 48000, .channels = 1, .format = SampleFormat::kS16},
+            GuestAudioConfig{
+                .sample_rate_hz = 16000, .channels = 1, .format = GuestPcmFormat::kS16});
+    std::vector<float> mix(160, 0.125F);
+    size_t pulled = 0;
+
+    pipeline.MixInto(mix.size(), mix.data(), ConstantS16(20000, &pulled), /*input_muted=*/true);
+
+    EXPECT_GT(pulled, 0U);
+    EXPECT_THAT(mix, ::testing::Each(0.125F));
 }
 
 }  // namespace

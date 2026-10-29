@@ -347,7 +347,7 @@ static void test_takeover_resample_and_restore(void) {
     /* Phase 2: Enable injection while guest mic is already open & active. */
     qom_set_bool_prop(ctx.qts, "inject-enabled", true);
     g_assert_true(qom_get_bool_prop(ctx.qts, "guest-active"));
-    g_assert_true(qom_get_bool_prop(ctx.qts, "conflict-rejected"));
+    g_assert_true(qom_get_bool_prop(ctx.qts, "duplicate-rejected"));
 
     bool saw_steady_injected_period = false;
     for (int i = 0; i < 8; ++i) {

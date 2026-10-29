@@ -35,19 +35,22 @@
 #pragma clang diagnostic pop
 
 #include "goldfish/videobridge/codec_factories.h"
-#include "goldfish_audio_device_module.h"
+#include "goldfish/videobridge/goldfish_audio_device_module.h"
 
 namespace goldfish::videobridge {
 
 RtcConnection::RtcConnection() : RtcConnection(NetworkSubstrate{}) {}
 
-RtcConnection::RtcConnection(NetworkSubstrate substrate)
+RtcConnection::RtcConnection(NetworkSubstrate substrate,
+                             ::webrtc::scoped_refptr<GoldfishAudioDeviceModule> audio_device)
         : task_factory_(::webrtc::CreateDefaultTaskQueueFactory())
         , network_thread_(substrate.socket_server ? std::make_unique<webrtc::Thread>(
                                                             std::move(substrate.socket_server))
                                                   : webrtc::Thread::CreateWithSocketServer())
         , worker_thread_(webrtc::Thread::Create())
-        , signaling_thread_(webrtc::Thread::Create()) {
+        , signaling_thread_(webrtc::Thread::Create())
+        , audio_device_(audio_device ? std::move(audio_device)
+                                     : GoldfishAudioDeviceModule::Create()) {
     network_thread_->SetName("Sw-Network", nullptr);
     network_thread_->Start();
     worker_thread_->SetName("Sw-Worker", nullptr);
@@ -67,8 +70,8 @@ RtcConnection::RtcConnection(NetworkSubstrate substrate)
             std::make_unique<::webrtc::BasicPacketSocketFactory>(network_thread_->socketserver());
 
     connection_factory_ = ::webrtc::CreatePeerConnectionFactory(
-            network_thread_.get(), worker_thread_.get(), signaling_thread_.get(),
-            GoldfishAudioDeviceModule::Create(), ::webrtc::CreateBuiltinAudioEncoderFactory(),
+            network_thread_.get(), worker_thread_.get(), signaling_thread_.get(), audio_device_,
+            ::webrtc::CreateBuiltinAudioEncoderFactory(),
             ::webrtc::CreateBuiltinAudioDecoderFactory(), CreatePlatformVideoEncoderFactory(),
             CreatePlatformVideoDecoderFactory(), nullptr /* audio_mixer */,
             nullptr /* audio_processing */);

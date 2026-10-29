@@ -182,17 +182,23 @@ TEST_F(QemuAudioInjectTest, PullsInjectedSamplesAndNotifiesActiveState) {
     mux_->CloseVoice(voice);
 }
 
-TEST_F(QemuAudioInjectTest, SecondInjectorStartReturnsAlreadyExistsUntilFirstStops) {
-    QemuAudioInject first([](void*, size_t n) -> size_t { return n; }, AudioStreamConfig{});
-    QemuAudioInject second([](void*, size_t n) -> size_t { return n; }, AudioStreamConfig{});
+TEST_F(QemuAudioInjectTest, InjectorsRunConcurrentlyButNotUnderTheSameSourceId) {
+    auto pass_through = [](void*, size_t n) -> size_t { return n; };
+    QemuAudioInject first(pass_through, AudioStreamConfig{}, nullptr, nullptr,
+                          MicrophoneSourceMetadata{.source_id = "person"});
+    QemuAudioInject second(pass_through, AudioStreamConfig{}, nullptr, nullptr,
+                           MicrophoneSourceMetadata{.source_id = "agent"});
+    QemuAudioInject duplicate(pass_through, AudioStreamConfig{}, nullptr, nullptr,
+                              MicrophoneSourceMetadata{.source_id = "agent"});
 
     ASSERT_TRUE(first.Start().ok());
-    EXPECT_EQ(second.Start().code(), absl::StatusCode::kAlreadyExists);
-    EXPECT_FALSE(second.IsRunning());
+    ASSERT_TRUE(second.Start().ok());
+    EXPECT_EQ(duplicate.Start().code(), absl::StatusCode::kAlreadyExists);
+    EXPECT_FALSE(duplicate.IsRunning());
 
-    first.Stop();
-    EXPECT_TRUE(second.Start().ok());
-    EXPECT_TRUE(second.IsRunning());
+    second.Stop();
+    EXPECT_TRUE(duplicate.Start().ok());
+    EXPECT_TRUE(first.IsRunning());
 }
 
 TEST_F(QemuAudioInjectTest, SurvivesAudioCleanupBeforeInjectorDestruction) {
@@ -221,8 +227,10 @@ TEST_F(QemuAudioInjectTest, ConcurrentStartAndStopIsThreadSafe) {
                 return n;
             },
             AudioStreamConfig{});
-    QemuAudioInject probe([](void*, size_t n) -> size_t { return n; }, AudioStreamConfig{});
     ScopedVmUnlock unlock;
+    auto registered = [this] {
+        return mux_->GetStateSnapshot().microphone_inputs.size() == 2;  // host + inject.
+    };
 
     // Verify that concurrent Stop() and Start() never leave IsRunning() out of sync with mux
     // ownership.
@@ -248,14 +256,8 @@ TEST_F(QemuAudioInjectTest, ConcurrentStartAndStopIsThreadSafe) {
         stopper.join();
         starter.join();
 
-        if (inject.IsRunning()) {
-            ASSERT_EQ(probe.Start().code(), absl::StatusCode::kAlreadyExists)
-                    << "IsRunning() was true while mux had already unregistered inject on round "
-                    << round;
-        } else {
-            ASSERT_TRUE(probe.Start().ok());
-            probe.Stop();
-        }
+        ASSERT_EQ(inject.IsRunning(), registered())
+                << "IsRunning() disagrees with mux registration on round " << round;
         inject.Stop();
     }
 
@@ -276,12 +278,7 @@ TEST_F(QemuAudioInjectTest, ConcurrentStartAndStopIsThreadSafe) {
     for (auto& thread : threads) {
         thread.join();
     }
-    if (inject.IsRunning()) {
-        EXPECT_EQ(probe.Start().code(), absl::StatusCode::kAlreadyExists);
-    } else {
-        EXPECT_TRUE(probe.Start().ok());
-        probe.Stop();
-    }
+    EXPECT_EQ(inject.IsRunning(), registered());
     inject.Stop();
     EXPECT_FALSE(inject.IsRunning());
 }

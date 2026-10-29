@@ -74,6 +74,9 @@ using ::goldfish::audio::GuestAudioConfig;
 using ::goldfish::audio::GuestChannelVolume;
 using ::goldfish::audio::GuestPcmFormat;
 using ::goldfish::audio::HostAudioInputInterface;
+using ::goldfish::audio::kMaxConcurrentMicrophoneStreams;
+using ::goldfish::audio::MicrophoneInputKind;
+using ::goldfish::audio::MicrophoneSourceMetadata;
 using ::goldfish::audio::MuxVoiceHandle;
 using ::goldfish::audio::QemuAudioInject;
 using ::goldfish::audio::RegisterAudioInputMux;
@@ -265,6 +268,9 @@ class VmLockedMux {
     void Shutdown() {
         android::goldfish::RecursiveScopedVmLock lock;
         (*mux_)->Shutdown();
+    }
+    ::goldfish::audio::AudioInputStateSnapshot GetStateSnapshot() const {
+        return (*mux_)->GetStateSnapshot();
     }
 
   private:
@@ -1114,7 +1120,7 @@ TEST_F(AudioServiceTest, StreamMicrophoneAudioReleasesMicrophoneBeforeFinishing)
     guest_mux_.CloseVoice(voice);
 }
 
-TEST_F(AudioServiceTest, ConcurrentMicrophoneInjectionReturnsAlreadyExists) {
+TEST_F(AudioServiceTest, ConcurrentMicrophoneInjectionsAreMixedUpToTheLimit) {
     InstallDefaultAudioInputMux();
 
     auto opts = MakeDefaultOptions();
@@ -1126,55 +1132,61 @@ TEST_F(AudioServiceTest, ConcurrentMicrophoneInjectionReturnsAlreadyExists) {
     chunk.set_channel_count(1);
     chunk.set_format(SampleFormat::SAMPLE_FORMAT_PCM16_BIT);
     chunk.set_pcm_data(MakePcm16Bytes(std::vector<int16_t>(480, 512)));
+    auto pass_through = [](void* /*dst*/, size_t max_frames) { return max_frames; };
+    auto input_count = [this] { return guest_mux_.GetStateSnapshot().microphone_inputs.size(); };
 
-    // Hold an external QemuAudioInject session (e.g., WebRTC inbound audio track).
-    QemuAudioInject external_injector([](void* /*dst*/, size_t max_frames) { return max_frames; },
-                                      AudioStreamConfig{});
-    ASSERT_TRUE(external_injector.Start().ok());
-
-    // Both InjectAudioClip and StreamMicrophoneAudio must fail with ALREADY_EXISTS.
+    // A person's WebRTC microphone holds one input; an agent's clip and stream mix alongside it.
+    QemuAudioInject person(pass_through, AudioStreamConfig{}, nullptr, nullptr,
+                           MicrophoneSourceMetadata{.source_id = "测试_🚀_é",
+                                                    .kind = MicrophoneInputKind::kWebRtc});
+    ASSERT_TRUE(person.Start().ok());
     {
         ServerContext clip_context;
         InjectAudioClipResponse clip_reply;
         Status clip_status = service_->InjectAudioClip(&clip_context, &chunk, &clip_reply);
+        EXPECT_TRUE(clip_status.ok()) << clip_status.error_message();
+    }
+    auto* agent_stream = service_->CreateMicrophoneAudioReader<FakeReadReactor<AudioChunk>>();
+    agent_stream->DeliverMessage(chunk);
+    ASSERT_FALSE(agent_stream->finish_called);
+    EXPECT_EQ(input_count(), 3U);  // host, person, agent stream.
+
+    // Reusing a live source_id is rejected.
+    {
+        AudioChunk duplicate = chunk;
+        duplicate.set_source_id("测试_🚀_é");
+        ServerContext clip_context;
+        InjectAudioClipResponse clip_reply;
+        Status clip_status = service_->InjectAudioClip(&clip_context, &duplicate, &clip_reply);
         EXPECT_EQ(clip_status.error_code(), StatusCode::ALREADY_EXISTS);
+    }
+
+    // Once every slot is taken, one more injection is rejected.
+    std::vector<std::unique_ptr<QemuAudioInject>> fillers;
+    while (input_count() < 1 + static_cast<size_t>(kMaxConcurrentMicrophoneStreams)) {
+        fillers.push_back(std::make_unique<QemuAudioInject>(pass_through, AudioStreamConfig{}));
+        ASSERT_TRUE(fillers.back()->Start().ok());
+    }
+    {
+        ServerContext clip_context;
+        InjectAudioClipResponse clip_reply;
+        Status clip_status = service_->InjectAudioClip(&clip_context, &chunk, &clip_reply);
+        EXPECT_EQ(clip_status.error_code(), StatusCode::RESOURCE_EXHAUSTED);
         EXPECT_TRUE(absl::StrContains(clip_status.error_message(), "WebRTC"));
     }
-    {
-        ClientContext stream_context;
-        StreamMicrophoneAudioResponse stream_reply;
-        auto second_writer = stub_->StreamMicrophoneAudio(&stream_context, &stream_reply);
-        second_writer->WritesDone();
-        Status stream_status = second_writer->Finish();
-        EXPECT_EQ(stream_status.error_code(), StatusCode::ALREADY_EXISTS);
-    }
 
-    // Releasing the external injector immediately allows StreamMicrophoneAudio, while a concurrent
-    // second gRPC caller is rejected with ALREADY_EXISTS until the first stream closes.
-    external_injector.Stop();
-
-    auto* active_reader = service_->CreateMicrophoneAudioReader<FakeReadReactor<AudioChunk>>();
-    ASSERT_FALSE(active_reader->finish_called);
-    active_reader->DeliverMessage(chunk);
-    ASSERT_FALSE(active_reader->finish_called);
-
+    // Client half-close (OnReadDone(false)) must release the stream's input BEFORE Finish(OK)
+    // unblocks the client, even while gRPC's callback executor has not yet invoked OnDone().
+    const size_t inputs_before_close = input_count();
+    agent_stream->OnReadDone(false);
+    EXPECT_EQ(input_count(), inputs_before_close - 1);
     {
         ServerContext clip_context;
         InjectAudioClipResponse clip_reply;
         Status clip_status = service_->InjectAudioClip(&clip_context, &chunk, &clip_reply);
-        EXPECT_EQ(clip_status.error_code(), StatusCode::ALREADY_EXISTS);
+        EXPECT_TRUE(clip_status.ok()) << clip_status.error_message();
     }
-
-    // Client half-close (OnReadDone(false)) must release microphone ownership BEFORE Finish(OK)
-    // unblocks the client, even while gRPC's callback executor has not yet invoked OnDone().
-    active_reader->OnReadDone(false);
-
-    ServerContext clip_context;
-    InjectAudioClipResponse clip_reply;
-    Status clip_status = service_->InjectAudioClip(&clip_context, &chunk, &clip_reply);
-    EXPECT_TRUE(clip_status.ok()) << clip_status.error_message();
-
-    active_reader->OnDone();
+    agent_stream->OnDone();
 }
 
 TEST_F(AudioServiceTest, ConcurrentMicrophoneStreamingAndGuestPullAreRaceFree) {
@@ -1523,6 +1535,36 @@ TEST_F(AudioServiceTest, AudioStateEnforcesPreconditionsReadOnlyAndValidationErr
         writer->WritesDone();
         EXPECT_EQ(writer->Finish().error_code(), StatusCode::INVALID_ARGUMENT);
     }
+}
+
+// "webrtc" names the microphone WebRTC clients send; an agent must not impersonate it.
+TEST_F(AudioServiceTest, InjectionCannotTakeTheWebRtcSourceId) {
+    InstallDefaultAudioInputMux();
+    AudioChunk chunk;
+    chunk.set_sample_rate_hz(16000);
+    chunk.set_channel_count(1);
+    chunk.set_format(SampleFormat::SAMPLE_FORMAT_PCM16_BIT);
+    chunk.set_source_id("webrtc");
+    chunk.set_pcm_data(MakePcm16Bytes({100, -100}));
+    {
+        ServerContext clip_ctx;
+        InjectAudioClipResponse clip_reply;
+        Status status = service_->InjectAudioClip(&clip_ctx, &chunk, &clip_reply);
+        EXPECT_EQ(status.error_code(), StatusCode::INVALID_ARGUMENT);
+        EXPECT_TRUE(absl::StrContains(status.error_message(), "'webrtc' is reserved"))
+                << status.error_message();
+    }
+    {
+        ClientContext stream_ctx;
+        stream_ctx.AddMetadata("x-client-id", "webrtc");
+        StreamMicrophoneAudioResponse stream_reply;
+        auto writer = stub_->StreamMicrophoneAudio(&stream_ctx, &stream_reply);
+        chunk.clear_source_id();
+        writer->Write(chunk);
+        writer->WritesDone();
+        EXPECT_EQ(writer->Finish().error_code(), StatusCode::INVALID_ARGUMENT);
+    }
+    EXPECT_EQ(guest_mux_.GetStateSnapshot().microphone_inputs.size(), 1U);
 }
 
 TEST_F(AudioServiceTest, DisablingHostMicrophoneFeedsPacedSilenceWhenIdleAndAllowsClipInjection) {

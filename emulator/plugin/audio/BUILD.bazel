@@ -69,6 +69,7 @@ cc_test(
         ":pcm_format",
         ":pcm_pull_pipeline",
         "//emulator/libs/test:googletest_main",
+        "@googletest//:gtest",
     ],
 )
 
@@ -111,8 +112,10 @@ cc_test(
         "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
+        "@googletest//:gtest",
     ],
 )
 
@@ -179,6 +182,43 @@ cc_test(
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_library(
+    name = "webrtc_microphone",
+    srcs = ["webrtc_microphone.cc"],
+    hdrs = ["include/goldfish/audio/webrtc_microphone.h"],
+    includes = ["include"],
+    deps = [
+        ":audio_input_mux",
+        ":pcm_format",
+        ":qemu_audio_inject",
+        "//emulator/libs/async:async_api",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+    ],
+)
+
+cc_test(
+    name = "webrtc_microphone_test",
+    size = "small",
+    srcs = ["webrtc_microphone_test.cc"],
+    deps = [
+        ":audio_input_mux",
+        ":pcm_format",
+        ":qemu_audio_inject",
+        ":test_bql",
+        ":test_qemu_audio_stub",
+        ":webrtc_microphone",
+        "//emulator/libs/async:async_testing",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/vminterface:vm_lock",
+        "@abseil-cpp//absl/base:log_severity",
+        "@abseil-cpp//absl/log:scoped_mock_log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time",
+        "@googletest//:gtest",
     ],
 )
 

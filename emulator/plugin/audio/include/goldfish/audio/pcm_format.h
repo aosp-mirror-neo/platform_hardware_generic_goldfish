@@ -32,6 +32,13 @@ inline constexpr uint32_t kMaxAudioChannels = 16;
 inline constexpr std::string_view kHostMicrophoneSourceId = "host";
 
 /**
+ * Reserved mixer channel identifier for the microphone audio WebRTC clients send. Only an
+ * injector of kind `MicrophoneInputKind::kWebRtc` may use it, so clients such as a gRPC agent
+ * cannot impersonate a browser microphone.
+ */
+inline constexpr std::string_view kWebRtcMicrophoneSourceId = "webrtc";
+
+/**
  * Minimum and maximum allowed linear gain multiplier for a virtual microphone input channel.
  */
 inline constexpr float kMinMicrophoneInputGain = 0.0F;
@@ -41,7 +48,7 @@ inline constexpr float kMaxMicrophoneInputGain = 4.0F;
  * Maximum number of concurrent non-host microphone streams (`QemuAudioInject`) supported by the
  * current `AudioInputMux` implementation (`1` until multi-source summing lands).
  */
-inline constexpr int32_t kMaxConcurrentMicrophoneStreams = 1;
+inline constexpr int32_t kMaxConcurrentMicrophoneStreams = 4;
 
 /**
  * Origin classification for a virtual microphone mix-bus input channel.
@@ -59,7 +66,8 @@ enum class MicrophoneInputKind : uint8_t {
  */
 struct MicrophoneSourceMetadata {
     /// Mixer channel identifier. When empty, `AudioInputMux` assigns `"stream-<id>"`.
-    /// Passing `"host"` is rejected with `absl::InvalidArgumentError`.
+    /// Passing `"host"`, or `"webrtc"` with a kind other than `kWebRtc`, is rejected with
+    /// `absl::InvalidArgumentError`.
     std::string source_id;
     MicrophoneInputKind kind = MicrophoneInputKind::kUnspecified;
 
@@ -188,6 +196,13 @@ void FillGuestSilence(GuestPcmFormat format, bool big_endian, void* dst, size_t 
  * multi-byte values when @p swap_endian is true.
  */
 void EncodeGuestSample(GuestPcmFormat format, bool swap_endian, double sample, uint8_t* dst);
+
+/**
+ * Clamps and encodes @p sample_count normalized interleaved samples into @p dst in the format and
+ * endianness of @p config. @p dst holds `sample_count * BytesPerGuestSample(config.format)` bytes.
+ */
+void EncodeGuestSamples(const GuestAudioConfig& config, const float* samples, size_t sample_count,
+                        uint8_t* dst);
 
 /**
  * Scales @p byte_count PCM bytes in @p buffer in-place by @p gain with saturation clamping,

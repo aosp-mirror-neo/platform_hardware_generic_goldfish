@@ -240,7 +240,10 @@ cc_binary_with_manifest(
 cc_library(
     name = "in_process_rtc_service",
     srcs = ["in_process_rtc_service.cc"],
-    hdrs = ["include/android/emulation/control/in_process_rtc_service.h"],
+    hdrs = [
+        "include/android/emulation/control/in_process_media_provider.h",
+        "include/android/emulation/control/in_process_rtc_service.h",
+    ],
     copts = select({
         "@platforms//os:windows": ["/GR-"],
         "//conditions:default": ["-fno-rtti"],
@@ -248,6 +251,7 @@ cc_library(
     includes = ["include"],
     deps = [
         "//emulator/plugin/audio:qemu_audio_source",
+        "//emulator/plugin/audio:webrtc_microphone",
         "//emulator/plugin/avd:avd_properties",
         "//emulator/plugin/avd:avd_universe",
         "//emulator/plugin/display:base",
@@ -301,8 +305,11 @@ cc_test(
     }),
     deps = [
         ":in_process_rtc_service",
+        "//emulator/libs/async:async_testing",
         "//emulator/libs/async:libuv_event_loop",
         "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/audio:audio_input_mux",
+        "//emulator/plugin/audio:test_bql",
         "//emulator/plugin/audio:test_qemu_audio_stub",
         "//emulator/plugin/avd:avd_info",
         "//emulator/plugin/avd:avd_properties",
@@ -312,7 +319,10 @@ cc_test(
         "//emulator/plugin/grpc/input:input_dispatcher_interface",
         "//emulator/plugin/grpc/input:recording_input_dispatcher",
         "//emulator/plugin/grpc/keyboard:test_qemu_input_stub",
+        "//emulator/plugin/vminterface:vm_lock",
+        "//emulator/videobridge:videobridge_core",
         "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time",
         "@aemu//protos/services_v2:input_service_cc_proto",
         "@googletest//:gtest",
         "@grpc//:grpc++",

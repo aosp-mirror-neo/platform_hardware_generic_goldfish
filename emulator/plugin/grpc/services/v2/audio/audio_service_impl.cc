@@ -254,8 +254,16 @@ Status TranslateInjectorStartStatus(const absl::Status& status, absl::string_vie
                 StatusCode::ALREADY_EXISTS,
                 absl::StrFormat(
                         "Failed to start microphone injection in %s (%u Hz, %u channel(s)): %s "
-                        "Close or wait for the active StreamMicrophoneAudio, InjectAudioClip, or "
-                        "WebRTC microphone session before retrying.",
+                        "Set a distinct AudioChunk.source_id (or x-client-id), or close the "
+                        "stream that uses it.",
+                        operation, config.sample_rate_hz, config.channels, status.message()));
+    case absl::StatusCode::kResourceExhausted:
+        return Status(
+                StatusCode::RESOURCE_EXHAUSTED,
+                absl::StrFormat(
+                        "Failed to start microphone injection in %s (%u Hz, %u channel(s)): %s "
+                        "Close a StreamMicrophoneAudio, InjectAudioClip, or WebRTC microphone "
+                        "session before retrying.",
                         operation, config.sample_rate_hz, config.channels, status.message()));
     default:
         return AbslStatusToGrpcStatus(status);

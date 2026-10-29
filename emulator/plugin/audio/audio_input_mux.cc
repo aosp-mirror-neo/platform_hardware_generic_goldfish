@@ -45,6 +45,9 @@ namespace {
 // Upper bound (16 MiB) when advertising paced bytes through QEMU's signed `int avail` callback.
 constexpr size_t kMaxAdvertisedAvailBytes = 1U << 24;
 
+// Frames mixed per pass, bounding each voice's float mix buffer (10 ms at 48 kHz).
+constexpr size_t kMixChunkFrames = 480;
+
 void AssertVmLockHeld() {
     DCHECK(android::goldfish::VmLock::Get()->IsLockedBySelf())
             << "AudioInputMux mutations must hold the VM lock (QEMU BQL). Wrap the call in "
@@ -55,6 +58,17 @@ absl::Status MuxShutdownError(std::string_view action) {
     return absl::FailedPreconditionError(absl::StrFormat(
             "Failed to %s: GoldfishAudioBackend has permanently shut down. Restart the emulator "
             "or invoke audio APIs only while the VM is running.",
+            action));
+}
+
+absl::Status ValidateWebRtcReservation(std::string_view action, std::string_view source_id,
+                                       MicrophoneInputKind kind) {
+    if (source_id != kWebRtcMicrophoneSourceId || kind == MicrophoneInputKind::kWebRtc) {
+        return absl::OkStatus();
+    }
+    return absl::InvalidArgumentError(absl::StrFormat(
+            "Failed to %s: source_id 'webrtc' is reserved for the microphone audio WebRTC "
+            "clients send. Specify a distinct source_id or leave it empty.",
             action));
 }
 
@@ -106,9 +120,11 @@ struct MuxVoiceHandle {
     HostAudioInputInterface::HostVoiceHandle host_voice = nullptr;  // null: no host mic.
     bool guest_active = false;
     bool host_voice_active = false;
-    bool paced = false;  // Served by the pacer (injector or silence) instead of the host mic.
+    bool paced = false;  // Served by the pacer (injectors or silence) instead of the host mic.
     VirtualAudioPacer pacer;
-    std::unique_ptr<PcmPullPipeline> pipeline;  // Non-null while an injector is registered.
+    // One converter per registered injector, keyed by its owner.
+    absl::flat_hash_map<const void*, std::unique_ptr<PcmPullPipeline>> pipelines;
+    std::vector<float> mix;  // Interleaved sum of the injectors, kMixChunkFrames long.
 };
 
 struct AudioInputMux::ObserverEntry {
@@ -158,7 +174,7 @@ MuxVoiceHandle* AudioInputMux::OpenVoice(MuxVoiceHandle* existing, std::string_v
     voice->pacer.Configure(guest_config.sample_rate_hz,
                            static_cast<uint32_t>(GuestBytesPerFrame(guest_config)),
                            host_->NowVirtualTime());
-    RebuildPipeline(*voice);
+    RebuildPipelines(*voice);
     Commit(/*reset_paced_voices=*/existing != nullptr);
     return voice;
 }
@@ -200,8 +216,8 @@ void AudioInputMux::SetVoiceVolume(MuxVoiceHandle* voice, const GuestChannelVolu
         return;
     }
     found->volume = volume;
-    if (found->pipeline) {
-        found->pipeline->SetVolume(volume);
+    for (auto& [owner, pipeline] : found->pipelines) {
+        pipeline->SetVolume(volume);
     }
     if (found->host_voice != nullptr) {
         host_->SetHostVoiceVolume(found->host_voice, volume);
@@ -233,14 +249,31 @@ size_t AudioInputMux::ReadVoice(MuxVoiceHandle* voice, void* dst, size_t byte_co
         return 0;
     }
     found->pacer.Consume(frames * bytes_per_frame);
-    if (found->pipeline) {
-        const bool silenced = microphone_muted_ || active_injector_->input.muted;
-        found->pipeline->Pull(frames, dst, active_injector_->read_cb, silenced,
-                              active_injector_->input.gain);
-    } else {
+    if (injectors_.empty()) {
         FillGuestSilence(cfg.format, cfg.big_endian, dst, frames * bytes_per_frame);
+    } else {
+        MixPacedFrames(*found, frames, static_cast<uint8_t*>(dst));
     }
     return frames * bytes_per_frame;
+}
+
+void AudioInputMux::MixPacedFrames(MuxVoiceHandle& voice, size_t frames, uint8_t* dst) {
+    const GuestAudioConfig& cfg = voice.config;
+    const size_t bytes_per_frame = GuestBytesPerFrame(cfg);
+    voice.mix.resize(kMixChunkFrames * cfg.channels);
+    // ReadCallbacks must not register or unregister injectors, so injectors_ is stable here.
+    for (size_t done = 0; done < frames;) {
+        const size_t chunk = std::min(frames - done, kMixChunkFrames);
+        const size_t samples = chunk * cfg.channels;
+        std::fill_n(voice.mix.begin(), samples, 0.0F);
+        for (const Injector& injector : injectors_) {
+            voice.pipelines.at(injector.owner)
+                    ->MixInto(chunk, voice.mix.data(), injector.read_cb,
+                              microphone_muted_ || injector.input.muted, injector.input.gain);
+        }
+        EncodeGuestSamples(cfg, voice.mix.data(), samples, dst + done * bytes_per_frame);
+        done += chunk;
+    }
 }
 
 void AudioInputMux::OnTimerTick() {
@@ -308,7 +341,7 @@ void AudioInputMux::ShutdownInternal() {
     }
     host_ = nullptr;
     voices_.clear();
-    active_injector_.reset();
+    injectors_.clear();
     absl::MutexLock lock(snapshot_mutex_);
     published_ = AudioInputStateSnapshot{.microphone_inputs = {host_input_}};
 }
@@ -324,35 +357,48 @@ absl::StatusOr<std::string> AudioInputMux::RegisterInjector(const void* owner,
         !valid.ok()) {
         return valid;
     }
+    if (absl::Status reserved = ValidateWebRtcReservation("start microphone injection",
+                                                          metadata.source_id, metadata.kind);
+        !reserved.ok()) {
+        return reserved;
+    }
     if (shutdown_) {
         return MuxShutdownError("start microphone injection");
     }
-    if (active_injector_.has_value()) {
-        if (active_injector_->owner == owner) {
-            return active_injector_->input.source_id;
-        }
+    if (const Injector* existing = FindInjector(owner)) {
+        return existing->input.source_id;
+    }
+    if (!metadata.source_id.empty() && FindInput(metadata.source_id) != nullptr) {
         return absl::AlreadyExistsError(absl::StrFormat(
-                "Failed to start microphone injection for source '%s': active microphone input "
-                "'%s' already owns the guest microphone (limit=%d concurrent stream). Stop the "
-                "active injector before starting a new one.",
+                "Failed to start microphone injection: source_id '%s' is already in use by "
+                "another microphone input. Use a distinct source_id, or stop that input first.",
+                metadata.source_id));
+    }
+    if (injectors_.size() >= static_cast<size_t>(kMaxConcurrentMicrophoneStreams)) {
+        return absl::ResourceExhaustedError(absl::StrFormat(
+                "Failed to start microphone injection for source '%s': %d microphone inputs are "
+                "already mixed, the most this device supports. Stop one of them first (see "
+                "AudioState.microphone_inputs).",
                 metadata.source_id.empty() ? "<auto>" : metadata.source_id,
-                active_injector_->input.source_id, kMaxConcurrentMicrophoneStreams));
+                kMaxConcurrentMicrophoneStreams));
     }
 
-    std::string source_id = metadata.source_id.empty()
-                                    ? absl::StrFormat("stream-%d", next_stream_id_++)
-                                    : std::move(metadata.source_id);
-    active_injector_ = Injector{
+    std::string source_id = std::move(metadata.source_id);
+    while (source_id.empty() || FindInput(source_id) != nullptr) {
+        source_id = absl::StrFormat("stream-%d", next_stream_id_++);
+    }
+    const Injector& injector = injectors_.emplace_back(Injector{
         .owner = owner,
         .config = config,
         .read_cb = std::move(read_cb),
         .active_cb = std::move(active_cb),
         .input = {.source_id = source_id, .kind = metadata.kind},
-    };
+    });
     for (const auto& voice : voices_) {
-        RebuildPipeline(*voice);
+        BuildPipeline(*voice, injector);
     }
-    Commit(/*reset_paced_voices=*/true);
+    // The first injector takes over paced voices from silence; later ones join the running mix.
+    Commit(/*reset_paced_voices=*/injectors_.size() == 1);
     return source_id;
 }
 
@@ -367,19 +413,35 @@ absl::Status AudioInputMux::ReconfigureInjector(const void* owner, const AudioSt
     if (shutdown_) {
         return MuxShutdownError("reconfigure microphone injection");
     }
-    if (!active_injector_.has_value() || active_injector_->owner != owner) {
+    Injector* injector = FindInjector(owner);
+    if (injector == nullptr) {
         return absl::FailedPreconditionError(
-                "Failed to reconfigure microphone injection: the caller is not the active "
+                "Failed to reconfigure microphone injection: the caller is not a registered "
                 "microphone injector. Call Start() before Reconfigure().");
     }
-
-    if (new_source_id.has_value() && !new_source_id->empty()) {
-        active_injector_->input.source_id = std::string(*new_source_id);
+    const bool renaming = new_source_id.has_value() && !new_source_id->empty() &&
+                          *new_source_id != injector->input.source_id;
+    if (renaming) {
+        if (absl::Status reserved = ValidateWebRtcReservation("rename microphone injection",
+                                                              *new_source_id, injector->input.kind);
+            !reserved.ok()) {
+            return reserved;
+        }
     }
-    if (active_injector_->config != config) {
-        active_injector_->config = config;
+    if (renaming && FindInput(*new_source_id) != nullptr) {
+        return absl::AlreadyExistsError(absl::StrFormat(
+                "Failed to rename microphone input '%s' to '%s': another microphone input already "
+                "uses that source_id. Choose a distinct source_id.",
+                injector->input.source_id, *new_source_id));
+    }
+
+    if (renaming) {
+        injector->input.source_id = std::string(*new_source_id);
+    }
+    if (injector->config != config) {
+        injector->config = config;
         for (const auto& voice : voices_) {
-            RebuildPipeline(*voice);
+            BuildPipeline(*voice, *injector);
         }
     }
     Commit(/*reset_paced_voices=*/false);
@@ -388,14 +450,17 @@ absl::Status AudioInputMux::ReconfigureInjector(const void* owner, const AudioSt
 
 void AudioInputMux::UnregisterInjector(const void* owner) {
     AssertVmLockHeld();
-    if (!active_injector_.has_value() || active_injector_->owner != owner) {
+    auto it = std::find_if(injectors_.begin(), injectors_.end(),
+                           [owner](const Injector& injector) { return injector.owner == owner; });
+    if (it == injectors_.end()) {
         return;
     }
-    active_injector_.reset();
+    injectors_.erase(it);
     for (const auto& voice : voices_) {
-        voice->pipeline.reset();
+        voice->pipelines.erase(owner);
     }
-    Commit(/*reset_paced_voices=*/true);
+    // Only the last injector leaving hands paced voices back to the host or to silence.
+    Commit(/*reset_paced_voices=*/injectors_.empty());
 }
 
 absl::StatusOr<AudioInputStateSnapshot> AudioInputMux::UpdateState(
@@ -485,11 +550,25 @@ bool AudioInputMux::AnyGuestVoiceActive() const {
                        [](const auto& voice) { return voice->guest_active; });
 }
 
-void AudioInputMux::RebuildPipeline(MuxVoiceHandle& voice) const {
-    voice.pipeline.reset();
-    if (active_injector_.has_value()) {
-        voice.pipeline = std::make_unique<PcmPullPipeline>(active_injector_->config, voice.config);
-        voice.pipeline->SetVolume(voice.volume);
+AudioInputMux::Injector* AudioInputMux::FindInjector(const void* owner) {
+    for (Injector& injector : injectors_) {
+        if (injector.owner == owner) {
+            return &injector;
+        }
+    }
+    return nullptr;
+}
+
+void AudioInputMux::BuildPipeline(MuxVoiceHandle& voice, const Injector& injector) const {
+    auto pipeline = std::make_unique<PcmPullPipeline>(injector.config, voice.config);
+    pipeline->SetVolume(voice.volume);
+    voice.pipelines[injector.owner] = std::move(pipeline);
+}
+
+void AudioInputMux::RebuildPipelines(MuxVoiceHandle& voice) const {
+    voice.pipelines.clear();
+    for (const Injector& injector : injectors_) {
+        BuildPipeline(voice, injector);
     }
 }
 
@@ -497,8 +576,10 @@ MicrophoneInputInfo* AudioInputMux::FindInput(std::string_view source_id) {
     if (source_id == host_input_.source_id) {
         return &host_input_;
     }
-    if (active_injector_.has_value() && source_id == active_injector_->input.source_id) {
-        return &active_injector_->input;
+    for (Injector& injector : injectors_) {
+        if (source_id == injector.input.source_id) {
+            return &injector.input;
+        }
     }
     return nullptr;
 }
@@ -512,7 +593,7 @@ void AudioInputMux::Commit(bool reset_paced_voices) {
 }
 
 void AudioInputMux::ApplyRouting(bool reset_paced_voices) {
-    const bool use_host_mic = !microphone_muted_ && !host_input_.muted && !active_injector_;
+    const bool use_host_mic = !microphone_muted_ && !host_input_.muted && injectors_.empty();
     const absl::Duration now = host_->NowVirtualTime();
 
     // Collect host changes first: the host may call back into the mux and change voices_.
@@ -528,8 +609,8 @@ void AudioInputMux::ApplyRouting(bool reset_paced_voices) {
         // Entering paced mode starts from a clean budget and an empty resampler delay line.
         if (want_paced && (!voice->paced || reset_paced_voices)) {
             voice->pacer.Reset(now);
-            if (voice->pipeline) {
-                voice->pipeline->Reset();
+            for (auto& [owner, pipeline] : voice->pipelines) {
+                pipeline->Reset();
             }
         }
         voice->paced = want_paced;
@@ -548,16 +629,23 @@ void AudioInputMux::ApplyRouting(bool reset_paced_voices) {
 }
 
 void AudioInputMux::ReportGuestActivity() {
-    if (!active_injector_.has_value() || !active_injector_->active_cb) {
-        return;
-    }
     const bool guest_active = AnyGuestVoiceActive();
-    if (active_injector_->reported_guest_active == guest_active) {
-        return;
+    // Collect owners first: a callback may unregister injectors, including ones not yet told.
+    std::vector<const void*> pending;
+    for (const Injector& injector : injectors_) {
+        if (injector.active_cb && injector.reported_guest_active != guest_active) {
+            pending.push_back(injector.owner);
+        }
     }
-    active_injector_->reported_guest_active = guest_active;
-    const ActiveCallback cb = active_injector_->active_cb;  // Copy: cb may unregister.
-    cb(guest_active);
+    for (const void* owner : pending) {
+        Injector* injector = FindInjector(owner);
+        if (injector == nullptr || injector->reported_guest_active == guest_active) {
+            continue;
+        }
+        injector->reported_guest_active = guest_active;
+        const ActiveCallback cb = injector->active_cb;  // Copy: cb may unregister.
+        cb(guest_active);
+    }
 }
 
 void AudioInputMux::PublishState() {
@@ -566,8 +654,8 @@ void AudioInputMux::PublishState() {
         .microphone_in_use_by_guest = AnyGuestVoiceActive(),
         .microphone_inputs = {host_input_},
     };
-    if (active_injector_.has_value()) {
-        snapshot.microphone_inputs.push_back(active_injector_->input);
+    for (const Injector& injector : injectors_) {
+        snapshot.microphone_inputs.push_back(injector.input);
     }
     {
         absl::MutexLock lock(snapshot_mutex_);

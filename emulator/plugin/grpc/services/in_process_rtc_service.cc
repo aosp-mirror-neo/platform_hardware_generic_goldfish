@@ -18,7 +18,9 @@
 
 #include "android/emulation/control/in_process_rtc_service.h"
 
+#include <cstdint>
 #include <memory>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -27,6 +29,7 @@
 #include "absl/status/status.h"
 
 #include "android/emulation/control/event_sender.h"
+#include "android/emulation/control/in_process_media_provider.h"
 #include "api/make_ref_counted.h"
 #include "emulator/plugin/grpc/input/dispatcher_session.h"
 #include "emulator/plugin/grpc/input/input_dispatcher_interface.h"
@@ -34,9 +37,11 @@
 #include "emulator/plugin/grpc/services/v2/environment/sensors_service_impl.h"
 #include "emulator/plugin/grpc/services/v2/webrtc/rtc_service_impl.h"
 #include "goldfish/audio/qemu_audio_source.h"
+#include "goldfish/audio/webrtc_microphone.h"
 #include "goldfish/avd/avd_properties.h"
 #include "goldfish/avd/avd_universe.h"
 #include "goldfish/display/abstract_multi_display.h"
+#include "goldfish/videobridge/goldfish_audio_device_module.h"
 #include "goldfish/videobridge/in_process_input_sender.h"
 #include "goldfish/videobridge/in_process_video_source.h"
 #include "goldfish/videobridge/media_track_provider.h"
@@ -53,12 +58,14 @@ QemuConsole* qemu_console_lookup_default(void);
 namespace android::emulation::control {
 
 using ::goldfish::audio::QemuAudioSource;
+using ::goldfish::audio::WebRtcMicrophone;
 using ::goldfish::avd::AvdUniverse;
 using ::goldfish::display::IMultiDisplay;
 using ::goldfish::grpc::v2::DispatcherSession;
 using ::goldfish::grpc::v2::IInputDispatcher;
 using ::goldfish::grpc::v2::V2InputValidator;
 using ::goldfish::videobridge::DataChannelLabel;
+using ::goldfish::videobridge::GoldfishAudioDeviceModule;
 using ::goldfish::videobridge::InProcessInputSender;
 using ::goldfish::videobridge::InProcessVideoSource;
 using ::goldfish::videobridge::InputEvent;
@@ -133,6 +140,36 @@ std::unique_ptr<InputSender> CreateV2InputSender(IMultiDisplay& multidisplay,
             });
 }
 
+static_assert(WebRtcMicrophone::kConfig.sample_rate_hz ==
+                      GoldfishAudioDeviceModule::kPlayoutSampleRateHz &&
+              WebRtcMicrophone::kConfig.channels == GoldfishAudioDeviceModule::kPlayoutChannels);
+
+// Streams the display and speaker to each participant, and plays what participants send, such
+// as a browser microphone, into the guest microphone.
+class InProcessMediaProvider : public MediaTrackProvider {
+  public:
+    InProcessMediaProvider(::webrtc::scoped_refptr<InProcessVideoSource> video_source,
+                           ::webrtc::scoped_refptr<QemuAudioSource> audio_source,
+                           ::webrtc::scoped_refptr<GoldfishAudioDeviceModule> audio_device,
+                           std::shared_ptr<WebRtcMicrophone> microphone)
+            : MediaTrackProvider(std::move(video_source), std::move(audio_source))
+            , audio_device_(std::move(audio_device))
+            , microphone_(std::move(microphone)) {
+        // WebRTC plays out while a peer offers to send audio, so the guest microphone gets a
+        // "webrtc" input for as long as a microphone-capable session is connected.
+        audio_device_->SetPlayoutListener([microphone = microphone_.get()](bool playing) {
+            microphone->SetPlaying(playing);
+        });
+    }
+
+    // The module may outlive this provider; once this returns, it no longer calls microphone_.
+    ~InProcessMediaProvider() override { audio_device_->SetPlayoutListener(nullptr); }
+
+  private:
+    ::webrtc::scoped_refptr<GoldfishAudioDeviceModule> audio_device_;
+    std::shared_ptr<WebRtcMicrophone> microphone_;
+};
+
 }  // namespace
 
 InputSenderFactory CreateInProcessInputSenderFactory(
@@ -171,10 +208,9 @@ InputSenderFactory CreateInProcessInputSenderFactory(
     };
 }
 
-static std::shared_ptr<Switchboard> CreateInProcessSwitchboard(AvdUniverse& avd_universe,
-                                                               uint32_t display_id,
-                                                               uint32_t console_index,
-                                                               AudioBackend* audio_backend) {
+std::shared_ptr<::goldfish::videobridge::MediaProvider> CreateInProcessMediaProvider(
+        AvdUniverse& avd_universe, uint32_t display_id, AudioBackend* audio_backend,
+        ::webrtc::scoped_refptr<GoldfishAudioDeviceModule> audio_device) {
     auto video_source = ::webrtc::make_ref_counted<InProcessVideoSource>(
             avd_universe.GetMultiDisplay(), display_id);
 
@@ -182,7 +218,23 @@ static std::shared_ptr<Switchboard> CreateInProcessSwitchboard(AvdUniverse& avd_
     // backend.
     auto audio_source = ::webrtc::make_ref_counted<QemuAudioSource>(audio_backend);
 
-    auto media_provider = std::make_shared<MediaTrackProvider>(video_source, audio_source);
+    // The guest's capture clock pulls received audio out of WebRTC, which decodes it on demand.
+    auto microphone = WebRtcMicrophone::Create(
+            avd_universe.GetQemuEventLoop(),
+            [audio_device](std::span<int16_t> dst) { return audio_device->PullPlayout(dst); },
+            audio_backend);
+    return std::make_shared<InProcessMediaProvider>(std::move(video_source),
+                                                    std::move(audio_source),
+                                                    std::move(audio_device), std::move(microphone));
+}
+
+static std::shared_ptr<Switchboard> CreateInProcessSwitchboard(AvdUniverse& avd_universe,
+                                                               uint32_t display_id,
+                                                               uint32_t console_index,
+                                                               AudioBackend* audio_backend) {
+    auto audio_device = GoldfishAudioDeviceModule::Create();
+    auto media_provider =
+            CreateInProcessMediaProvider(avd_universe, display_id, audio_backend, audio_device);
 
     QemuConsole* console = qemu_console_lookup_by_index(console_index);
     if (console == nullptr) {
@@ -199,7 +251,7 @@ static std::shared_ptr<Switchboard> CreateInProcessSwitchboard(AvdUniverse& avd_
             avd_universe.GetMultiDisplay(), std::move(key_event_sender),
             avd_universe.GetInputDispatcher(), &avd_universe.GetSensorsPhysicalModel(),
             {.hw_sensor_hinge = hw.hw_sensor_hinge, .hw_keyboard = hw.hw_keyboard});
-    return std::make_shared<Switchboard>(media_provider, input_sender_factory);
+    return std::make_shared<Switchboard>(media_provider, input_sender_factory, audio_device);
 }
 
 std::vector<std::shared_ptr<::grpc::Service>> CreateInProcessRtcServices(

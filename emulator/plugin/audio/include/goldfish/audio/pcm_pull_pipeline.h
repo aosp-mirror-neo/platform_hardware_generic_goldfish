@@ -28,12 +28,11 @@ namespace goldfish::audio {
  * guest `GuestAudioConfig` destination with sample-format conversion, channel remixing, guest
  * volume scaling, underrun silence padding, and windowed-sinc sample-rate conversion.
  *
- * Data Flow: Callers invoke `Pull()` with the desired number of guest frames. When source and
- * destination formats match and volume is nominal, `Pull()` writes directly into the caller's
- * buffer with zero intermediate copies. Otherwise, `Pull()` pulls source frames in bounded scratch
- * blocks, silence-pads underruns, downmixes excess channels prior to resampling, resamples via
- * `webrtc::SincResampler`, upmixes remaining channels, applies guest volume, and encodes target
- * PCM bytes.
+ * Data Flow: `MixInto()` pulls source frames in bounded scratch blocks, silence-pads underruns,
+ * downmixes excess channels prior to resampling, resamples via `webrtc::SincResampler`, upmixes
+ * remaining channels, applies guest volume and input gain, and adds the result to a float mix
+ * buffer, so several sources can be summed. `Pull()` does the same for one source and encodes the
+ * result into guest PCM bytes.
  *
  * Thread Safety: Not internally synchronized. Callers must serialize calls to `Pull()`,
  * `SetVolume()`, and `Reset()`.
@@ -87,6 +86,20 @@ class PcmPullPipeline {
     void Pull(size_t target_frames, void* dst_buffer, const PullSourceFn& pull_source,
               bool input_muted = false, float input_gain = 1.0F);
 
+    /**
+     * Converts @p target_frames frames like `Pull()`, but adds them to @p mix instead of encoding
+     * them, so several sources can be summed before one final `EncodeGuestSamples()` pass.
+     *
+     * @param mix Interleaved floats in the guest channel layout, `target_frames *
+     * target_config().channels` long. Converted samples, scaled by guest volume and
+     * @p input_gain, are added to its current values. Sums are not clamped.
+     *
+     * A muted input (or guest volume mute) still advances @p pull_source and the resamplers, but
+     * adds nothing.
+     */
+    void MixInto(size_t target_frames, float* mix, const PullSourceFn& pull_source,
+                 bool input_muted = false, float input_gain = 1.0F);
+
     const AudioStreamConfig& source_config() const { return source_config_; }
     const GuestAudioConfig& target_config() const { return target_config_; }
     size_t target_bytes_per_frame() const {
@@ -97,9 +110,6 @@ class PcmPullPipeline {
   private:
     class ChannelResamplerState;
 
-    bool CanUseDirectPassthrough(bool input_muted, float input_gain) const;
-    void PullConvertedChunk(size_t chunk_frames, uint8_t* dst_bytes,
-                            const PullSourceFn& pull_source, bool input_muted, float input_gain);
     void PullSourceDecodedPlanar(size_t frames, const PullSourceFn& pull_source,
                                  std::vector<std::vector<float>>& planar_mid);
 
@@ -110,6 +120,7 @@ class PcmPullPipeline {
     std::vector<uint8_t> source_scratch_;
     std::vector<float> source_float_interleaved_;
     std::vector<std::vector<float>> mid_planar_scratch_;
+    std::vector<float> pull_mix_;  // Pull()'s float buffer, one output chunk long.
     std::unique_ptr<ChannelResamplerState> resampler_state_;
 };
 

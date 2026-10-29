@@ -73,9 +73,9 @@ using AudioServiceBase =
  *   `CLOCK_MONOTONIC` nanosecond timestamp.
  * - `InjectAudioClip` and `StreamMicrophoneAudio` feed host PCM audio into QEMU's
  *   `GoldfishAudioBackend` via `goldfish::audio::QemuAudioInject` by default (or delegate to
- *   `Options::microphone_sink` when a custom sink is supplied). Only one external microphone
- *   injection owner may be active at a time (`max_concurrent_microphone_streams == 1`); concurrent
- *   callers fail with `ALREADY_EXISTS`.
+ *   `Options::microphone_sink` when a custom sink is supplied). Up to
+ *   `max_concurrent_microphone_streams` injections are mixed; a duplicate `source_id` fails with
+ *   `ALREADY_EXISTS`, and one past the limit with `RESOURCE_EXHAUSTED`.
  *
  * ### Streaming & Backpressure:
  * - `StreamAudioState` sends an initial `AudioState` snapshot immediately upon connection and
@@ -323,7 +323,7 @@ class AudioServiceImpl final : public AudioServiceBase {
 
         void OnReadDone(bool ok) override {
             if (!ok) {
-                // Release exclusive microphone ownership before Finish(OK) unblocks the client.
+                // Release the microphone input before Finish(OK) unblocks the client.
                 StopStream();
                 if constexpr (!std::is_base_of_v<::grpc::internal::ServerReactor, Reactor>) {
                     Reactor::Finish(::grpc::Status::OK);
