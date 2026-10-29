@@ -68,6 +68,20 @@ TEST_F(NotificationStoreTest, StoreStickyNotifications) {
     EXPECT_TRUE(found_posture);
 }
 
+TEST_F(NotificationStoreTest, KeepsOnlyTheLatestMicrophoneState) {
+    GrpcNotification enabled;
+    enabled.mutable_microphonestate()->set_realaudioenabled(true);
+    source_.FireEvent(enabled);
+    GrpcNotification disabled;
+    disabled.mutable_microphonestate()->set_realaudioenabled(false);
+    source_.FireEvent(disabled);
+
+    auto latest = notification_store_->GetLatest();
+    ASSERT_EQ(latest.size(), 1);
+    ASSERT_TRUE(latest[0].has_microphonestate());
+    EXPECT_FALSE(latest[0].microphonestate().realaudioenabled());
+}
+
 TEST_F(NotificationStoreTest, NonStickyNotStored) {
     GrpcNotification brightness_event;
     brightness_event.mutable_brightness()->set_value(50);

@@ -32,11 +32,13 @@
 #include "emulator_controller_methods/display_service.h"
 #include "emulator_controller_methods/fingerprint_service.h"
 #include "emulator_controller_methods/gps_service.h"
+#include "emulator_controller_methods/microphone_service.h"
 #include "emulator_controller_methods/notification_store.h"
 #include "emulator_controller_methods/notification_stream_writer.h"
 #include "emulator_controller_methods/sensor_service.h"
 #include "emulator_controller_methods/status_service.h"
 #include "emulator_controller_methods/vm_service.h"
+#include "goldfish/avd/global_event_loop.h"
 #include "goldfish/parsing/resizable_display_config.h"
 
 namespace android {
@@ -77,6 +79,7 @@ class EmulatorControllerImpl final
             : vm_service_(vm)
             , grpc_notification_channel_(avd_universe->GetGrpcNotificationChannel())
             , notification_store_(&grpc_notification_channel_)
+            , microphone_service_(grpc_notification_channel_, *::goldfish::avd::globalEventLoop())
             , key_event_sender_(keyboard::createKeyEventSender(keyboard_console,
                                                                &avd_universe->GetQemuEventLoop()))
             , status_service_(avd_universe->GetGuestStatus(), avd_universe->Props(), avd_universe)
@@ -97,6 +100,16 @@ class EmulatorControllerImpl final
     Status setBattery(ServerContext* /*context*/, const BatteryState* request,
                       Empty* /*reply*/) override {
         return battery_service_.setBattery(*request);
+    }
+
+    Status getMicrophoneState(ServerContext* /*context*/, const Empty* /*request*/,
+                              MicrophoneState* reply) override {
+        return microphone_service_.getMicrophoneState(reply);
+    }
+
+    Status setMicrophoneState(ServerContext* /*context*/, const MicrophoneState* request,
+                              Empty* /*reply*/) override {
+        return microphone_service_.setMicrophoneState(*request);
     }
 
     Status getStatus(ServerContext* /*context*/, const Empty* /*request*/,
@@ -256,6 +269,8 @@ class EmulatorControllerImpl final
 
     ::grpc::ServerWriteReactor<Notification>* streamNotification(
             ::grpc::CallbackServerContext* /*context*/, const Empty* /*request*/) override {
+        // Starts microphone notifications, so the store holds the state this stream starts with.
+        microphone_service_.Watch();
         return CreateNotificationStreamWriter(&grpc_notification_channel_, &notification_store_);
     }
 
@@ -268,6 +283,8 @@ class EmulatorControllerImpl final
     VmServiceImpl vm_service_;
     GrpcNotificationEventSource& grpc_notification_channel_;
     NotificationStore notification_store_;
+    // After notification_store_, so the store hears its first notification.
+    MicrophoneServiceImpl microphone_service_;
     const std::unique_ptr<keyboard::IKeyEventSender> key_event_sender_;
     StatusServiceImpl status_service_;
     BatteryServiceImpl battery_service_;
