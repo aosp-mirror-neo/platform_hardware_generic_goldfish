@@ -190,6 +190,13 @@ void FillGuestSilence(GuestPcmFormat format, bool big_endian, void* dst, size_t 
 void EncodeGuestSample(GuestPcmFormat format, bool swap_endian, double sample, uint8_t* dst);
 
 /**
+ * Clamps and encodes @p sample_count normalized interleaved samples into @p dst in the format and
+ * endianness of @p config. @p dst holds `sample_count * BytesPerGuestSample(config.format)` bytes.
+ */
+void EncodeGuestSamples(const GuestAudioConfig& config, const float* samples, size_t sample_count,
+                        uint8_t* dst);
+
+/**
  * Scales @p byte_count PCM bytes in @p buffer in-place by @p gain with saturation clamping,
  * honoring @p format and @p big_endian.
  */

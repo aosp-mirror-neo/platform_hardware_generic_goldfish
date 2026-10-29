@@ -16,7 +16,6 @@
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -179,6 +178,7 @@ PcmPullPipeline::PcmPullPipeline(AudioStreamConfig source_config, GuestAudioConf
             resampler_state_ ? std::min(kDefaultChunkFrames, resampler_state_->MaxStepFrames())
                              : kDefaultChunkFrames;
     mid_planar_scratch_.assign(mid_channels_, std::vector<float>(max_output_chunk, 0.0F));
+    pull_mix_.resize(max_output_chunk * target_config_.channels, 0.0F);
 }
 
 PcmPullPipeline::~PcmPullPipeline() = default;
@@ -193,87 +193,48 @@ void PcmPullPipeline::Reset() {
     }
 }
 
-bool PcmPullPipeline::CanUseDirectPassthrough(bool input_muted, float input_gain) const {
-    if (input_muted || input_gain != 1.0F ||
-        source_config_.sample_rate_hz != target_config_.sample_rate_hz ||
-        source_config_.channels != target_config_.channels ||
-        target_config_.big_endian != (std::endian::native == std::endian::big) ||
-        !volume_.IsNominal()) {
-        return false;
-    }
-
-    switch (source_config_.format) {
-    case SampleFormat::kU8:
-        return target_config_.format == GuestPcmFormat::kU8;
-    case SampleFormat::kS16:
-        return target_config_.format == GuestPcmFormat::kS16;
-    case SampleFormat::kS32:
-        return target_config_.format == GuestPcmFormat::kS32;
-    case SampleFormat::kF32:
-        return target_config_.format == GuestPcmFormat::kF32;
-    }
-    return false;
-}
-
 void PcmPullPipeline::Pull(size_t target_frames, void* dst_buffer, const PullSourceFn& pull_source,
                            bool input_muted, float input_gain) {
-    if (target_frames == 0) {
-        return;
-    }
-
-    auto* dst_bytes = static_cast<uint8_t*>(dst_buffer);
-    const size_t dst_bpf = target_bytes_per_frame();
-
-    if (CanUseDirectPassthrough(input_muted, input_gain)) {
-        const size_t got = std::min(target_frames, pull_source(dst_buffer, target_frames));
-        if (got < target_frames) {
-            FillGuestSilence(target_config_.format, target_config_.big_endian,
-                             dst_bytes + got * dst_bpf, (target_frames - got) * dst_bpf);
-        }
-        return;
-    }
-
-    const size_t max_step = mid_planar_scratch_[0].size();
-    size_t remaining = target_frames;
-    while (remaining > 0) {
-        const size_t step = std::min(remaining, max_step);
-        PullConvertedChunk(step, dst_bytes, pull_source, input_muted, input_gain);
-        dst_bytes += step * dst_bpf;
-        remaining -= step;
+    auto* dst = static_cast<uint8_t*>(dst_buffer);
+    const size_t channels = target_config_.channels;
+    const size_t max_step = pull_mix_.size() / channels;
+    for (size_t done = 0; done < target_frames;) {
+        const size_t step = std::min(target_frames - done, max_step);
+        std::fill_n(pull_mix_.begin(), step * channels, 0.0F);
+        MixInto(step, pull_mix_.data(), pull_source, input_muted, input_gain);
+        EncodeGuestSamples(target_config_, pull_mix_.data(), step * channels, dst);
+        dst += step * target_bytes_per_frame();
+        done += step;
     }
 }
 
-void PcmPullPipeline::PullConvertedChunk(size_t chunk_frames, uint8_t* dst_bytes,
-                                         const PullSourceFn& pull_source, bool input_muted,
-                                         float input_gain) {
-    if (resampler_state_) {
-        resampler_state_->ResampleStep(chunk_frames, pull_source, mid_planar_scratch_);
-    } else {
-        PullSourceDecodedPlanar(chunk_frames, pull_source, mid_planar_scratch_);
-    }
-
-    if (volume_.mute || input_muted || !std::isfinite(input_gain) || input_gain <= 0.0F) {
-        FillGuestSilence(target_config_.format, target_config_.big_endian, dst_bytes,
-                         chunk_frames * target_bytes_per_frame());
-        return;
-    }
-
+void PcmPullPipeline::MixInto(size_t target_frames, float* mix, const PullSourceFn& pull_source,
+                              bool input_muted, float input_gain) {
     const uint32_t dst_channels = target_config_.channels;
-    const size_t dst_bps = BytesPerGuestSample(target_config_.format);
-    const bool swap_endian = target_config_.big_endian != (std::endian::native == std::endian::big);
-
+    const bool silenced =
+            volume_.mute || input_muted || !std::isfinite(input_gain) || input_gain <= 0.0F;
     std::array<float, kMaxAudioChannels> gains{};
     for (uint32_t ch = 0; ch < dst_channels; ++ch) {
         gains[ch] = (static_cast<float>(volume_.gain[ch]) / 255.0F) * input_gain;
     }
 
-    uint8_t* cursor = dst_bytes;
-    for (size_t i = 0; i < chunk_frames; ++i) {
-        for (uint32_t ch = 0; ch < dst_channels; ++ch) {
-            const float sample = mid_planar_scratch_[ch % mid_channels_][i] * gains[ch];
-            EncodeGuestSample(target_config_.format, swap_endian, sample, cursor);
-            cursor += dst_bps;
+    const size_t max_step = mid_planar_scratch_[0].size();
+    for (size_t done = 0; done < target_frames;) {
+        const size_t step = std::min(target_frames - done, max_step);
+        if (resampler_state_) {
+            resampler_state_->ResampleStep(step, pull_source, mid_planar_scratch_);
+        } else {
+            PullSourceDecodedPlanar(step, pull_source, mid_planar_scratch_);
         }
+        if (!silenced) {
+            float* out = mix + done * dst_channels;
+            for (size_t i = 0; i < step; ++i) {
+                for (uint32_t ch = 0; ch < dst_channels; ++ch) {
+                    *out++ += mid_planar_scratch_[ch % mid_channels_][i] * gains[ch];
+                }
+            }
+        }
+        done += step;
     }
 }
 

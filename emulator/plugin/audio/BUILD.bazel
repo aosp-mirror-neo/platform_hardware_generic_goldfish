@@ -69,6 +69,7 @@ cc_test(
         ":pcm_format",
         ":pcm_pull_pipeline",
         "//emulator/libs/test:googletest_main",
+        "@googletest//:gtest",
     ],
 )
 

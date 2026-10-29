@@ -88,6 +88,15 @@ void EncodeGuestSample(GuestPcmFormat format, bool swap_endian, double sample, u
     }
 }
 
+void EncodeGuestSamples(const GuestAudioConfig& config, const float* samples, size_t sample_count,
+                        uint8_t* dst) {
+    const bool swap_endian = config.big_endian != (std::endian::native == std::endian::big);
+    const size_t bytes_per_sample = BytesPerGuestSample(config.format);
+    for (size_t i = 0; i < sample_count; ++i) {
+        EncodeGuestSample(config.format, swap_endian, samples[i], dst + i * bytes_per_sample);
+    }
+}
+
 void FillSourceSilence(SampleFormat format, void* dst, size_t byte_count) {
     if (byte_count == 0) {
         return;
