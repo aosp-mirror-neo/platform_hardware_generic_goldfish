@@ -141,10 +141,6 @@ GlobalState gGlobals = {
 /* debugging */
 #define WHPX_DBG(...) (void)0
 
-static bool isOkToTryWHPX() {
-    return true;  // featurecontrol::isEnabled(featurecontrol::WindowsHypervisorPlatform);
-}
-
 AndroidCpuAcceleration ProbeWHPX(std::string* status, const internal::WhpxOps& ops) {
     status->clear();
 
@@ -494,43 +490,33 @@ CpuAccelerator GetCurrentCpuAccelerator() {
         g->supported_accelerators[CPU_ACCELERATOR_KVM] = true;
     }
 #elif HAVE_HVF || HAVE_WHPX || HAVE_AEHD
-    auto hvStatus = GetHyperVStatus();
-    if (hvStatus.first == ANDROID_HYPERV_RUNNING) {
-        status = "Please disable Hyper-V before using the Android Emulator.  "
-                 "Start a command prompt as Administrator, run 'bcdedit /set "
-                 "hypervisorlaunchtype off', reboot.";
-        status_code = ANDROID_CPU_ACCELERATION_HYPERV_ENABLED;
+    auto hv_status = GetHyperVStatus();
+    if (hv_status.first == ANDROID_HYPERV_RUNNING) {
 #if HAVE_WHPX
         auto ver = android::base::Win32Utils::getWindowsVersion();
-        if (isOkToTryWHPX()) {
-            if (ver && ver->dwMajorVersion >= 10 && ver->dwBuildNumber >= 17134) {
-                status_code = ProbeWHPX(&status);
-                if (status_code == ANDROID_CPU_ACCELERATION_READY) {
-                    g->accel = CPU_ACCELERATOR_WHPX;
-                    g->supported_accelerators[CPU_ACCELERATOR_WHPX] = true;
-                } else {
-                    status = "Hyper-V detected and Windows Hypervisor Platform "
-                             "is available. "
-                             "Please ensure both the \"Hyper-V\" and \"Windows "
-                             "Hypervisor Platform\" "
-                             "features enabled in \"Turn Windows features on "
-                             "or off\".";
-                }
+        if (ver && (ver->dwMajorVersion > 10 ||
+                    (ver->dwMajorVersion == 10 && ver->dwBuildNumber >= 17134))) {
+            status_code = ProbeWHPX(&status);
+            if (status_code == ANDROID_CPU_ACCELERATION_READY) {
+                g->accel = CPU_ACCELERATOR_WHPX;
+                g->supported_accelerators[CPU_ACCELERATOR_WHPX] = true;
             } else {
-                status = "Hyper-V detected and Windows Hypervisor Platform is "
-                         "not available. "
-                         "Please either disable Hyper-V or upgrade to Windows "
-                         "10 1803 or later. "
-                         "To disable Hyper-V, start a command prompt as "
-                         "Administrator, run "
-                         "'bcdedit /set hypervisorlaunchtype off', reboot. "
-                         "If upgrading OS to Windows 10 1803 or later, please "
-                         "ensure both "
-                         "the \"Hyper-V\" and \"Windows Hypervisor Platform\" "
-                         "features enabled "
-                         "in \"Turn Windows features on or off\".";
-                status_code = ANDROID_CPU_ACCELERATION_HYPERV_ENABLED;
+                status = "Hyper-V detected and Windows Hypervisor Platform "
+                         "is available. "
+                         "Please ensure both the \"Hyper-V\" and \"Windows "
+                         "Hypervisor Platform\" "
+                         "features are enabled in \"Turn Windows features "
+                         "on or off\".";
             }
+        } else {
+            status = "Hyper-V detected and Windows Hypervisor Platform is "
+                     "not available. "
+                     "Please upgrade to Windows 10 1803 or later and "
+                     "ensure both "
+                     "the \"Hyper-V\" and \"Windows Hypervisor Platform\" "
+                     "features are enabled "
+                     "in \"Turn Windows features on or off\".";
+            status_code = ANDROID_CPU_ACCELERATION_ACCEL_NOT_INSTALLED;
         }
 #endif
     } else {
@@ -559,11 +545,23 @@ CpuAccelerator GetCurrentCpuAccelerator() {
         }
 #endif
 
+#if HAVE_WHPX && !HAVE_AEHD
+        if (status_code != ANDROID_CPU_ACCELERATION_NO_CPU_SUPPORT) {
+            status = absl::StrFormat(
+                    "WHPX CPU acceleration is unavailable (%s). Please ensure "
+                    "both the \"Hyper-V\" and \"Windows Hypervisor Platform\" "
+                    "features are enabled in \"Turn Windows features on or "
+                    "off\".",
+                    hv_status.second);
+            status_code = ANDROID_CPU_ACCELERATION_ACCEL_NOT_INSTALLED;
+        }
+#endif
+
 #if HAVE_HVF
 
-        std::string statusHvf;
-        AndroidCpuAcceleration status_code_HVF = ProbeHVF(&statusHvf);
-        if (status_code_HVF == ANDROID_CPU_ACCELERATION_READY) {
+        std::string status_hvf;
+        AndroidCpuAcceleration status_code_hvf = ProbeHVF(&status_hvf);
+        if (status_code_hvf == ANDROID_CPU_ACCELERATION_READY) {
 #ifdef APPLE_SILICON
             g->accel = CPU_ACCELERATOR_HVF;
             g->supported_accelerators[CPU_ACCELERATOR_KVM] = false;
@@ -573,8 +571,8 @@ CpuAccelerator GetCurrentCpuAccelerator() {
             // appropriate.
             if (status_code != ANDROID_CPU_ACCELERATION_READY) {
                 g->accel = CPU_ACCELERATOR_HVF;
-                status_code = status_code_HVF;
-                status = statusHvf;
+                status_code = status_code_hvf;
+                status = status_hvf;
             }
         }
 #endif  // HAVE_HVF
