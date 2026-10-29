@@ -324,7 +324,14 @@ TEST_F(InputPathsTest, ResolveEmulatorPaths) {
     EXPECT_EQ(paths.launcher_directory, launcher_dir);
     EXPECT_EQ(paths.binary_directory, launcher_dir / "bin");
     EXPECT_EQ(paths.advanced_features, launcher_dir / "lib" / "advancedFeatures.ini");
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(__arm64__)
+    EXPECT_TRUE(paths.qemu_system_x86_binary.empty());
+    EXPECT_EQ(paths.qemu_system_arm_binary,
+              launcher_dir / "bin" / ("qemu-system-aarch64" + suffix));
+#else
     EXPECT_EQ(paths.qemu_system_x86_binary, launcher_dir / "bin" / ("qemu-system-x86_64" + suffix));
+    EXPECT_TRUE(paths.qemu_system_arm_binary.empty());
+#endif
     EXPECT_TRUE(paths.HasNetsim());
     EXPECT_EQ(paths.netsim_binary, launcher_dir / "bin" / ("netsimd" + suffix));
     EXPECT_FALSE(paths.HasFishtank());
@@ -346,6 +353,7 @@ TEST_F(InputPathsTest, ResolveEmulatorPathsWithoutNetsimd) {
     suffix = ".exe";
 #endif
 
+    WriteToFile(launcher_dir / "bin" / ("qemu-system-x86_64" + suffix), "");
     WriteToFile(launcher_dir / "bin" / ("qemu-system-aarch64" + suffix), "");
     WriteToFile(launcher_dir / "bin" / ("crashpad_handler" + suffix), "");
     WriteToFile(launcher_dir / "lib" / "advancedFeatures.ini", "");
@@ -391,6 +399,7 @@ TEST_F(InputPathsTest, ResolveEmulatorPathsFailsWithoutAdvancedFeatures) {
 #endif
 
     WriteToFile(launcher_dir / "bin" / ("qemu-system-x86_64" + suffix), "");
+    WriteToFile(launcher_dir / "bin" / ("qemu-system-aarch64" + suffix), "");
     WriteToFile(launcher_dir / "bin" / ("netsimd" + suffix), "");
     WriteToFile(launcher_dir / "bin" / ("crashpad_handler" + suffix), "");
 
@@ -416,7 +425,11 @@ TEST_F(InputPathsTest, ResolveEmulatorPathsWithOnlyOneQemuSystemBinary) {
 #endif
 
     // Release packages only ship the host-native qemu-system binary.
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(__arm64__)
     WriteToFile(launcher_dir / "bin" / ("qemu-system-aarch64" + suffix), "");
+#else
+    WriteToFile(launcher_dir / "bin" / ("qemu-system-x86_64" + suffix), "");
+#endif
     WriteToFile(launcher_dir / "bin" / ("qemu-img" + suffix), "");
     WriteToFile(launcher_dir / "bin" / ("netsimd" + suffix), "");
     WriteToFile(launcher_dir / "bin" / ("crashpad_handler" + suffix), "");
@@ -426,9 +439,53 @@ TEST_F(InputPathsTest, ResolveEmulatorPathsWithOnlyOneQemuSystemBinary) {
 
     ASSERT_OK_AND_ASSIGN(auto paths, ResolveEmulatorPaths(false));
 
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(__arm64__)
     EXPECT_TRUE(paths.qemu_system_x86_binary.empty());
     EXPECT_EQ(paths.qemu_system_arm_binary,
               launcher_dir / "bin" / ("qemu-system-aarch64" + suffix));
+#else
+    EXPECT_EQ(paths.qemu_system_x86_binary, launcher_dir / "bin" / ("qemu-system-x86_64" + suffix));
+    EXPECT_TRUE(paths.qemu_system_arm_binary.empty());
+#endif
+}
+
+TEST_F(InputPathsTest, ResolveEmulatorPathsFailsWithOnlyNonNativeQemuSystemBinary) {
+    tmp_->MakeSubDir("launcher");
+    tmp_->MakeSubDir("launcher/bin");
+    tmp_->MakeSubDir("launcher/lib/qemu");
+    tmp_->MakeSubDir("launcher/lib64");
+    tmp_->MakeSubDir("launcher/share/qemu");
+
+    fs::path launcher_dir = tmp_->Path() / "launcher";
+    ASSERT_OK_AND_ASSIGN(auto canon, android::base::file::make_canonical(launcher_dir));
+    launcher_dir = canon;
+
+    std::string suffix = "";
+#ifdef _WIN32
+    suffix = ".exe";
+#endif
+
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(__arm64__)
+    WriteToFile(launcher_dir / "bin" / ("qemu-system-x86_64" + suffix), "");
+#else
+    WriteToFile(launcher_dir / "bin" / ("qemu-system-aarch64" + suffix), "");
+#endif
+    WriteToFile(launcher_dir / "bin" / ("qemu-img" + suffix), "");
+    WriteToFile(launcher_dir / "bin" / ("netsimd" + suffix), "");
+    WriteToFile(launcher_dir / "bin" / ("crashpad_handler" + suffix), "");
+    WriteToFile(launcher_dir / "lib" / "advancedFeatures.ini", "");
+
+    sys_->SetEnvironmentVariable("ANDROID_EMULATOR_LAUNCHER_DIR", launcher_dir.string());
+
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(__arm64__)
+    EXPECT_THAT(ResolveEmulatorPaths(false),
+                absl_testing::StatusIs(absl::StatusCode::kNotFound,
+                                       testing::HasSubstr("qemu-system-aarch64")));
+#else
+    EXPECT_THAT(ResolveEmulatorPaths(false),
+                absl_testing::StatusIs(absl::StatusCode::kNotFound,
+                                       testing::HasSubstr("qemu-system-x86_64")));
+#endif
 }
 
 TEST_F(InputPathsTest, ResolveEmulatorPathsFailsWithoutQemuSystemBinary) {
@@ -549,7 +606,14 @@ TEST_F(InputPathsTest, ResolveEmulatorPathsWithNonAsciiDirectory) {
 
     EXPECT_EQ(paths.launcher_directory, launcher_dir);
     EXPECT_EQ(paths.binary_directory, launcher_dir / "bin");
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(__arm64__)
+    EXPECT_TRUE(paths.qemu_system_x86_binary.empty());
+    EXPECT_EQ(paths.qemu_system_arm_binary,
+              launcher_dir / "bin" / ("qemu-system-aarch64" + suffix));
+#else
     EXPECT_EQ(paths.qemu_system_x86_binary, launcher_dir / "bin" / ("qemu-system-x86_64" + suffix));
+    EXPECT_TRUE(paths.qemu_system_arm_binary.empty());
+#endif
 }
 
 #ifndef _WIN32
@@ -578,11 +642,17 @@ TEST_F(InputPathsTest, ResolveEmulatorPathsPreservesSymlinksOnPosix) {
 
     ASSERT_OK_AND_ASSIGN(auto paths, ResolveEmulatorPaths(false));
 
-    EXPECT_EQ(paths.qemu_system_x86_binary, launcher_dir / "bin" / "qemu-system-x86_64");
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(__arm64__)
+    EXPECT_TRUE(paths.qemu_system_x86_binary.empty());
     EXPECT_EQ(paths.qemu_system_arm_binary, launcher_dir / "bin" / "qemu-system-aarch64");
+    EXPECT_TRUE(android::base::file::is_link(paths.qemu_system_arm_binary));
+#else
+    EXPECT_EQ(paths.qemu_system_x86_binary, launcher_dir / "bin" / "qemu-system-x86_64");
+    EXPECT_TRUE(paths.qemu_system_arm_binary.empty());
+    EXPECT_TRUE(android::base::file::is_link(paths.qemu_system_x86_binary));
+#endif
     EXPECT_EQ(paths.netsim_binary, launcher_dir / "bin" / "netsimd");
     EXPECT_EQ(paths.crashpad_handler_binary, launcher_dir / "bin" / "crashpad_handler");
-    EXPECT_TRUE(android::base::file::is_link(paths.qemu_system_x86_binary));
     EXPECT_TRUE(android::base::file::is_link(paths.netsim_binary));
 }
 #endif
