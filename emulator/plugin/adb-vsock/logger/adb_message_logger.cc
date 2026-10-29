@@ -14,22 +14,48 @@
 #include "goldfish/adb/adb_message_logger.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstring>
 #include <string_view>
 
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
 
 #include "goldfish/adb/adb_breadcrumb_tracker.h"
-#include "goldfish/adb/adb_message_logger.h"
 #include "goldfish/perfetto/perfetto_categories.h"
+
 namespace goldfish::adb {
 
-// Maximum number of characters or bytes we are willing to log.
-constexpr size_t kMaxDataLogLength = 512;
+namespace {
 
-static bool IsValidHeader(const AMessage* message) {
-    return (message->magic ^ 0xffffffff) == message->command;
+constexpr size_t kMaxAdbPacketLength = size_t{1024} * 1024;
+constexpr size_t kShortSnippetLength = 32;
+
+bool IsValidHeader(const AMessage* message) {
+    return (message->magic ^ 0xffffffffU) == message->command;
 }
+
+bool Accumulate(const char*& ptr, size_t& remaining, char* dest, size_t& dest_size, size_t needed) {
+    if (dest_size >= needed) return true;
+    const size_t to_copy = std::min(remaining, needed - dest_size);
+    std::memcpy(dest + dest_size, ptr, to_copy);
+    ptr += to_copy;
+    remaining -= to_copy;
+    dest_size += to_copy;
+    return dest_size == needed;
+}
+
+bool AccumulateVector(const char*& ptr, size_t& remaining, std::vector<char>& dest, size_t needed) {
+    const size_t present = dest.size();
+    if (present >= needed) return true;
+    const size_t to_copy = std::min(remaining, needed - present);
+    dest.insert(dest.end(), ptr, ptr + to_copy);
+    ptr += to_copy;
+    remaining -= to_copy;
+    return dest.size() == needed;
+}
+
+}  // namespace
 
 template <typename Sink>
 void AbslStringify(Sink& sink, const APacket& packet) {
@@ -94,28 +120,6 @@ void AbslStringify(Sink& sink, const APacket& packet) {
     // End of JSON object
 }
 
-namespace {
-bool Accumulate(const char*& ptr, size_t& remaining, char* dest, size_t& dest_size, size_t needed) {
-    if (dest_size >= needed) return true;
-    const size_t to_copy = std::min(remaining, needed - dest_size);
-    std::memcpy(dest + dest_size, ptr, to_copy);
-    ptr += to_copy;
-    remaining -= to_copy;
-    dest_size += to_copy;
-    return dest_size == needed;
-}
-
-bool AccumulateVector(const char*& ptr, size_t& remaining, std::vector<char>& dest, size_t needed) {
-    const size_t present = dest.size();
-    if (present >= needed) return true;
-    const size_t to_copy = std::min(remaining, needed - present);
-    dest.insert(dest.end(), ptr, ptr + to_copy);
-    ptr += to_copy;
-    remaining -= to_copy;
-    return dest.size() == needed;
-}
-}  // namespace
-
 AdbMessageLogger::~AdbMessageLogger() {
     VLOG(1) << "~AdbMessageLogger()";
 }
@@ -137,35 +141,23 @@ void AdbMessageLogger::Observe(const void* data, size_t size) {
             std::memcpy(&header_, header_buf_, sizeof(AMessage));
             header_buf_size_ = 0;
 
-            out_of_sync_ = !IsValidHeader(&header_);
-            if (out_of_sync_) {
-                const std::string reason = absl::StrFormat(
-                        "Invalid header: cmd=0x%08x (magic=0x%08x, expected cmd=0x%08x)",
-                        header_.command, header_.magic, header_.magic ^ 0xffffffff);
-                LOG(WARNING) << "ADB passive logging parser got out of sync and is disabling "
-                                "further ADB logging. "
-                             << "Note: The actual guest/host ADB connection is unaffected and "
-                                "should work normally. "
-                             << "Details: " << reason;
-                if (callback_) {
-                    callback_->OnOutOfSync(reason, to_guest_);
-                }
+            if (!IsValidHeader(&header_)) {
+                ReportOutOfSync(
+                        "ADB passive logging parser got out of sync and is disabling further ADB "
+                        "logging.",
+                        absl::StrFormat(
+                                "Invalid header: cmd=0x%08x (magic=0x%08x, expected cmd=0x%08x)",
+                                header_.command, header_.magic, header_.magic ^ 0xffffffffU));
                 return;
             }
 
-            if (header_.data_length > 1024 * 1024) {  // 1MB limit
-                out_of_sync_ = true;
-                const std::string reason = absl::StrFormat(
-                        "Packet too large: header.data_length is %u bytes (limit is 1MB)",
-                        header_.data_length);
-                LOG(WARNING) << "ADB passive logging parser detected an excessively large packet. "
-                                "Disabling further ADB logging. "
-                             << "Note: The actual guest/host ADB connection is unaffected and "
-                                "should work normally. "
-                             << "Details: " << reason;
-                if (callback_) {
-                    callback_->OnOutOfSync(reason, to_guest_);
-                }
+            if (header_.data_length > kMaxAdbPacketLength) {
+                ReportOutOfSync(
+                        "ADB passive logging parser detected an excessively large packet. "
+                        "Disabling further ADB logging.",
+                        absl::StrFormat(
+                                "Packet too large: header.data_length is %u bytes (limit is 1MB)",
+                                header_.data_length));
                 return;
             }
 
@@ -183,20 +175,12 @@ void AdbMessageLogger::Observe(const void* data, size_t size) {
             }
 
             if (header_.data_length > 0) {
-                const size_t max_snippet = verbose_ ? kMaxDataLogLength : 32;
+                const size_t max_snippet = verbose_ ? kMaxDataLogLength : kShortSnippetLength;
                 snippet_needed_ = std::min<size_t>(header_.data_length, max_snippet);
                 parse_state_ = ParseState::kExpectSnippet;
                 snippet_accumulator_.clear();
             } else {
-                if (verbose_) {
-                    std::vector<char> log_buf(sizeof(AMessage));
-                    std::memcpy(log_buf.data(), &header_, sizeof(AMessage));
-                    const APacket* packet = reinterpret_cast<const APacket*>(log_buf.data());
-                    LOG(INFO) << prefix_ << *packet;
-                }
-                if (callback_) {
-                    callback_->OnPacket(header_, nullptr, to_guest_);
-                }
+                EmitPacket(nullptr, 0);
             }
             break;
         }
@@ -204,18 +188,7 @@ void AdbMessageLogger::Observe(const void* data, size_t size) {
             if (!AccumulateVector(ptr, remaining, snippet_accumulator_, snippet_needed_)) {
                 return;  // Need more data
             }
-            if (verbose_) {
-                std::vector<char> log_buf(sizeof(AMessage) + snippet_needed_);
-                std::memcpy(log_buf.data(), &header_, sizeof(AMessage));
-                std::memcpy(log_buf.data() + sizeof(AMessage), snippet_accumulator_.data(),
-                            snippet_needed_);
-                const APacket* packet = reinterpret_cast<const APacket*>(log_buf.data());
-                LOG(INFO) << prefix_ << *packet;
-            }
-
-            if (callback_) {
-                callback_->OnPacket(header_, snippet_accumulator_.data(), to_guest_);
-            }
+            EmitPacket(snippet_accumulator_.data(), snippet_needed_);
 
             if (header_.data_length > snippet_needed_) {
                 skip_remaining_ = header_.data_length - snippet_needed_;
@@ -240,9 +213,35 @@ void AdbMessageLogger::Observe(const void* data, size_t size) {
     }
 }
 
+void AdbMessageLogger::ReportOutOfSync(std::string_view summary, const std::string& reason) {
+    out_of_sync_ = true;
+    LOG(WARNING) << summary
+                 << " Note: The actual guest/host ADB connection is unaffected and should work "
+                    "normally. Details: "
+                 << reason;
+    if (callback_) {
+        callback_->OnOutOfSync(reason, to_guest_);
+    }
+}
+
+void AdbMessageLogger::EmitPacket(const char* snippet_data, size_t snippet_size) {
+    if (verbose_) {
+        std::vector<char> log_buf(sizeof(AMessage) + snippet_size);
+        std::memcpy(log_buf.data(), &header_, sizeof(AMessage));
+        if (snippet_size > 0) {
+            std::memcpy(log_buf.data() + sizeof(AMessage), snippet_data, snippet_size);
+        }
+        const auto* packet = reinterpret_cast<const APacket*>(log_buf.data());
+        LOG(INFO) << prefix_ << *packet;
+    }
+    if (callback_) {
+        callback_->OnPacket(header_, snippet_data, to_guest_);
+    }
+}
+
 AdbLogger::AdbLogger(int host_port, int guest_port, bool verbose, bool capture_snippets)
-        : to_guest_(AdbMessageLogger(absl::StrFormat(">> (%d) ", guest_port), true, verbose))
-        , to_host_(AdbMessageLogger(absl::StrFormat("<< (%d) ", host_port), false, verbose)) {
+        : to_guest_(absl::StrFormat(">> (%d) ", guest_port), true, verbose)
+        , to_host_(absl::StrFormat("<< (%d) ", host_port), false, verbose) {
 #if defined(CONFIG_TRACE_GOLDFISH)
     tracker_ = std::make_unique<AdbBreadcrumbTracker>(capture_snippets);
     to_guest_.SetCallback(tracker_.get());
