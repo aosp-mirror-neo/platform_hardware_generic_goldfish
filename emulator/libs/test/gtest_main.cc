@@ -64,6 +64,11 @@ extern "C" const char* __tsan_default_suppressions() {
             // (__release_weak, lock) is invisible and freeing the block after
             // the last weak_ptr is misreported as a race.
             "race:__on_zero_shared_weak\n"
+            // Lavapipe's (@mesa3d//:vulkan_lvp) lp_fence_signalled() polls
+            // fence->count == fence->rank without locking fence->mutex before
+            // lp_fence_destroy() destroys fence->mutex and fence->signalled
+            // (b/573994192).
+            "race:lp_fence_destroy\n"
             "race:cuttlefish::NetworkService::isRadioOff\n";
 }
 #endif
