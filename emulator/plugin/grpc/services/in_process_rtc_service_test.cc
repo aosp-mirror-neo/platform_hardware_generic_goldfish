@@ -246,17 +246,31 @@ TEST(InProcessRtcServiceTest, InputSenderDispatchesKeyEvent) {
             ::goldfish::avd::globalEventLoop());
     TestAvdUniverse universe(&fake_multidisplay, *::goldfish::avd::globalEventLoop());
     auto key_event_sender = std::make_shared<FakeKeyEventSender>();
-    auto factory = CreateInProcessInputSenderFactory(fake_multidisplay, key_event_sender);
+    auto dispatcher = std::make_shared<RecordingInputDispatcher>();
+    auto factory =
+            CreateInProcessInputSenderFactory(fake_multidisplay, key_event_sender, dispatcher);
     auto sender = factory(DataChannelLabel::kInput);
     ASSERT_NE(sender, nullptr);
     EXPECT_TRUE(sender->Start().ok());
+    ASSERT_TRUE(dispatcher->opened_with.has_value());
+    EXPECT_TRUE(dispatcher->opened_with->human);
+    EXPECT_EQ(dispatcher->opened_with->source_id, 0);
+    EXPECT_FALSE(dispatcher->opened_with->reject_down_on_held);
 
     InputEvent event;
     event.mutable_key_event()->set_key("a");
+    event.mutable_key_event()->set_eventtype(KeyboardEvent::keypress);
     sender->SendEvent(event);
+    EXPECT_THAT(dispatcher->calls, ::testing::ElementsAre("key 7 KeyA", "key 7 KeyA"));
 
-    ASSERT_EQ(key_event_sender->sent_events.size(), 1);
-    EXPECT_EQ(key_event_sender->sent_events[0].key(), "a");
+    // Stopping the sender on DataChannel close immediately closes the session.
+    sender->Stop();
+    EXPECT_THAT(dispatcher->calls, ::testing::ElementsAre("key 7 KeyA", "key 7 KeyA", "close 7"));
+
+    // Subsequent sender destruction does not double-close.
+    sender.reset();
+    EXPECT_THAT(dispatcher->calls, ::testing::ElementsAre("key 7 KeyA", "key 7 KeyA", "close 7"));
+    EXPECT_TRUE(key_event_sender->sent_events.empty());
 }
 
 TEST(InProcessRtcServiceTest, InputSenderDispatchesTouchAndMouseEvent) {
@@ -329,6 +343,11 @@ TEST(InProcessRtcServiceTest, InputSenderV2DispatchesToAHumanSessionClosedWithTh
     sender->SendV2Event(text_event);
     EXPECT_THAT(dispatcher->calls,
                 ::testing::ElementsAre("pointer 7 display 0", "text 7 测试_🚀_é"));
+
+    // DataChannel close (Stop) releases the session immediately, before sender destruction.
+    sender->Stop();
+    EXPECT_THAT(dispatcher->calls,
+                ::testing::ElementsAre("pointer 7 display 0", "text 7 测试_🚀_é", "close 7"));
 
     sender.reset();
     EXPECT_THAT(dispatcher->calls,

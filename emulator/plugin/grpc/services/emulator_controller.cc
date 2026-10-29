@@ -23,8 +23,12 @@
 #include "android/emulation/control/absl_status_translate.h"
 #include "android/emulation/control/event_sender.h"
 #include "android/emulation/control/keyboard/key_event_sender.h"
+#include "android/emulation/control/simple_async_grpc.h"
 #include "android/goldfish/hardware_config.h"
 #include "android/goldfish/vm_interface.h"
+#include "emulator/plugin/grpc/input/dispatcher_session.h"
+#include "emulator/plugin/grpc/input/input_dispatcher_interface.h"
+#include "emulator/plugin/grpc/input/v1_input_translator.h"
 #include "emulator_controller.grpc.pb.h"
 #include "emulator_controller_methods/audio_stream_writer.h"
 #include "emulator_controller_methods/battery_service.h"
@@ -48,6 +52,9 @@ namespace control {
 using ::goldfish::avd::AvdUniverse;
 using ::goldfish::avd_universe::grpc::GrpcNotificationEventSource;
 using ::goldfish::display::IMultiDisplay;
+using ::goldfish::grpc::v2::DispatcherSession;
+using ::goldfish::grpc::v2::IInputDispatcher;
+using ::goldfish::grpc::v2::V1InputTranslator;
 using ::google::protobuf::Empty;
 using grpc::ServerContext;
 using grpc::Status;
@@ -63,6 +70,76 @@ std::vector<::goldfish::parsing::ResizableDisplayConfig> GetResizableConfig(
 
     return {};
 }
+
+void LogRejectedV1InputEvent(IInputDispatcher::DispatchResult result) {
+    if (!result.status.ok()) {
+        VLOG(1) << "Dropped v1 input event: " << result.status;
+    }
+}
+
+class StreamInputEventReader final : public ::SimpleServerReader<InputEvent> {
+  public:
+    StreamInputEventReader(InputEventSender* legacy_sender,
+                           std::unique_ptr<DispatcherSession> session,
+                           std::unique_ptr<V1InputTranslator> translator)
+            : legacy_sender_(legacy_sender)
+            , session_(std::move(session))
+            , translator_(std::move(translator)) {}
+
+    bool Read(const InputEvent* request) override {
+        if (session_ == nullptr) {
+            return false;
+        }
+        VLOG(2) << "InputEvent:" << request->ShortDebugString();
+        if (request->has_key_event()) {
+            for (const auto& event : translator_->TranslateKeyboard(request->key_event())) {
+                session_->Dispatch(event, LogRejectedV1InputEvent);
+            }
+            return true;
+        }
+
+        absl::Status status;
+        if (request->has_mouse_event()) {
+            status = legacy_sender_->Send(request->mouse_event());
+        } else if (request->has_touch_event()) {
+            status = legacy_sender_->Send(request->touch_event());
+        } else if (request->has_android_event()) {
+            status = legacy_sender_->Send(request->android_event());
+        } else if (request->has_pen_event()) {
+            status = legacy_sender_->Send(request->pen_event());
+        } else if (request->has_wheel_event()) {
+            status = legacy_sender_->Send(request->wheel_event());
+        } else {
+            status = absl::InvalidArgumentError("Unknown event, is the emulator out of date?.");
+        }
+        if (!status.ok()) {
+            session_.reset();
+            translator_.reset();
+            this->Finish(AbslStatusToGrpcStatus(status));
+            return false;
+        }
+        return true;
+    }
+
+    void OnReadDone(bool ok) override {
+        if (!ok) {
+            // Release the session before Finish() so held keys are queued for
+            // release before the client observes stream completion.
+            session_.reset();
+            translator_.reset();
+            this->Finish(Status::OK);
+            return;
+        }
+        ::SimpleServerReader<InputEvent>::OnReadDone(true);
+    }
+
+    void OnDone() override { delete this; }
+
+  private:
+    InputEventSender* legacy_sender_;
+    std::unique_ptr<DispatcherSession> session_;
+    std::unique_ptr<V1InputTranslator> translator_;
+};
 }  // namespace
 
 // Logic and data behind the server's behavior.
@@ -76,7 +153,9 @@ class EmulatorControllerImpl final
   public:
     EmulatorControllerImpl(VmOperations* vm, QemuConsole* keyboard_console,
                            AvdUniverse* avd_universe, IMultiDisplay* multidisplay)
-            : vm_service_(vm)
+            : avd_universe_(avd_universe)
+            , multi_display_(multidisplay)
+            , vm_service_(vm)
             , grpc_notification_channel_(avd_universe->GetGrpcNotificationChannel())
             , notification_store_(&grpc_notification_channel_)
             , microphone_service_(grpc_notification_channel_, *::goldfish::avd::globalEventLoop())
@@ -198,32 +277,14 @@ class EmulatorControllerImpl final
 
     ::grpc::ServerReadReactor<InputEvent>* streamInputEvent(
             ::grpc::CallbackServerContext* /*context*/, Empty* /*response*/) override {
-        SimpleServerLambdaReader<InputEvent>* event_reader =
-                new SimpleServerLambdaReader<InputEvent>([this](auto request) -> grpc::Status {
-                    VLOG(2) << "InputEvent:" << request->ShortDebugString();
-                    absl::Status status;
-                    if (request->has_key_event()) {
-                        key_event_sender_->send(request->key_event());
-                        status = absl::OkStatus();
-                    } else if (request->has_mouse_event()) {
-                        status = input_event_sender_.Send(request->mouse_event());
-                    } else if (request->has_touch_event()) {
-                        status = input_event_sender_.Send(request->touch_event());
-                    } else if (request->has_android_event()) {
-                        status = input_event_sender_.Send(request->android_event());
-                    } else if (request->has_pen_event()) {
-                        status = input_event_sender_.Send(request->pen_event());
-                    } else if (request->has_wheel_event()) {
-                        status = input_event_sender_.Send(request->wheel_event());
-                    } else {
-                        status = absl::InvalidArgumentError(
-                                "Unknown event, is the emulator out of date?.");
-                    }
-                    return AbslStatusToGrpcStatus(status);
-                });
-        // Note that the event reader will delete itself on completion of
-        // the request.
-        return event_reader;
+        auto session = std::make_unique<DispatcherSession>(
+                avd_universe_->GetInputDispatcher(),
+                IInputDispatcher::SessionOptions{
+                    .human = true, .source_id = 0, .reject_down_on_held = false});
+        auto translator = std::make_unique<V1InputTranslator>(
+                *multi_display_, avd_universe_->Props().hw_config.hw_sensor_hinge);
+        return new StreamInputEventReader(&input_event_sender_, std::move(session),
+                                          std::move(translator));
     }
 
     Status getClipboard(ServerContext* context, const Empty* /*request*/,
@@ -280,6 +341,8 @@ class EmulatorControllerImpl final
     }
 
   private:
+    AvdUniverse* avd_universe_;
+    IMultiDisplay* multi_display_;
     VmServiceImpl vm_service_;
     GrpcNotificationEventSource& grpc_notification_channel_;
     NotificationStore notification_store_;
