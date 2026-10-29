@@ -13,13 +13,18 @@
 // limitations under the License.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/functional/any_invocable.h"
 #include "absl/status/status.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 
 #include "goldfish/eventing/event_sources.h"
@@ -29,15 +34,61 @@
 namespace goldfish::grpc::v2 {
 
 /**
+ * @brief Thread-safe generation tracker shared between a `DispatcherSession`
+ * and `InputDispatcher` so stateful front-end translators (such as
+ * `V1InputTranslator`) learn when the dispatcher forcibly cleared held contacts
+ * without an explicit client `UP` or `CANCEL` (idle timeout, snapshot load,
+ * display removal, or guest driver reset).
+ *
+ * Hot-path checks read `Version()` with a single lock-free `acquire` load and
+ * only take `mutex_` when a reset actually occurred.
+ */
+class SessionResetTracker {
+  public:
+    struct Snapshot {
+        uint64_t version = 0;
+        uint64_t full_generation = 0;
+        absl::flat_hash_map<int32_t, uint64_t> display_generations;
+    };
+
+    uint64_t Version() const { return version_.load(std::memory_order_acquire); }
+
+    Snapshot ReadSnapshot() const ABSL_LOCKS_EXCLUDED(mutex_) {
+        const absl::MutexLock lock(mutex_);
+        return snapshot_;
+    }
+
+    void RecordFullReset() ABSL_LOCKS_EXCLUDED(mutex_) {
+        const absl::MutexLock lock(mutex_);
+        ++snapshot_.full_generation;
+        snapshot_.display_generations.clear();
+        const uint64_t next = ++snapshot_.version;
+        version_.store(next, std::memory_order_release);
+    }
+
+    void RecordDisplayReset(int32_t display_id) ABSL_LOCKS_EXCLUDED(mutex_) {
+        const absl::MutexLock lock(mutex_);
+        ++snapshot_.display_generations[display_id];
+        const uint64_t next = ++snapshot_.version;
+        version_.store(next, std::memory_order_release);
+    }
+
+  private:
+    mutable absl::Mutex mutex_;
+    Snapshot snapshot_ ABSL_GUARDED_BY(mutex_);
+    std::atomic<uint64_t> version_{0};
+};
+
+/**
  * @brief The single owner of guest touch and keyboard state: applies the
  * pointer, key, and text events of every input session to the touch devices and
  * the keyboard.
  *
  * Events are applied in the order they were dispatched, so keys and touches
- * reach the guest in that order. Each contact `(session, pointer)` holds a
- * multi-touch slot on the device it was created on, and stays bound to that
- * device until released. Each key is down in the guest while at least one
- * session holds it.
+ * reach the guest in that order. Each contact `(session, display_id,
+ * pointer_id)` holds a multi-touch slot on the device it was created on, and
+ * stays bound to that device until released. Each key is down in the guest
+ * while at least one session holds it.
  *
  * Everything that reaches the guest is reported, once and in the order it was
  * applied, as an `InputActivity` on `activity()`.
@@ -64,6 +115,12 @@ class IInputDispatcher {
          * `CloseSession()`, while the session stays open.
          */
         absl::Duration idle_timeout = absl::ZeroDuration();
+        /**
+         * @brief Optional tracker notified when the dispatcher forcibly clears
+         * held contacts of this session (idle timeout, snapshot load, display
+         * removal, or guest driver reset).
+         */
+        std::shared_ptr<SessionResetTracker> reset_tracker;
     };
 
     using ActivityEventSource =

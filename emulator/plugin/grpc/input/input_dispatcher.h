@@ -299,6 +299,9 @@ class InputDispatcher final : public IInputDispatcher {
     // inactive since the dispatcher recorded its generation, as the guest
     // forgot them, and reports their synthesized CANCELs. Writes nothing.
     void ResyncDevices();
+    // Notifies each affected session's `reset_tracker` once per `(session,
+    // display_id)` when a device removal or driver reset clears contacts.
+    void RecordDisplayResets(const ReleasedContacts& released);
     // Reports a synthesized CANCEL per session and requested display of
     // `released`, whose sessions must be open.
     void ReportCancels(const ReleasedContacts& released) ABSL_LOCKS_EXCLUDED(outbox_mutex_);

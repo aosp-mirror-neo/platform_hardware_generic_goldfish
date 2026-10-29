@@ -43,16 +43,22 @@ inline constexpr int kTouchDeviceSlots = 11;
  */
 inline constexpr int kReservedHumanSlots = 2;
 
-/** @brief Identifies one pointer of one input session. */
+/** @brief Identifies one pointer of one input session on one requested display. */
 struct ContactKey {
     InputSessionId session;
+    /**
+     * @brief The display the client requested when addressing this pointer,
+     * which can differ from the physical `TouchDeviceId` it resolved to (for
+     * example, a foldable routing display 0 to an outer touch device).
+     */
+    int32_t display_id;
     int32_t pointer_id;
 
     friend bool operator==(const ContactKey&, const ContactKey&) = default;
 
     template <typename H>
     friend H AbslHashValue(H h, const ContactKey& key) {
-        return H::combine(std::move(h), key.session, key.pointer_id);
+        return H::combine(std::move(h), key.session, key.display_id, key.pointer_id);
     }
 };
 
@@ -60,12 +66,6 @@ struct ContactKey {
 struct Contact {
     TouchDeviceId device;
     int slot;
-    /**
-     * @brief The display the client requested when the contact was created,
-     * which can differ from the device it resolved to (a foldable may route
-     * display 0 to another device).
-     */
-    int32_t display_id;
 
     friend bool operator==(const Contact&, const Contact&) = default;
 };
@@ -74,14 +74,13 @@ using ReleasedContacts = absl::InlinedVector<std::pair<ContactKey, Contact>, kTo
 
 /**
  * @brief Owns multi-touch slot allocation for every touch device, so that
- * independent input sessions never collide on the same guest slot.
+ * independent input sessions and displays never collide on the same guest slot.
  *
  * A contact is bound to the device it was first acquired on until it is
  * released; callers use the slot number as the evdev tracking ID.
  *
  * ### Invariants:
- * - Each held `ContactKey` maps to exactly one `(device, slot)` and keeps the
- *   display it was acquired for.
+ * - Each held `ContactKey` maps to exactly one `(device, slot)`.
  * - Each `(device, slot)` has at most one owner.
  * - Contacts of non-human sessions on a device never exceed
  *   `kTouchDeviceSlots - kReservedHumanSlots`.
@@ -96,18 +95,15 @@ class ContactTable {
      * @brief Returns the slot held by `key`, allocating the lowest free slot on
      * `device` if `key` holds none.
      *
-     * @param key The session pointer that wants a slot.
+     * @param key The `(session, display_id, pointer_id)` that wants a slot.
      * @param device Device to allocate on; ignored if `key` already holds a
      *     contact, which stays on the device it was first acquired on.
-     * @param display_id The display the client requested, which `device` was
-     *     resolved from; ignored, like `device`, if `key` holds a contact.
      * @param human Whether the session is driven by a human; only human
      *     sessions may use the reserved slots.
      * @return The slot, or `ResourceExhaustedError` (with no state change) if
      *     no slot is available to the caller.
      */
-    absl::StatusOr<int> Acquire(ContactKey key, TouchDeviceId device, int32_t display_id,
-                                bool human);
+    absl::StatusOr<int> Acquire(ContactKey key, TouchDeviceId device, bool human);
 
     std::optional<Contact> Find(const ContactKey& key) const;
     bool IsHeld(const ContactKey& key) const { return contacts_.contains(key); }
@@ -126,10 +122,16 @@ class ContactTable {
     ReleasedContacts ReleaseSession(InputSessionId session);
 
     /**
-     * @brief Frees the contacts of `session` on `device`.
-     * @return The released contacts, sorted by `slot`.
+     * @brief Returns the contacts held by `session` on `display_id` without
+     * freeing them, sorted by `(device, slot)`.
      */
-    ReleasedContacts ReleaseSessionOn(InputSessionId session, TouchDeviceId device);
+    ReleasedContacts FindSessionOn(InputSessionId session, int32_t display_id) const;
+
+    /**
+     * @brief Frees the contacts of `session` on `display_id`.
+     * @return The released contacts, sorted by `(device, slot)`.
+     */
+    ReleasedContacts ReleaseSessionOn(InputSessionId session, int32_t display_id);
 
     /**
      * @brief Frees all contacts on `device`.

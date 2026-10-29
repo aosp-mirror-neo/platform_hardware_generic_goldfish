@@ -256,6 +256,7 @@ void InputDispatcher::OnDisplayRemoved(TouchDeviceId device) {
             }
             active_generations_.erase(gen_it);
         }
+        RecordDisplayResets(released);
         ReportCancels(released);
     });
 }
@@ -382,7 +383,8 @@ absl::Status InputDispatcher::ApplyPointer(InputSessionId session, const Pointer
     Reports reports;
     std::optional<TouchDeviceId> resolved;
     for (const PointerEvent::Pointer& pointer : event.pointers()) {
-        if (std::optional<Contact> held = contacts_.Find({session, pointer.pointer_id()})) {
+        const ContactKey key{session, event.display_id(), pointer.pointer_id()};
+        if (std::optional<Contact> held = contacts_.Find(key)) {
             if (!reject_held) {
                 RETURN_IF_ERROR(AddTarget(devices_, held->device, reports));
             }
@@ -402,12 +404,12 @@ absl::Status InputDispatcher::ApplyPointer(InputSessionId session, const Pointer
     reported.clear_pointers();
     absl::Status result;
     for (const PointerEvent::Pointer& pointer : event.pointers()) {
-        const ContactKey key{session, pointer.pointer_id()};
+        const ContactKey key{session, event.display_id(), pointer.pointer_id()};
         if (std::optional<Contact> held = contacts_.Find(key)) {
             if (reject_held) {
                 result.Update(absl::FailedPreconditionError(absl::StrCat(
                         "Cannot apply POINTER_ACTION_DOWN because Pointer ", pointer.pointer_id(),
-                        " is already held by session ", session,
+                        " on display ", event.display_id(), " is already held by session ", session,
                         "; send POINTER_ACTION_UP or POINTER_ACTION_CANCEL before pressing it "
                         "again.")));
                 continue;
@@ -422,8 +424,7 @@ absl::Status InputDispatcher::ApplyPointer(InputSessionId session, const Pointer
             }
             *reported.add_pointers() = pointer;
         } else if (CreatesContact(action)) {
-            absl::StatusOr<int> slot =
-                    contacts_.Acquire(key, *resolved, event.display_id(), options.human);
+            absl::StatusOr<int> slot = contacts_.Acquire(key, *resolved, options.human);
             if (!slot.ok()) {
                 result.Update(slot.status());
                 continue;
@@ -443,19 +444,24 @@ absl::Status InputDispatcher::ApplyPointer(InputSessionId session, const Pointer
 
 absl::Status InputDispatcher::CancelOnDisplay(InputSessionId session, int32_t source_id,
                                               int32_t display_id, PointerAction action) {
-    ASSIGN_OR_RETURN(TouchDeviceId device, devices_.Resolve(display_id));
+    const ReleasedContacts held = contacts_.FindSessionOn(session, display_id);
+    if (held.empty()) {
+        ASSIGN_OR_RETURN(TouchDeviceId device, devices_.Resolve(display_id));
+        Reports unused;
+        return AddTarget(devices_, device, unused);
+    }
     Reports reports;
-    RETURN_IF_ERROR(AddTarget(devices_, device, reports));
+    for (const auto& [key, contact] : held) {
+        RETURN_IF_ERROR(AddTarget(devices_, contact.device, reports));
+    }
     InputEvent cancel = CancelEvent(source_id, display_id);
-    for (const auto& [key, contact] : contacts_.ReleaseSessionOn(session, device)) {
-        AppendLift(action, contact.slot, reports.front());
+    for (const auto& [key, contact] : contacts_.ReleaseSessionOn(session, display_id)) {
+        AppendLift(action, contact.slot, ReportFor(reports, contact.device));
         cancel.mutable_pointer()->add_pointers()->set_pointer_id(key.pointer_id);
     }
     WriteReports(loop_, reports, active_generations_,
                  [this](TouchDeviceId d, TouchDeviceSink& s) { FlushStaleSlots(d, s); });
-    if (!cancel.pointer().pointers().empty()) {
-        Report(std::move(cancel));
-    }
+    Report(std::move(cancel));
     return absl::OkStatus();
 }
 
@@ -580,7 +586,11 @@ void InputDispatcher::OnIdleTimer(InputSessionId session) {
     if (it == sessions_.end() || it->second.idle_generation != it->second.armed_generation) {
         return;  // Closed, or an operation ran since the timer was armed.
     }
+    const std::shared_ptr<SessionResetTracker> tracker = it->second.options.reset_tracker;
     ReleaseSessionInput(session);
+    if (tracker != nullptr) {
+        tracker->RecordFullReset();
+    }
 }
 
 void InputDispatcher::ReleaseSessionInput(InputSessionId session) {
@@ -650,6 +660,11 @@ void InputDispatcher::ResetAfterSnapshotLoad() {
         }
     }
     ReportCancels(contacts_.Clear());
+    for (const auto& [session, state] : sessions_) {
+        if (state.options.reset_tracker != nullptr) {
+            state.options.reset_tracker->RecordFullReset();
+        }
+    }
 
     struct HeldKey {
         uint32_t code;
@@ -712,7 +727,22 @@ void InputDispatcher::ResyncDevices() {
             continue;
         }
         generation = sink->ActiveGeneration();
-        ReportCancels(contacts_.ClearDevice(device));
+        const ReleasedContacts released = contacts_.ClearDevice(device);
+        RecordDisplayResets(released);
+        ReportCancels(released);
+    }
+}
+
+void InputDispatcher::RecordDisplayResets(const ReleasedContacts& released) {
+    absl::flat_hash_set<std::pair<InputSessionId, int32_t>> seen;
+    for (const auto& [key, contact] : released) {
+        if (!seen.emplace(key.session, key.display_id).second) {
+            continue;
+        }
+        if (auto it = sessions_.find(key.session);
+            it != sessions_.end() && it->second.options.reset_tracker != nullptr) {
+            it->second.options.reset_tracker->RecordDisplayReset(key.display_id);
+        }
     }
 }
 
@@ -722,12 +752,12 @@ void InputDispatcher::ReportCancels(const ReleasedContacts& released) {
     for (const auto& [key, contact] : released) {
         auto cancel = std::ranges::find_if(cancels, [&](const auto& session_cancel) {
             return session_cancel.first == key.session &&
-                   session_cancel.second.pointer().display_id() == contact.display_id;
+                   session_cancel.second.pointer().display_id() == key.display_id;
         });
         if (cancel == cancels.end()) {
             const int32_t source_id = sessions_.at(key.session).options.source_id;
             cancel = cancels.emplace(cancels.end(), key.session,
-                                     CancelEvent(source_id, contact.display_id));
+                                     CancelEvent(source_id, key.display_id));
         }
         cancel->second.mutable_pointer()->add_pointers()->set_pointer_id(key.pointer_id);
     }

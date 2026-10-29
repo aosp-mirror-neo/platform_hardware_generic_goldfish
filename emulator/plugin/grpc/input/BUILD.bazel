@@ -132,8 +132,11 @@ cc_library(
     deps = [
         ":input_session_id",
         "//emulator/libs/eventing",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/functional:any_invocable",
         "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
         "@aemu//protos/services_v2:input_service_cc_proto",
     ],
