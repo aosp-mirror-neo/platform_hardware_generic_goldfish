@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -11,9 +11,14 @@ cc_library(
         "goldfish_pipe.h",
     ],
     deps = [
+        "//emulator/libs/SocketBuffer",
         "//emulator/plugin/legacy/common",
+        "//emulator/plugin/legacy/goldfish_gpu",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/synchronization",
     ],
     alwayslink = True,
 )
@@ -44,3 +49,17 @@ cc_library(
         "x86_64",
     ]
 ]
+
+cc_test(
+    name = "goldfish_pipe_test",
+    srcs = ["goldfish_pipe_test.cc"],
+    deps = [
+        ":goldfish_pipe",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/legacy/common",
+        "//emulator/plugin/legacy/common:fake_guest_memory",
+        "//emulator/plugin/legacy/goldfish_gpu",
+        "//emulator/plugin/legacy/goldfish_gpu:fake_goldfish_gpu",
+        "@googletest//:gtest",
+    ],
+)

@@ -19,6 +19,7 @@
 #include "absl/strings/str_cat.h"
 
 #include "android/goldfish/avd.h"
+#include "android/goldfish/constants.h"
 #include "android/goldfish/hardware_config.h"
 
 namespace android::goldfish {
@@ -39,7 +40,7 @@ absl::StatusOr<std::string> machine(const EmulatorConfig& emulator) {
         return absl::UnimplementedError(absl::StrCat("Machine type not supported: ", a));
     }
 
-    if (avd.ApiLevel() < 37) {
+    if (avd.ApiLevel() < kVirtioReadyApiLevel) {
         absl::StrAppend(&machine_arg, ",goldfish-pipe=on");
         absl::StrAppend(&machine_arg, ",goldfish-sync=on");
     }

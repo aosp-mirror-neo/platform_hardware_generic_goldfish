@@ -1,0 +1,35 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "goldfish_gpu",
+    srcs = [
+        "goldfish_gpu.cc",
+    ],
+    hdrs = [
+        "include/goldfish/legacy/goldfish_gpu/goldfish_gpu.h",
+    ],
+    includes = ["include"],
+    deps = [
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+cc_library(
+    name = "fake_goldfish_gpu",
+    testonly = True,
+    hdrs = [
+        "include/goldfish/legacy/goldfish_gpu/fake_goldfish_gpu.h",
+    ],
+    includes = ["include"],
+    deps = [
+        ":goldfish_gpu",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)

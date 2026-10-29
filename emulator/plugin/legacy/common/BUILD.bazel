@@ -29,3 +29,17 @@ cc_library(
         "@abseil-cpp//absl/log:check",
     ],
 )
+
+cc_library(
+    name = "fake_guest_memory",
+    testonly = True,
+    hdrs = [
+        "include/goldfish/legacy/common/fake_guest_memory.h",
+    ],
+    includes = ["include"],
+    deps = [
+        ":common",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)

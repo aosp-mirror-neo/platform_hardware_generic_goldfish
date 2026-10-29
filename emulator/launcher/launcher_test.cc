@@ -33,6 +33,7 @@
 
 #include "android/cpu/cpu_accelerator.h"
 #include "android/goldfish/avd.h"
+#include "android/goldfish/constants.h"
 #include "android/goldfish/input_paths.h"
 #include "goldfish/async/async_socket_server.h"
 #include "goldfish/async/libuv_event_loop.h"
@@ -273,7 +274,7 @@ class LauncherTest : public testing::Test {
         EXPECT_CALL(*avd, GetDeviceType()).WillRepeatedly(Return(DeviceType::kPhone));
         EXPECT_CALL(*avd, GetLastRunQemuVersion()).WillRepeatedly(Return(std::optional<int>(10)));
         EXPECT_CALL(*avd, Hw()).WillRepeatedly(testing::ReturnRef(hw));
-        EXPECT_CALL(*avd, ApiLevel()).WillRepeatedly(testing::Return(30));
+        EXPECT_CALL(*avd, ApiLevel()).WillRepeatedly(testing::Return(kVirtioReadyApiLevel));
 
         system_image_paths.system_image = temp_dir / "system.img";
         system_image_paths.vendor_image = temp_dir / "vendor.img";

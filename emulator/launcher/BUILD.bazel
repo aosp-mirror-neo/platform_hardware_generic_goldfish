@@ -43,6 +43,13 @@ unzip(
 )
 
 cc_library(
+    name = "constants",
+    hdrs = ["include/android/goldfish/constants.h"],
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "config_dirs",
     srcs = ["config_dirs.cc"],
     hdrs = ["include/android/goldfish/config_dirs.h"],
@@ -185,6 +192,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":avd",
+        ":constants",
         ":feature_flags",
         "//emulator/libs/file",
         "//emulator/libs/process",
@@ -653,6 +661,7 @@ cc_test(
     size = "medium",
     srcs = ["launcher_test.cc"],
     deps = [
+        ":constants",
         ":feature_flags",
         ":launcher_lib",
         ":mock_avd",

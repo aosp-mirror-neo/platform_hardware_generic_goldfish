@@ -20,25 +20,86 @@
 #include "goldfish/legacy/common/c/mmio_core.h"
 
 #ifdef __cplusplus
+#include <deque>
 #include <memory>
+
+#include "absl/base/thread_annotations.h"
+#include "absl/synchronization/mutex.h"
 
 #include "goldfish/legacy/common/adapters.h"
 #include "goldfish/legacy/common/i_guest_memory.h"
 #include "goldfish/legacy/common/i_mmio_device.h"
+#include "goldfish/legacy/goldfish_gpu/goldfish_gpu.h"
 
 namespace goldfish::legacy {
 
+enum GoldfishSyncReg : uint32_t {
+    kSyncRegBatchCommand = 0x00,
+    kSyncRegBatchGuestCommand = 0x04,
+    kSyncRegBatchCommandAddr = 0x08,
+    kSyncRegBatchCommandAddrHigh = 0x0c,
+    kSyncRegBatchGuestCommandAddr = 0x10,
+    kSyncRegBatchGuestCommandAddrHigh = 0x14,
+    kSyncRegInit = 0x18,
+};
+
+enum GoldfishSyncCommandType : uint32_t {
+    kSyncCmdReady = 0,
+    kSyncCmdCreateSyncTimeline = 1,
+    kSyncCmdCreateSyncFence = 2,
+    kSyncCmdSyncTimelineInc = 3,
+    kSyncCmdDestroySyncTimeline = 4,
+    kSyncCmdTriggerHostWait = 5,
+};
+
+struct GoldfishSyncCommand {
+    uint64_t handle = 0;
+    uint64_t hostcmd_handle = 0;
+    uint32_t cmd = 0;
+    uint32_t time_arg = 0;
+};
+static_assert(sizeof(GoldfishSyncCommand) == 24);
+
+struct GoldfishSyncGuestCommand {
+    uint64_t host_command = 0;
+    uint64_t glsync_handle = 0;
+    uint64_t thread_handle = 0;
+    uint64_t guest_timeline_handle = 0;
+};
+static_assert(sizeof(GoldfishSyncGuestCommand) == 32);
+
 class GoldfishSyncDevice final : public IMmioDevice {
   public:
-    GoldfishSyncDevice(std::unique_ptr<IGuestMemory> memory, SetIrqCallback set_irq);
+    GoldfishSyncDevice(std::unique_ptr<IGuestMemory> memory, SetIrqCallback set_irq,
+                       IGoldfishGpu& gpu);
+    ~GoldfishSyncDevice() override;
 
-    uint32_t Read(uint32_t offset) override;
-    void Write(uint32_t offset, uint32_t value) override;
-    void Reset() override;
+    GoldfishSyncDevice(const GoldfishSyncDevice&) = delete;
+    GoldfishSyncDevice& operator=(const GoldfishSyncDevice&) = delete;
+
+    uint32_t Read(uint32_t offset) ABSL_LOCKS_EXCLUDED(mu_) override;
+    void Write(uint32_t offset, uint32_t value) ABSL_LOCKS_EXCLUDED(mu_) override;
+    void Reset() ABSL_LOCKS_EXCLUDED(mu_) override;
+
+    void QueueTimelineInc(uint64_t guest_timeline, uint32_t how_much) ABSL_LOCKS_EXCLUDED(mu_);
+    void QueueHostCommand(const GoldfishSyncCommand& cmd) ABSL_LOCKS_EXCLUDED(mu_);
 
   private:
-    std::unique_ptr<IGuestMemory> memory_;
-    SetIrqCallback set_irq_;
+    struct CallbackState {
+        GoldfishSyncDevice* dev ABSL_GUARDED_BY(mu) = nullptr;
+        absl::Mutex mu;
+    };
+
+    const std::unique_ptr<IGuestMemory> memory_;
+    const std::shared_ptr<CallbackState> callback_state_;
+    const SetIrqCallback set_irq_;
+    IGoldfishGpu& gpu_;
+
+    std::deque<GoldfishSyncCommand> pending_ ABSL_GUARDED_BY(mu_);
+    uint64_t batch_cmd_addr_ ABSL_GUARDED_BY(mu_) = 0;
+    uint64_t batch_guestcmd_addr_ ABSL_GUARDED_BY(mu_) = 0;
+    bool irq_level_ ABSL_GUARDED_BY(mu_) = false;
+    absl::Mutex mu_;
 };
 
 }  // namespace goldfish::legacy

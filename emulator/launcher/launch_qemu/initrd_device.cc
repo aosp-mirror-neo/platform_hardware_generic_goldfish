@@ -36,10 +36,12 @@
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_replace.h"
 #include "absl/strings/str_split.h"
+#include "absl/strings/strip.h"
 #include "google/protobuf/text_format.h"
 
 #include "android/base/system.h"
 #include "android/goldfish/avd.h"
+#include "android/goldfish/constants.h"
 #include "android/goldfish/hardware_config.h"
 #include "android/status/status_macros.h"
 #include "bootconfig.h"
@@ -71,7 +73,12 @@ std::vector<std::pair<std::string, std::string>> getUserspaceBootProperties(
         const std::vector<std::string>& verifiedBootParameters, std::string_view vk_icd,
         const Avd& avd, const AndroidOptions& opts, const UserPaths& paths,
         const FeatureFlags& feature_flags) {
+    if (apiLevel < kMinSupportedApiLevel) {
+        LOG(QFATAL) << absl::StrFormat("API levels below %d are not supported yet.",
+                                       kMinSupportedApiLevel);
+    }
     const bool isX86ish = targetArch == "x86" || targetArch == "x86_64";
+    const bool is_legacy = apiLevel < kVirtioReadyApiLevel;
     const bool hasShellConsole = false;
     std::string androidbootVerityMode = "androidboot.veritymode";
     std::string androidbootHardwareGralloc = "androidboot.hardware.gralloc";
@@ -136,8 +143,8 @@ std::vector<std::pair<std::string, std::string>> getUserspaceBootProperties(
         params.push_back({"androidboot.serialno", serialno});
     }
 
-    // Use Guest ANGLE by default
-    if (!opts.no_guest_angle &&
+    // Use Guest ANGLE by default on API 37+
+    if (!is_legacy && !opts.no_guest_angle &&
         feature_flags.IsEnabled(android_studio::EmulatorFeatureFlagState::GUEST_ANGLE)) {
         // Enable GuestAngle (ro.hardware.egl = angle).
         params.push_back({hwEglProp, "angle"});
@@ -202,8 +209,10 @@ std::vector<std::pair<std::string, std::string>> getUserspaceBootProperties(
     params.push_back({qemuScreenOffTimeoutProp, "2147483647"});
     params.push_back({androidbootVerityMode, "enforcing"});
 
-    // only work with minigbm gralloc
-    params.push_back({androidbootHardwareGralloc, "minigbm"});
+    if (!is_legacy) {
+        // only work with minigbm gralloc
+        params.push_back({androidbootHardwareGralloc, "minigbm"});
+    }
 
     // setup skin
 
@@ -217,22 +226,33 @@ std::vector<std::pair<std::string, std::string>> getUserspaceBootProperties(
     params.push_back({qemuVsyncProp, absl::StrFormat("%u", hw.hw_lcd_vsync)});
 
     // Set gl transport props
-    params.push_back({qemuGltransportNameProp, hw.hw_gltransport});
-    params.push_back({hwGltransportNameProp, hw.hw_gltransport});
+    std::string gltransport = hw.hw_gltransport;
+    uint32_t draw_flush_interval = hw.hw_gltransport_drawFlushInterval;
+    if (is_legacy) {
+        if (gltransport.empty() || gltransport == "virtio-gpu-pipe" || gltransport == "pipe") {
+            gltransport = "asg";
+        }
+        if (draw_flush_interval == 0) {
+            draw_flush_interval = 10000;
+        }
+    }
+    params.push_back({qemuGltransportNameProp, gltransport});
+    params.push_back({hwGltransportNameProp, gltransport});
 
-    params.push_back({qemuDrawFlushIntervalProp,
-                      absl::StrFormat("%u", hw.hw_gltransport_drawFlushInterval)});
+    params.push_back({qemuDrawFlushIntervalProp, absl::StrFormat("%u", draw_flush_interval)});
 
     // OpenGL ES related setup
     // 1. Set opengles.version and set Skia as UI renderer if
     // GLESDynamicVersion = on (i.e., is a reasonably good driver)
     params.push_back({qemuOpenglesVersionProp, absl::StrFormat("%d", bootPropOpenglesVersion)});
 
-    // Use skiavkthreaded by default, unless user specifies otherwise
-    std::string systemui_renderer =
-            opts.systemui_renderer ? opts.systemui_renderer : "skiavkthreaded";
+    std::string systemui_renderer = opts.systemui_renderer
+                                            ? opts.systemui_renderer
+                                            : (is_legacy ? "skiaglthreaded" : "skiavkthreaded");
 
-    params.push_back({qemuUirendererProp, systemui_renderer});
+    // HWUI only recognizes "skiagl" and "skiavk"; "threaded" variants are for RenderEngine.
+    params.push_back(
+            {qemuUirendererProp, std::string(absl::StripSuffix(systemui_renderer, "threaded"))});
     params.push_back({qemuRenderengineProp, systemui_renderer});
 
     params.push_back({androidbootLogcatProp,
@@ -464,12 +484,15 @@ std::vector<std::pair<std::string, std::string>> getBootProperties(const Emulato
                                                                    std::string_view vk_icd) {
     const Avd& avd = emulator.avd();
     auto hw = avd.Hw();
+    const int api_level = (avd.ApiLevel() > 0 && avd.ApiLevel() != Avd::kUnknownApiLevel)
+                                  ? avd.ApiLevel()
+                                  : 202504;
+    const bool is_legacy = api_level < kVirtioReadyApiLevel;
 
     int gles_major_version = 3;
-    int gles_minor_version = 2;
+    int gles_minor_version = is_legacy ? 0 : 2;
     int bootPropOpenglesVersion = gles_major_version << 16 | gles_minor_version;
     std::string real_console_tty_prefix = "hvc";
-    int api_level = 202504;
     auto verifiedBootParameters = getVerifiedBootparams(emulator);
     return getUserspaceBootProperties(hw.hw_cpu_arch, avd.Name(), bootPropOpenglesVersion,
                                       api_level, real_console_tty_prefix, verifiedBootParameters,
@@ -480,7 +503,7 @@ std::vector<std::pair<std::string, std::string>> getBootProperties(const Emulato
 absl::Status InitrdDevice::initialize(const EmulatorConfig& emulator) {
     using S = android_studio::EmulatorFeatureFlagState;
     const auto& ff = emulator.feature_flags();
-    if (!ff.IsEnabled(S::MINIGBM)) {
+    if (emulator.avd().ApiLevel() >= kVirtioReadyApiLevel && !ff.IsEnabled(S::MINIGBM)) {
         return absl::InvalidArgumentError(
                 ff.IsOverridden(S::MINIGBM)
                         ? "Minigbm feature is required by this emulator and cannot be disabled."

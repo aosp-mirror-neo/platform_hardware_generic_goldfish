@@ -35,6 +35,7 @@
 
 #include "adb_device.h"
 #include "android/goldfish/avd.h"
+#include "android/goldfish/constants.h"
 #include "android/process/command.h"
 #include "android/status/status_macros.h"
 #include "audio_device.h"
@@ -213,7 +214,7 @@ absl::Status LaunchQemu::addDevices() {
     // Also includes input devices for the display.
     addDevice<DisplayDevice>(gpu_name);
 
-    if (a.ApiLevel() < 37) {
+    if (a.ApiLevel() < kVirtioReadyApiLevel) {
         addDevice<GoldfishAddressSpaceDevice>("1e.0");
     }
 

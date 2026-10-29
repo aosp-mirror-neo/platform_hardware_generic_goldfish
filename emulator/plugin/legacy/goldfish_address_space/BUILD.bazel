@@ -1,19 +1,26 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
     name = "goldfish_address_space",
     srcs = [
+        "bar1_allocator.cc",
         "goldfish_address_space.cc",
     ],
     hdrs = [
+        "bar1_allocator.h",
         "goldfish_address_space.h",
     ],
     deps = [
+        "//emulator/libs/UniqueIdAllocator",
         "//emulator/plugin/legacy/common",
+        "//emulator/plugin/legacy/goldfish_gpu",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/synchronization",
     ],
     alwayslink = True,
 )
@@ -44,3 +51,17 @@ cc_library(
         "x86_64",
     ]
 ]
+
+cc_test(
+    name = "goldfish_address_space_test",
+    srcs = ["goldfish_address_space_test.cc"],
+    deps = [
+        ":goldfish_address_space",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/legacy/common",
+        "//emulator/plugin/legacy/common:fake_guest_memory",
+        "//emulator/plugin/legacy/goldfish_gpu",
+        "//emulator/plugin/legacy/goldfish_gpu:fake_goldfish_gpu",
+        "@googletest//:gtest",
+    ],
+)
