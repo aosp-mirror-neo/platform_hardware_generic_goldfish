@@ -89,21 +89,12 @@ void LogRejectedV1InputEvent(IInputDispatcher::DispatchResult result) {
 // Clean, testable event routing isolated from factory plumbing.
 absl::Status DispatchInProcessInputEvent(const InputEvent& request,
                                          InputEventSender& input_event_sender,
-                                         IKeyEventSender* key_event_sender,
-                                         DispatcherSession* session,
-                                         V1InputTranslator* translator) {
+                                         IKeyEventSender& key_event_sender) {
     VLOG(2) << "InProcess InputEvent: " << request.ShortDebugString();
 
     switch (request.type_case()) {
     case InputEvent::kKeyEvent:
-        if (session != nullptr && translator != nullptr) {
-            for (const auto& event : translator->TranslateKeyboard(request.key_event())) {
-                session->Dispatch(event, LogRejectedV1InputEvent);
-            }
-            return absl::OkStatus();
-        }
-        CHECK_NE(key_event_sender, nullptr);
-        key_event_sender->send(request.key_event());
+        key_event_sender.send(request.key_event());
         return absl::OkStatus();
 
     case InputEvent::kMouseEvent:
@@ -127,41 +118,35 @@ absl::Status DispatchInProcessInputEvent(const InputEvent& request,
     }
 }
 
-std::unique_ptr<InputSender> CreateV1InputSender(
-        IMultiDisplay& multidisplay, std::shared_ptr<InputEventSender> input_event_sender,
-        std::shared_ptr<IKeyEventSender> key_event_sender,
-        std::shared_ptr<IInputDispatcher> input_dispatcher,
-        V2InputValidator::Options v2_validator_options) {
+std::unique_ptr<InputSender> CreateV1InputSender(IMultiDisplay& multidisplay,
+                                                 std::shared_ptr<IInputDispatcher> input_dispatcher,
+                                                 V2InputValidator::Options v2_validator_options) {
     const IInputDispatcher::SessionOptions v1_session_options{
         .human = true, .source_id = 0, .reject_down_on_held = false};
-    auto session_holder = std::make_shared<std::unique_ptr<DispatcherSession>>();
-    std::shared_ptr<V1InputTranslator> translator;
-    if (input_dispatcher != nullptr) {
-        *session_holder = std::make_unique<DispatcherSession>(input_dispatcher, v1_session_options);
-        translator = std::make_shared<V1InputTranslator>(multidisplay,
-                                                         v2_validator_options.hw_sensor_hinge);
-    }
+    auto session_holder = std::make_shared<std::unique_ptr<DispatcherSession>>(
+            std::make_unique<DispatcherSession>(input_dispatcher, v1_session_options));
+    auto translator =
+            std::make_shared<V1InputTranslator>(multidisplay, v2_validator_options.hw_sensor_hinge);
     return std::make_unique<InProcessInputSender>(
-            [input_event_sender = std::move(input_event_sender),
-             key_event_sender = std::move(key_event_sender),
-             input_dispatcher = std::move(input_dispatcher), session_holder, translator,
+            [input_dispatcher = std::move(input_dispatcher), session_holder, translator,
              v1_session_options](const InputEvent& request) {
-                if (input_dispatcher != nullptr && *session_holder == nullptr) {
+                VLOG(2) << "InProcess InputEvent: " << request.ShortDebugString();
+                if (*session_holder == nullptr) {
                     *session_holder = std::make_unique<DispatcherSession>(input_dispatcher,
                                                                           v1_session_options);
                 }
-                return DispatchInProcessInputEvent(request, *input_event_sender,
-                                                   key_event_sender.get(), session_holder->get(),
-                                                   translator.get());
+                translator->SyncResetTracker((*session_holder)->ResetTracker());
+                for (const auto& event : translator->TranslateInputEvent(request)) {
+                    (*session_holder)->Dispatch(event, LogRejectedV1InputEvent);
+                }
+                return absl::OkStatus();
             },
             /*v2_dispatcher=*/nullptr,
             /*v2_sensors_dispatcher=*/nullptr,
             /*on_stop=*/
             [session_holder, translator]() {
                 session_holder->reset();
-                if (translator != nullptr) {
-                    translator->Reset();
-                }
+                translator->Reset();
             });
 }
 
@@ -242,14 +227,18 @@ InputSenderFactory CreateInProcessInputSenderFactory(
         V2InputValidator::Options v2_validator_options) {
     CHECK(key_event_sender != nullptr || input_dispatcher != nullptr)
             << "Either key_event_sender or input_dispatcher must not be null";
-    auto input_event_sender = std::make_shared<InputEventSender>(&multidisplay);
+    std::shared_ptr<InputEventSender> input_event_sender;
+    if (input_dispatcher == nullptr) {
+        input_event_sender = std::make_shared<InputEventSender>(&multidisplay);
+    }
     std::shared_ptr<::goldfish::grpc::v2::SensorsServiceImpl> sensors_service;
     if (physical_model != nullptr) {
         sensors_service =
                 std::make_shared<::goldfish::grpc::v2::SensorsServiceImpl>(*physical_model);
     }
 
-    return [&multidisplay, input_event_sender, key_event_sender = std::move(key_event_sender),
+    return [&multidisplay, input_event_sender = std::move(input_event_sender),
+            key_event_sender = std::move(key_event_sender),
             input_dispatcher = std::move(input_dispatcher), sensors_service,
             v2_validator_options](DataChannelLabel label) -> std::unique_ptr<InputSender> {
         if (label == DataChannelLabel::kInputV2 && input_dispatcher != nullptr) {
@@ -264,9 +253,14 @@ InputSenderFactory CreateInProcessInputSenderFactory(
                         return sensors_service->ApplySensorsUpdate(request);
                     });
         }
+        if (input_dispatcher != nullptr) {
+            return CreateV1InputSender(multidisplay, input_dispatcher, v2_validator_options);
+        }
 
-        return CreateV1InputSender(multidisplay, input_event_sender, key_event_sender,
-                                   input_dispatcher, v2_validator_options);
+        return std::make_unique<InProcessInputSender>([input_event_sender, key_event_sender](
+                                                              const InputEvent& request) {
+            return DispatchInProcessInputEvent(request, *input_event_sender, *key_event_sender);
+        });
     };
 }
 

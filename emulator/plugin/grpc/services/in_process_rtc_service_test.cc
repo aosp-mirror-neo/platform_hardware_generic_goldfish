@@ -18,9 +18,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -29,9 +31,13 @@
 #include "absl/time/time.h"
 
 #include "android/emulation/control/in_process_media_provider.h"
+#include "android/emulation/control/keyboard/key_conversion.h"
 #include "emulator/plugin/audio/test_bql.h"
 #include "emulator/plugin/audio/test_qemu_audio_stub.h"
+#include "emulator/plugin/grpc/input/input_dispatcher.h"
 #include "emulator/plugin/grpc/input/input_dispatcher_interface.h"
+#include "emulator/plugin/grpc/input/keyboard_sink.h"
+#include "emulator/plugin/grpc/input/multi_display_touch_devices.h"
 #include "emulator/plugin/grpc/input/recording_input_dispatcher.h"
 #include "emulator/plugin/vminterface/vm_lock.h"
 #include "goldfish/async/testing/test_event_loop.h"
@@ -45,6 +51,7 @@
 #include "goldfish/display/test/fake_pixman_display.h"
 #include "goldfish/system/testing/fake_clocks.h"
 #include "input_service.pb.h"
+#include "standard-headers/linux/input-event-codes.h"
 
 extern "C" {
 // NOLINTNEXTLINE(readability-identifier-naming)
@@ -278,10 +285,16 @@ TEST(InProcessRtcServiceTest, InputSenderDispatchesTouchAndMouseEvent) {
             ::goldfish::avd::globalEventLoop());
     TestAvdUniverse universe(&fake_multidisplay, *::goldfish::avd::globalEventLoop());
     auto key_event_sender = std::make_shared<FakeKeyEventSender>();
-    auto factory = CreateInProcessInputSenderFactory(fake_multidisplay, key_event_sender);
+    auto dispatcher = std::make_shared<RecordingInputDispatcher>();
+    auto factory =
+            CreateInProcessInputSenderFactory(fake_multidisplay, key_event_sender, dispatcher);
     auto sender = factory(DataChannelLabel::kInput);
     ASSERT_NE(sender, nullptr);
     EXPECT_TRUE(sender->Start().ok());
+    ASSERT_TRUE(dispatcher->opened_with.has_value());
+    EXPECT_TRUE(dispatcher->opened_with->human);
+    EXPECT_EQ(dispatcher->opened_with->source_id, 0);
+    EXPECT_FALSE(dispatcher->opened_with->reject_down_on_held);
 
     InputEvent touch_event;
     auto* touch = touch_event.mutable_touch_event()->add_touches();
@@ -294,21 +307,116 @@ TEST(InProcessRtcServiceTest, InputSenderDispatchesTouchAndMouseEvent) {
     InputEvent mouse_event;
     mouse_event.mutable_mouse_event()->set_x(50);
     mouse_event.mutable_mouse_event()->set_y(60);
+    mouse_event.mutable_mouse_event()->set_buttons(1);
     sender->SendEvent(mouse_event);
 
+    EXPECT_THAT(dispatcher->calls,
+                ::testing::ElementsAre("pointer 7 display 0", "pointer 7 display 0"));
+
+    sender->Stop();
+    EXPECT_THAT(dispatcher->calls,
+                ::testing::ElementsAre("pointer 7 display 0", "pointer 7 display 0", "close 7"));
+}
+
+TEST(InProcessRtcServiceTest, MultipleWebRtcPeersIsolatePointerZeroAndReleaseOnChannelStop) {
+    class TrackingKeyboardSink final : public ::goldfish::grpc::v2::KeyboardSink {
+      public:
+        void WriteKey(uint32_t evdev_code, bool down) override {
+            key_events.emplace_back(evdev_code, down);
+        }
+        void TypeText(std::string_view /*utf8*/) override {}
+        void Reset() override {}
+
+        std::vector<std::pair<uint32_t, bool>> key_events;
+    };
+
+    auto loop = ::goldfish::async::testing::TestEventLoop::Create("qemu");
+    ::goldfish::display::test::FakeMultiDisplay fake_multidisplay(loop.get());
     auto display = fake_multidisplay.GetDisplay<::goldfish::display::test::ActiveFakePixmanDisplay>(
             fake_multidisplay.GetDisplay(0));
+    display->evdev_reports.clear();
 
-    EXPECT_GT(display->evdevs.size(), 0);
-    bool has_touch = false;
-    for (const auto& ev : display->evdevs) {
-        if (ev.type == 3) has_touch = true;  // EV_ABS
-    }
-    EXPECT_TRUE(has_touch);
+    ::goldfish::grpc::v2::MultiDisplayTouchDevices touch_devices(fake_multidisplay,
+                                                                 /*has_hinge=*/false);
+    TrackingKeyboardSink keyboard_sink;
+    auto dispatcher = std::make_shared<::goldfish::grpc::v2::InputDispatcher>(
+            *loop, touch_devices, &keyboard_sink,
+            [](const ::android::emulation::v2::KeyEvent& key) {
+                return keyboard::dom_code_to_evdev(key.dom_code());
+            });
+    auto key_event_sender = std::make_shared<FakeKeyEventSender>();
+    auto factory =
+            CreateInProcessInputSenderFactory(fake_multidisplay, key_event_sender, dispatcher);
 
-    ASSERT_EQ(display->mouse_events.size(), 1);
-    EXPECT_EQ(display->mouse_events[0].x, 50);
-    EXPECT_EQ(display->mouse_events[0].y, 60);
+    auto count_active_slots = [&]() {
+        int active_slots = 0;
+        uint32_t selected_slot = 0;
+        std::array<int32_t, 11> slot_tracking;
+        slot_tracking.fill(-1);
+        for (const auto& report : display->evdev_reports) {
+            for (const auto& ev : report) {
+                if (ev.type == EV_ABS && ev.code == ABS_MT_SLOT) {
+                    selected_slot = ev.value;
+                } else if (ev.type == EV_ABS && ev.code == ABS_MT_TRACKING_ID &&
+                           selected_slot < slot_tracking.size()) {
+                    slot_tracking[selected_slot] = static_cast<int32_t>(ev.value);
+                }
+            }
+        }
+        for (const int32_t id : slot_tracking) {
+            if (id != -1) {
+                ++active_slots;
+            }
+        }
+        return active_slots;
+    };
+
+    auto peer_a = factory(DataChannelLabel::kInput);
+    auto peer_b = factory(DataChannelLabel::kInput);
+    ASSERT_TRUE(peer_a->Start().ok());
+    ASSERT_TRUE(peer_b->Start().ok());
+
+    // Both WebRTC peers send Touch(id=0, pressure=1) (JniRtcReceiver / XCID binary pressure).
+    InputEvent touch_a;
+    auto* ta = touch_a.mutable_touch_event()->add_touches();
+    ta->set_identifier(0);
+    ta->set_x(100);
+    ta->set_y(150);
+    ta->set_pressure(1);
+    peer_a->SendEvent(touch_a);
+
+    InputEvent key_a;
+    key_a.mutable_key_event()->set_key("KeyA");
+    key_a.mutable_key_event()->set_eventtype(KeyboardEvent::keydown);
+    peer_a->SendEvent(key_a);
+
+    InputEvent touch_b;
+    auto* tb = touch_b.mutable_touch_event()->add_touches();
+    tb->set_identifier(0);
+    tb->set_x(300);
+    tb->set_y(250);
+    tb->set_pressure(1);
+    peer_b->SendEvent(touch_b);
+    loop->RunAll();
+
+    EXPECT_EQ(count_active_slots(), 2);
+    ASSERT_EQ(keyboard_sink.key_events.size(), 1U);
+    EXPECT_EQ(keyboard_sink.key_events[0], std::make_pair(static_cast<uint32_t>(KEY_A), true));
+
+    // Peer A's DataChannel closes while PeerConnection is still alive: Peer A's touch and key
+    // are released immediately while Peer B's touch stays held.
+    peer_a->Stop();
+    loop->RunAll();
+    EXPECT_EQ(count_active_slots(), 1);
+    ASSERT_EQ(keyboard_sink.key_events.size(), 2U);
+    EXPECT_EQ(keyboard_sink.key_events[1], std::make_pair(static_cast<uint32_t>(KEY_A), false));
+
+    peer_b->Stop();
+    loop->RunAll();
+    EXPECT_EQ(count_active_slots(), 0);
+
+    dispatcher->Shutdown();
+    display->Stop();
 }
 
 TEST(InProcessRtcServiceTest, InputSenderV2DispatchesToAHumanSessionClosedWithTheChannel) {

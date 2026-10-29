@@ -323,8 +323,12 @@ cc_test(
         "//emulator/plugin/avd:avd_universe",
         "//emulator/plugin/avd:global_event_loop",
         "//emulator/plugin/display:test-display",
+        "//emulator/plugin/grpc/input:input_dispatcher",
         "//emulator/plugin/grpc/input:input_dispatcher_interface",
+        "//emulator/plugin/grpc/input:keyboard_sink",
+        "//emulator/plugin/grpc/input:multi_display_touch_devices",
         "//emulator/plugin/grpc/input:recording_input_dispatcher",
+        "//emulator/plugin/grpc/keyboard:keyconversion",
         "//emulator/plugin/grpc/keyboard:test_qemu_input_stub",
         "//emulator/plugin/vminterface:vm_lock",
         "//emulator/videobridge:videobridge_core",
@@ -333,6 +337,7 @@ cc_test(
         "@aemu//protos/services_v2:input_service_cc_proto",
         "@googletest//:gtest",
         "@grpc//:grpc++",
+        "@qemu//:qemu-headers-exported",
     ],
 )
 

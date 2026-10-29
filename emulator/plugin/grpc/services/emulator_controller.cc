@@ -79,52 +79,26 @@ void LogRejectedV1InputEvent(IInputDispatcher::DispatchResult result) {
 
 class StreamInputEventReader final : public ::SimpleServerReader<InputEvent> {
   public:
-    StreamInputEventReader(InputEventSender* legacy_sender,
-                           std::unique_ptr<DispatcherSession> session,
+    StreamInputEventReader(std::unique_ptr<DispatcherSession> session,
                            std::unique_ptr<V1InputTranslator> translator)
-            : legacy_sender_(legacy_sender)
-            , session_(std::move(session))
-            , translator_(std::move(translator)) {}
+            : session_(std::move(session)), translator_(std::move(translator)) {}
 
     bool Read(const InputEvent* request) override {
         if (session_ == nullptr) {
             return false;
         }
         VLOG(2) << "InputEvent:" << request->ShortDebugString();
-        if (request->has_key_event()) {
-            for (const auto& event : translator_->TranslateKeyboard(request->key_event())) {
-                session_->Dispatch(event, LogRejectedV1InputEvent);
-            }
-            return true;
-        }
-
-        absl::Status status;
-        if (request->has_mouse_event()) {
-            status = legacy_sender_->Send(request->mouse_event());
-        } else if (request->has_touch_event()) {
-            status = legacy_sender_->Send(request->touch_event());
-        } else if (request->has_android_event()) {
-            status = legacy_sender_->Send(request->android_event());
-        } else if (request->has_pen_event()) {
-            status = legacy_sender_->Send(request->pen_event());
-        } else if (request->has_wheel_event()) {
-            status = legacy_sender_->Send(request->wheel_event());
-        } else {
-            status = absl::InvalidArgumentError("Unknown event, is the emulator out of date?.");
-        }
-        if (!status.ok()) {
-            session_.reset();
-            translator_.reset();
-            this->Finish(AbslStatusToGrpcStatus(status));
-            return false;
+        translator_->SyncResetTracker(session_->ResetTracker());
+        for (const auto& event : translator_->TranslateInputEvent(*request)) {
+            session_->Dispatch(event, LogRejectedV1InputEvent);
         }
         return true;
     }
 
     void OnReadDone(bool ok) override {
         if (!ok) {
-            // Release the session before Finish() so held keys are queued for
-            // release before the client observes stream completion.
+            // Release the session before Finish() so held contacts and keys
+            // are queued for cleanup before the client observes stream completion.
             session_.reset();
             translator_.reset();
             this->Finish(Status::OK);
@@ -136,7 +110,6 @@ class StreamInputEventReader final : public ::SimpleServerReader<InputEvent> {
     void OnDone() override { delete this; }
 
   private:
-    InputEventSender* legacy_sender_;
     std::unique_ptr<DispatcherSession> session_;
     std::unique_ptr<V1InputTranslator> translator_;
 };
@@ -270,8 +243,9 @@ class EmulatorControllerImpl final
 
     ::grpc::ServerReadReactor<WheelEvent>* injectWheel(::grpc::CallbackServerContext* /*context*/,
                                                        Empty* /*response*/) override {
-        return new SimpleServerLambdaReader<WheelEvent>([this](auto request) {
-            return AbslStatusToGrpcStatus(input_event_sender_.Send(*request));
+        return new SimpleServerLambdaReader<WheelEvent>([](auto /*request*/) {
+            VLOG(1) << "Dropping unsupported v1 WheelEvent";
+            return Status::OK;
         });
     }
 
@@ -283,8 +257,7 @@ class EmulatorControllerImpl final
                     .human = true, .source_id = 0, .reject_down_on_held = false});
         auto translator = std::make_unique<V1InputTranslator>(
                 *multi_display_, avd_universe_->Props().hw_config.hw_sensor_hinge);
-        return new StreamInputEventReader(&input_event_sender_, std::move(session),
-                                          std::move(translator));
+        return new StreamInputEventReader(std::move(session), std::move(translator));
     }
 
     Status getClipboard(ServerContext* context, const Empty* /*request*/,
