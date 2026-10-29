@@ -126,15 +126,20 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
                 LOG(ERROR) << "Can't schedule a timer after it has been cancelled";
                 return;
             }
-            event_loop_->PostImmediatelyInternal(
-                    [self = shared_from_this(), new_delay_ms = absl::ToInt64Milliseconds(new_delay),
-                     new_interval_ms = absl::ToInt64Milliseconds(new_interval)] {
-                        if (self->pinned_) {
-                            self->interval_ms_ = new_interval_ms;
-                            self->next_t_ = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + new_delay_ms;
-                            timer_mod(&self->qemu_timer_handle_, self->next_t_);
-                        }
-                    });
+            event_loop_
+                    ->PostImmediately(
+                            [self = shared_from_this(),
+                             new_delay_ms = absl::ToInt64Milliseconds(new_delay),
+                             new_interval_ms = absl::ToInt64Milliseconds(new_interval)] {
+                                if (self->pinned_) {
+                                    self->interval_ms_ = new_interval_ms;
+                                    self->next_t_ =
+                                            qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + new_delay_ms;
+                                    timer_mod(&self->qemu_timer_handle_, self->next_t_);
+                                }
+                            },
+                            /*flow_id=*/0)
+                    .IgnoreError();
         }
 
       private:
@@ -154,18 +159,23 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
 
         void AddItselfToActiveTimers() {
             // shared_from_this() is not available in the ctor
-            event_loop_->PostImmediatelyInternal([self = shared_from_this()]() {
-                if (self->cancelled_.load() || self->event_loop_->is_shutting_down_.load()) {
-                    return;
-                }
-                DCHECK(!self->pinned_);
+            event_loop_
+                    ->PostImmediately(
+                            [self = shared_from_this()]() {
+                                if (self->cancelled_.load() ||
+                                    self->event_loop_->is_shutting_down_.load()) {
+                                    return;
+                                }
+                                DCHECK(!self->pinned_);
 
-                timer_init_ms(&self->qemu_timer_handle_, QEMU_CLOCK_VIRTUAL, &OnTimerStatic,
-                              self.get());
+                                timer_init_ms(&self->qemu_timer_handle_, QEMU_CLOCK_VIRTUAL,
+                                              &OnTimerStatic, self.get());
 
-                self->pinned_ = self;
-                self->event_loop_->AddActiveTimer(self);
-            });
+                                self->pinned_ = self;
+                                self->event_loop_->AddActiveTimer(self);
+                            },
+                            /*flow_id=*/0)
+                    .IgnoreError();
         }
 
         // C-style callback passed to QEMU.
@@ -268,7 +278,8 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
         FlowId flow_id;
     };
 
-    void PostImmediatelyInternal(Task task, FlowId flow_id = 0);
+    void PostImmediatelyLocked(Task task, FlowId flow_id = 0)
+            ABSL_EXCLUSIVE_LOCKS_REQUIRED(queue_mutex_);
     absl::Status PostImmediately(Task task, FlowId flow_id) override;
     absl::Status PostDelayed(Task task, absl::Duration delay, FlowId flow_id) override;
 
@@ -376,11 +387,15 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
 // --- QemuEventLoopImpl Method Implementations ---
 
 void QemuEventLoopImpl::ShutdownTimers() {
-    PostImmediatelyInternal([this]() { ShutdownTimersInternal(); });
+    if (IsOnLoopThread()) {
+        ShutdownTimersInternal();
+        return;
+    }
+    PostImmediately([this]() { ShutdownTimersInternal(); }, /*flow_id=*/0).IgnoreError();
 }
 
 size_t QemuEventLoopImpl::WaitUntilIdle() {
-    if (IsOnLoopThread()) {
+    if (IsOnLoopThread() || (!HasStartedDraining() && bql_locked())) {
         return DrainQueue();
     } else {
         const absl::MutexLock lock(queue_mutex_);
@@ -392,32 +407,40 @@ size_t QemuEventLoopImpl::WaitUntilIdle() {
 }
 
 std::future<absl::Status> QemuEventLoopImpl::Shutdown() {
-    if (is_shutting_down_.exchange(true)) {
-        std::promise<absl::Status> promise;
-        promise.set_value(absl::InvalidArgumentError("This loop has already been shutdown"));
-        return promise.get_future();
-    }
-    SetState(LooperStatusEvent::State::kShuttingDown);
-
     auto do_shutdown = [this] {
+        DrainQueue();
         ShutdownTimersInternal();
+        SetState(LooperStatusEvent::State::kFinished);
         shutdown_complete_promise_.set_value(absl::OkStatus());
     };
-    if (IsOnLoopThread()) {
+
+    const bool on_loop_thread = IsOnLoopThread() || (!HasStartedDraining() && bql_locked());
+    {
+        const absl::MutexLock lock(queue_mutex_);
+        if (is_shutting_down_.exchange(true)) {
+            std::promise<absl::Status> promise;
+            promise.set_value(absl::InvalidArgumentError("This loop has already been shutdown"));
+            return promise.get_future();
+        }
+    }
+    SetState(LooperStatusEvent::State::kShuttingDown);
+    auto future = shutdown_complete_promise_.get_future();
+
+    if (on_loop_thread) {
         do_shutdown();
     } else {
-        PostImmediatelyInternal(do_shutdown);
+        const absl::MutexLock lock(queue_mutex_);
+        PostImmediatelyLocked(do_shutdown);
     }
 
-    return shutdown_complete_promise_.get_future();
+    return future;
 }
 
 bool QemuEventLoopImpl::IsOnLoopThread() const {
     return qemu_thread_id_ == std::this_thread::get_id();
 }
 
-void QemuEventLoopImpl::PostImmediatelyInternal(Task task, FlowId flow_id) {
-    const absl::MutexLock lock(queue_mutex_);
+void QemuEventLoopImpl::PostImmediatelyLocked(Task task, FlowId flow_id) {
     queue_is_idle_ = false;
     task_queue_.push(QueuedTask{std::move(task), flow_id});
 
@@ -428,18 +451,19 @@ void QemuEventLoopImpl::PostImmediatelyInternal(Task task, FlowId flow_id) {
 }
 
 absl::Status QemuEventLoopImpl::PostImmediately(Task task, FlowId flow_id) {
+    const absl::MutexLock lock(queue_mutex_);
     if (is_shutting_down_) {
-        LOG(ERROR) << "Event loop is shutting down, not scheduling task";
+        VLOG(1) << "Event loop is shutting down, not scheduling task";
         return absl::UnavailableError("QemuEventLoopImpl is shutting down");
     }
 
-    PostImmediatelyInternal(std::move(task), flow_id);
+    PostImmediatelyLocked(std::move(task), flow_id);
     return absl::OkStatus();
 }
 
 absl::Status QemuEventLoopImpl::PostDelayed(Task task, absl::Duration delay, FlowId flow_id) {
     if (is_shutting_down_) {
-        LOG(ERROR) << "Event loop is shutting down, not scheduling task";
+        VLOG(1) << "Event loop is shutting down, not scheduling task";
         return absl::UnavailableError("QemuEventLoopImpl is shutting down");
     }
 
