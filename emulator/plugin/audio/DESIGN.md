@@ -105,9 +105,12 @@ type, `goldfish-audio-backend`, that **wraps** the real backend:
 
 ### 3.4 Non-goals
 
-- **Push-to-pull buffering.** Push producers (gRPC streams, WebRTC tracks) own their jitter/ring
-  buffer and expose it through `ReadCallback`. See `QemuMicrophoneSession` in
-  `audio_service_impl.cc` for an example.
+- **Push-to-pull buffering.** Push producers own their jitter/ring buffer and expose it through
+  `ReadCallback`. See `QemuMicrophoneSession` in `audio_service_impl.cc` for an example. WebRTC
+  needs none: `WebRtcMicrophone`'s `ReadCallback` makes WebRTC decode on demand
+  (`GoldfishAudioDeviceModule::PullPlayout()`), so NetEq is its only jitter buffer. That
+  decode runs under the BQL. Its measured guest impact and the decision to keep it are in
+  `emulator/videobridge/docs/DESIGN.md` §4.4.
 
 ---
 
