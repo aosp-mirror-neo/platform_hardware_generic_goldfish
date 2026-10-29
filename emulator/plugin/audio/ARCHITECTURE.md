@@ -11,14 +11,14 @@
 | `QemuAudioSource` | `:qemu_audio_source` | `include/goldfish/audio/qemu_audio_source.h` | WebRTC audio source adapter delivering captured guest speaker samples to WebRTC tracks. |
 | `QemuAudioInject` | `:qemu_audio_inject` | `include/goldfish/audio/qemu_audio_inject.h` | Pull-based microphone audio injector supporting arbitrary caller formats, in-place `Reconfigure()`, channel remixing, resampling, and mix-bus `MicrophoneSourceMetadata`. |
 | `GoldfishAudioBackend` | `:goldfish_audio_mux` | `include/goldfish/audio/goldfish_audio_mux.h` | QOM `AudioBackend` decorator (`goldfish-audio-mux`) wrapping `/audiodevs/hostaudiodev` as `/audiodevs/mainaudiodev`. |
-| `AudioInputMux` | `:audio_input_mux` | `include/goldfish/audio/audio_input_mux.h` | Pure C++ state machine multiplexing guest `SWVoiceIn` streams between host microphone and `QemuAudioInject`, with master mute, per-input mute/gain, and state observers. Serialized by the VM lock. |
-| `PcmPullPipeline` | `:pcm_pull_pipeline` | `include/goldfish/audio/pcm_pull_pipeline.h` | Zero-allocation pull converter supporting `U8/S16/S32/F32`, channel remixing, guest `Volume`, per-input mute/gain, and `webrtc::SincResampler`. |
+| `AudioInputMux` | `:audio_input_mux` | `include/goldfish/audio/audio_input_mux.h` | Pure C++ state machine routing guest `SWVoiceIn` streams to the host microphone or mixing up to `kMaxConcurrentMicrophoneStreams` `QemuAudioInject` sources, with master mute, per-input mute/gain, and state observers. Serialized by the VM lock. |
+| `PcmPullPipeline` | `:pcm_pull_pipeline` | `include/goldfish/audio/pcm_pull_pipeline.h` | Zero-allocation pull converter supporting `U8/S16/S32/F32`, channel remixing, guest `Volume`, per-input mute/gain, and `webrtc::SincResampler`, plus a float `MixInto()` stage for summing several sources. |
 | `VirtualAudioPacer` | `:virtual_audio_pacer` | `include/goldfish/audio/virtual_audio_pacer.h` | Drift-free 128-bit `QEMU_CLOCK_VIRTUAL` byte-quota pacer with snapshot clock-jump recovery and a 200 ms backlog limit. |
 | `TestBql` | `:test_bql` | `test_bql.h` | Per-thread `VmLock` for unit tests that call `AudioInputMux`. |
 
 ## Critical Infrastructure
 * **Zero-Patch QOM Decoration:** `goldfish-audio-mux` wraps `/audiodevs/hostaudiodev` and exposes `/audiodevs/mainaudiodev`, delegating all output/capture calls directly to the host backend while intercepting `SWVoiceIn` operations.
-* **Host OS Mic Release:** Activating `QemuAudioInject` immediately deactivates the wrapped host input voice (`set_active_in(..., false)`), releasing CoreAudio/PulseAudio/DirectSound capture and clearing host OS microphone indicators.
+* **Host OS Mic Release:** Activating any `QemuAudioInject` immediately deactivates the wrapped host input voice (`set_active_in(..., false)`), releasing CoreAudio/PulseAudio/DirectSound capture and clearing host OS microphone indicators. Injectors are mixed with each other, not with the host microphone.
 * **Virtual-Clock Pacing:** Paces injected (or host-mic-less silence) reads on a 10 ms `QEMU_CLOCK_VIRTUAL` timer so `virtio-snd` ring buffers are never overrun.
 * **Teardown Ordering Safety:** `GoldfishAudioBackend::unparent` calls `AudioInputMux::Shutdown()` during `audio_cleanup()`, allowing late `~QemuAudioInject()` calls during `deletable_cleanup()` to exit safely without touching finalized QOM state.
 

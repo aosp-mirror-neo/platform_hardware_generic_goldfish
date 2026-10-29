@@ -92,12 +92,14 @@ type, `goldfish-audio-backend`, that **wraps** the real backend:
 ### 3.3 Goals
 
 - Pull-driven: injected frames are pulled on QEMU's demand via `ReadCallback`. Nothing is pushed.
-- One injector at a time (`kMaxConcurrentMicrophoneStreams == 1`). A second `Start()` fails
+- Up to `kMaxConcurrentMicrophoneStreams` (4) injectors at once, summed in float and clamped
+  once when encoded, so a person's microphone and an agent's audio can both reach the guest. A
+  `Start()` past the limit fails with `ResourceExhaustedError`, and one reusing a live `source_id`
   with `AlreadyExistsError`.
 - Any caller format: `U8/S16/S32/F32`, any rate, 1–16 channels. The caller's format is converted
   to whatever the guest opened. `Reconfigure()` changes it in place.
 - Mixer controls: master mute, plus per-input mute and linear gain `[0.0, 4.0]` for the host mic
-  and the injector, with state observers.
+  and each injector, with state observers.
 - Correct timing on the virtual clock: no ring-buffer overruns, no drift, recovery after
   snapshot loads and VM pause/resume.
 
@@ -106,7 +108,6 @@ type, `goldfish-audio-backend`, that **wraps** the real backend:
 - **Push-to-pull buffering.** Push producers (gRPC streams, WebRTC tracks) own their jitter/ring
   buffer and expose it through `ReadCallback`. See `QemuMicrophoneSession` in
   `audio_service_impl.cc` for an example.
-- **Mixing several injectors.** Rejected today. Mixing would be a future extension (see §10).
 
 ---
 
@@ -183,7 +184,7 @@ Each guest input voice (a `MuxVoiceHandle`) is always in one of three states. `A
 recomputes this at the end of **every** mutation:
 
 ```text
-use_host_mic = !microphone_muted_ && !host_input_.muted && !active_injector_
+use_host_mic = !microphone_muted_ && !host_input_.muted && injectors_.empty()
 if (!guest_active)                        → Idle
 else if (use_host_mic && host_voice)      → Host passthrough
 else                                      → Paced
@@ -193,15 +194,25 @@ else                                      → Paced
 | :--- | :--- | :--- | :--- |
 | **Idle** | nothing (`read` returns 0) | nobody | off |
 | **Host passthrough** | `host_be->read()`, then scaled by the `"host"` input gain | the host backend's own timer → `OnHostDataAvailable` | **on** |
-| **Paced** | injector through `PcmPullPipeline`, or format-correct silence | our 10 ms `QEMUTimer` → `OnTimerTick` | **off** |
+| **Paced** | the injectors, each through its own `PcmPullPipeline` and summed, or format-correct silence | our 10 ms `QEMUTimer` → `OnTimerTick` | **off** |
 
 What the guest hears in paced mode:
 
 | Situation | Guest hears |
 | :--- | :--- |
-| Injector active, nothing muted | injected audio × guest volume × injector gain |
-| Injector active, master mute or injector input muted | silence, **but the injector is still pulled at 1.0x** (see §8) |
+| Injectors registered, nothing muted | Σ (injected audio × injector gain) × guest volume, clamped |
+| An injector's input muted | the others only; **the muted injector is still pulled at 1.0x** (see §8) |
+| Master mute | silence, **but every injector is still pulled at 1.0x** |
 | No injector (`"host"` input muted, master mute, or no physical host mic) | silence |
+
+Each injector adds its converted, gain-scaled samples to the voice's float mix buffer
+(`PcmPullPipeline::MixInto`), and the sum is clamped and encoded once (`EncodeGuestSamples`). One
+injector takes the same path as several, so there is a single conversion path to test.
+
+Any injector replaces the host mic rather than mixing with it. The host mic runs on the host
+device's clock and the injectors on the virtual clock, so mixing them would need drift handling
+(a resampling buffer) for a narrow case: the host mic is muted by default, and a local user can
+send the browser microphone over WebRTC instead, which mixes cleanly.
 
 ```mermaid
 stateDiagram-v2
@@ -209,16 +220,17 @@ stateDiagram-v2
     Idle --> Passthrough: SetVoiceActive(true) and host mic usable
     Idle --> Paced: SetVoiceActive(true) otherwise
     Passthrough --> Paced: injector registered, master mute, or host input muted
-    Paced --> Passthrough: injector gone, unmuted, and host voice exists
+    Paced --> Passthrough: last injector gone, unmuted, and host voice exists
     Passthrough --> Idle: SetVoiceActive(false)
     Paced --> Idle: SetVoiceActive(false)
     Idle --> [*]: CloseVoice
 ```
 
 When a voice switches into Paced mode, `ApplyRouting` **resets its pacer** to "now" and
-**flushes its resampler**, so no stale backlog or delay-line audio remains. It also
-**deactivates the host voice**, which releases the OS mic. Resets are also forced on
-`RegisterInjector`, `UnregisterInjector`, a guest voice re-open, and VM resume. The timer is
+**flushes its resamplers**, so no stale backlog or delay-line audio remains. It also
+**deactivates the host voice**, which releases the OS mic. Resets are also forced when the first
+injector registers or the last one leaves, on a guest voice re-open, and on VM resume. Injectors
+joining or leaving a running mix reset nothing, so the others play on undisturbed. The timer is
 armed exactly when `vm_running_ && any voice is Paced`.
 
 ### 4.3 Read path walkthrough (paced mode)
@@ -243,7 +255,7 @@ sequenceDiagram
         V->>B: read(sw, buf, size)
         B->>M: ReadVoice(handle, buf, size)
         M->>M: frames = min(size, pacer.AvailableBytes(now)) in whole frames, Consume
-        M->>P: Pull(frames, buf, read_cb, muted, gain)
+        M->>P: Pull(frames, buf, read_cb, muted, gain), or MixInto() per injector and encode
         P->>C: ReadCallback(scratch, n)
         C-->>P: frames written (short reads are silence-padded)
         P-->>M: buf filled with exactly `frames` guest frames
@@ -288,15 +300,15 @@ Key data, all protected by the VM lock (§6):
 
 | Member | Meaning |
 | :--- | :--- |
-| `voices_` (`MuxVoiceHandle`) | One per guest `open_in`: guest format, volume, guest callback, host voice handle (may be null), `guest_active`, `host_voice_active`, `paced`, its `VirtualAudioPacer`, and its `PcmPullPipeline` (only while an injector is registered). |
-| `active_injector_` (`Injector`) | The single registered injector: owner, `AudioStreamConfig`, `ReadCallback`, `ActiveCallback`, and its mixer input (`source_id`, `kind`, `muted`, `gain`). |
+| `voices_` (`MuxVoiceHandle`) | One per guest `open_in`: guest format, volume, guest callback, host voice handle (may be null), `guest_active`, `host_voice_active`, `paced`, its `VirtualAudioPacer`, one `PcmPullPipeline` per registered injector, and a float mix buffer. |
+| `injectors_` (`Injector`) | The registered injectors, in registration order: owner, `AudioStreamConfig`, `ReadCallback`, `ActiveCallback`, and its mixer input (`source_id`, `kind`, `muted`, `gain`). |
 | `microphone_muted_`, `host_input_` | Master mute, and the `"host"` mixer input (`muted`, `gain`). |
 
 **Every mutation ends with `Commit()`**, which runs three steps in order:
 
 1. `ApplyRouting()` recomputes each voice's mode (§4.2) and toggles host voices and the timer.
-2. `ReportGuestActivity()` calls the injector's `ActiveCallback` if "any guest voice active"
-   changed since it was last reported. Because `reported_guest_active` starts as `false`,
+2. `ReportGuestActivity()` calls each injector's `ActiveCallback` if "any guest voice active"
+   changed since it was last reported to that injector. Because `reported_guest_active` starts as `false`,
    registering while the guest records reports `true` immediately.
 3. `PublishState()` builds the public `AudioInputStateSnapshot`. If it differs from the published
    copy, it stores it and notifies observers.
@@ -331,26 +343,23 @@ available = floor_to_frames(due - consumed)                        (at most kMax
 
 ### 5.4 `PcmPullPipeline` ([pcm_pull_pipeline.h](include/goldfish/audio/pcm_pull_pipeline.h))
 
-`Pull(target_frames, dst, pull_source, input_muted, input_gain)` always writes **exactly**
-`target_frames` guest frames.
+`MixInto(target_frames, mix, pull_source, input_muted, input_gain)` adds **exactly**
+`target_frames` converted guest frames to an interleaved float buffer. `Pull()` is the same for
+one source, followed by `EncodeGuestSamples`, and always writes exactly `target_frames` guest
+frames. Output is processed in chunks of at most 512 frames (`kDefaultChunkFrames`), or less when
+resampling. All scratch buffers are allocated in the constructor, so there are **no heap
+allocations per pull**.
 
-1. **Fast path (`CanUseDirectPassthrough`).** If rate, channels, and sample format match, the
-   guest wants native endianness, guest volume is nominal, the input is not muted, and gain is
-   1.0, then `pull_source` writes straight into the guest buffer and any short read is padded
-   with silence.
-2. **General path.** Output is processed in chunks of at most 512 frames
-   (`kDefaultChunkFrames`), or less when resampling. All scratch buffers are allocated in the
-   constructor, so there are **no heap allocations per pull**.
-   1. Pull source frames and pad short reads with format silence.
-   2. Decode to float `[-1, 1]` (F32 input: NaN → 0, clamped).
-   3. **Downmix before resampling** to `mid = min(src_ch, dst_ch)` channels. Middle channel `m`
-      is the average of source channels `m, m+mid, m+2·mid, ...` (stereo→mono averages L and R).
-   4. **Resample** with one `webrtc::SincResampler` per middle channel, if rates differ.
-   5. **Upmix after resampling**: guest channel `c` takes middle channel `c % mid`
-      (mono→stereo duplicates).
-   6. Apply `gain[c] = guest_vol[c] / 255 × input_gain`. Force silence if the guest volume is
-      muted, `input_muted` is set, or gain ≤ 0. Then clamp and encode to the guest format
-      (`S8/U8/S16/U16/S32/U32/F32`, either endianness).
+1. Pull source frames and pad short reads with format silence.
+2. Decode to float `[-1, 1]` (F32 input: NaN → 0, clamped).
+3. **Downmix before resampling** to `mid = min(src_ch, dst_ch)` channels. Middle channel `m` is
+   the average of source channels `m, m+mid, m+2·mid, ...` (stereo→mono averages L and R).
+4. **Resample** with one `webrtc::SincResampler` per middle channel, if rates differ.
+5. **Upmix after resampling**: guest channel `c` takes middle channel `c % mid` (mono→stereo
+   duplicates).
+6. Scale by `gain[c] = guest_vol[c] / 255 × input_gain` and add to the mix. Add nothing if the
+   guest volume is muted, `input_muted` is set, or gain ≤ 0. The caller clamps and encodes the
+   sum to the guest format (`S8/U8/S16/U16/S32/U32/F32`, either endianness).
 
 **Multi-channel resampler detail (`ChannelResamplerState`).** Every per-channel `SincResampler`
 must consume the *same* source frames. Channel 0's refill callback pulls and decodes one block
@@ -368,8 +377,8 @@ if each `ResampleStep` triggers **at most one refill**. Step size is therefore c
   `GuestPcmFormat` is the guest side and mirrors QEMU `AudioFormat` (signed and unsigned
   8/16/32 plus F32, either endianness).
 - Helpers: `FillSourceSilence`, `FillGuestSilence` (unsigned formats use midpoint silence,
-  e.g. `0x80`), `EncodeGuestSample`, and `ScaleGuestPcmBuffer` (in-place gain for host
-  passthrough).
+  e.g. `0x80`), `EncodeGuestSample` / `EncodeGuestSamples`, and `ScaleGuestPcmBuffer` (in-place
+  gain for host passthrough).
 - Also holds the mixer constants (`kHostMicrophoneSourceId = "host"`, gain range,
   `kMaxConcurrentMicrophoneStreams`) and `MicrophoneSourceMetadata` / `MicrophoneInputKind`.
 
@@ -393,7 +402,8 @@ Errors returned by `Start()`:
 | `InvalidArgumentError` | Bad config, empty callback, or `source_id == "host"`. |
 | `UnavailableError` | No mux is registered (no `goldfish-audio-mux` on the command line, e.g. RISC-V). |
 | `FailedPreconditionError` | The mux has already shut down. |
-| `AlreadyExistsError` | Another injector owns the microphone. |
+| `AlreadyExistsError` | Another running injector uses the same `source_id`. |
+| `ResourceExhaustedError` | `kMaxConcurrentMicrophoneStreams` injectors are already running. |
 
 Free functions:
 
@@ -513,7 +523,7 @@ injector can outlive the backend it is attached to.
 | `:virtual_audio_pacer_test` | Exact quotas, 44.1 kHz fractional drift, partial consume, backward clock jump, 200 ms backlog limit at 8 and 48 kHz. |
 | `:pcm_pull_pipeline_test` | Fast path, underrun padding (incl. unsigned midpoint), up/downmix (4↔2, 4→1), 48k↔16k and 44.1k→48k resampling SNR, big-endian encode, NaN sanitizing, mute still pulls, gain saturation, `ScaleGuestPcmBuffer`. |
 | `:audio_input_mux_test` | Host passthrough, hot swap host↔injector, host-mic-less silence, conflict rejection, VM pause/resume and snapshot jump, late unregister after shutdown, multi-voice aggregate state, re-open, mute stacking, per-input controls with a Unicode `source_id`, observer drain and sibling removal, multithreaded stress under `TestBql` (TSAN), and a death test proving mutations without the VM lock fail the check. |
-| `:qemu_audio_inject_test` | Public API errors, end-to-end pull through a registered mux, `AlreadyExists`, survives `audio_cleanup()` first, concurrent start/stop, in-place reconfigure keeps gain, re-entrant observer that calls `Stop()`. |
+| `:qemu_audio_inject_test` | Public API errors, end-to-end pull through a registered mux, concurrent injectors and duplicate `source_id`, survives `audio_cleanup()` first, concurrent start/stop, in-place reconfigure keeps gain, re-entrant observer that calls `Stop()`. |
 | `:virtio_snd_inject_qtest` | Real `qemu-system-x86_64 -accel qtest` with `goldfish-audio-mux` + `virtio-sound-pci`: playback passthrough, takeover + resample + restore, `Start()` before guest `PREPARE`, host mic off by default and on with `allow-host-audio=on`, clean teardown. Runs with the real BQL, so it also exercises the lock check. |
 | `//emulator/launcher/launch_qemu:audio_device_test` | Command-line order, `none` fallback, `-no-audio` settings, and `-allow-host-audio` → `allow-host-audio=on`. |
 
@@ -527,11 +537,9 @@ bazel test --config=asan @goldfish//emulator/plugin/audio:all
 ## 10. Extending
 
 - **New caller sample format.** Add it to `SampleFormat`, `BytesPerSample`, `FillSourceSilence`,
-  `DecodeInterleavedToFloat`, and `CanUseDirectPassthrough`. Add a round-trip test in
-  `pcm_pull_pipeline_test`.
-- **Multiple simultaneous injectors.** Replace `std::optional<Injector>` with a list. Give each
-  voice one `PcmPullPipeline` per injector. Sum their float output before encoding:
-  `PcmPullPipeline` would need to expose a float-output stage. Then raise
-  `kMaxConcurrentMicrophoneStreams` and extend `PublishState`.
+  and `DecodeInterleavedToFloat`. Add a round-trip test in `pcm_pull_pipeline_test`.
+- **Raising the injector limit.** Raise `kMaxConcurrentMicrophoneStreams`. Each extra active
+  injector adds one `PcmPullPipeline` pass per guest voice under the BQL, so measure the
+  per-tick cost before raising it.
 - **New mixer control.** Add a field to `AudioInputStateSnapshot` and `AudioInputStateMutation`,
   apply it in `UpdateState`, and make sure `ApplyRouting` accounts for it if it affects routing.

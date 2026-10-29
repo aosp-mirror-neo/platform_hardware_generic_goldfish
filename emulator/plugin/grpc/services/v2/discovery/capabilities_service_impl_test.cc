@@ -171,7 +171,7 @@ TEST_F(CapabilitiesServiceTest, ReturnsSubsystemsCapabilities) {
     EXPECT_EQ(reply.audio().fidelity(), Fidelity::FIDELITY_HARDWARE);
     ASSERT_TRUE(reply.audio().has_microphone_profile());
     ASSERT_TRUE(reply.audio().has_max_concurrent_microphone_streams());
-    EXPECT_EQ(reply.audio().max_concurrent_microphone_streams(), 1);
+    EXPECT_EQ(reply.audio().max_concurrent_microphone_streams(), 4);
     EXPECT_THAT(reply.audio().microphone_profile().supported_formats(),
                 ElementsAre(SampleFormat::SAMPLE_FORMAT_PCM16_BIT,
                             SampleFormat::SAMPLE_FORMAT_F32_BIT));
@@ -313,7 +313,7 @@ TEST_F(CapabilitiesServiceTest, AudioProfilesFollowInputAndOutputHardwareFlags) 
         ASSERT_TRUE(reply.has_audio());
         EXPECT_TRUE(reply.audio().has_microphone_profile());
         EXPECT_TRUE(reply.audio().has_max_concurrent_microphone_streams());
-        EXPECT_EQ(reply.audio().max_concurrent_microphone_streams(), 1);
+        EXPECT_EQ(reply.audio().max_concurrent_microphone_streams(), 4);
         EXPECT_FALSE(reply.audio().has_speaker_profile());
     }
     {

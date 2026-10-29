@@ -41,7 +41,7 @@ inline constexpr float kMaxMicrophoneInputGain = 4.0F;
  * Maximum number of concurrent non-host microphone streams (`QemuAudioInject`) supported by the
  * current `AudioInputMux` implementation (`1` until multi-source summing lands).
  */
-inline constexpr int32_t kMaxConcurrentMicrophoneStreams = 1;
+inline constexpr int32_t kMaxConcurrentMicrophoneStreams = 4;
 
 /**
  * Origin classification for a virtual microphone mix-bus input channel.

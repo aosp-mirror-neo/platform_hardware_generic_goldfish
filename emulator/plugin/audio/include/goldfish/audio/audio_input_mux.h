@@ -121,9 +121,14 @@ class HostAudioInputInterface {
 };
 
 /**
- * Routes the guest microphone (`SWVoiceIn`) to either the host microphone or a single external
- * pull injector (`QemuAudioInject`), and implements the virtual microphone mixer (master mute,
- * per-input mute and gain).
+ * Routes the guest microphone (`SWVoiceIn`) to the host microphone, or mixes up to
+ * `kMaxConcurrentMicrophoneStreams` external pull injectors (`QemuAudioInject`) into it, and
+ * implements the virtual microphone mixer (master mute, per-input mute and gain).
+ *
+ * Injectors are summed in float and clamped once when encoding, so a person's microphone and an
+ * agent's audio can feed the guest at the same time.
+ * Any injector replaces the host microphone: the host mic runs on the device clock and the
+ * injectors on the virtual clock, and mixing the two would need drift handling.
  *
  * Threading: every method except `GetStateSnapshot()`, `IsShutdown()`, `AddStateObserver()` and
  * `RemoveStateObserver()` must be called with the VM lock held (`android::goldfish::VmLock`, the
@@ -177,13 +182,15 @@ class AudioInputMux {
     // ---- Injector (VM lock required). ----
 
     /**
-     * Registers @p owner as the exclusive microphone source.
+     * Registers @p owner as a microphone source, mixed with any other registered injectors.
+     * Registering an owner again returns its existing `source_id`.
      *
      * @param metadata Mixer channel identity. An empty `source_id` is replaced by `"stream-<n>"`.
      * @return The mixer `source_id` of the registered injector, or:
      * - `InvalidArgumentError` for an invalid @p config or `source_id == "host"`.
      * - `FailedPreconditionError` after `Shutdown()`.
-     * - `AlreadyExistsError` if a different owner is registered.
+     * - `AlreadyExistsError` if another injector already uses the `source_id`.
+     * - `ResourceExhaustedError` if `kMaxConcurrentMicrophoneStreams` injectors are registered.
      *
      * If a guest voice is already recording, @p active_cb is invoked with `true` before returning.
      */
@@ -192,14 +199,15 @@ class AudioInputMux {
                                                  MicrophoneSourceMetadata metadata = {});
 
     /**
-     * Changes the active injector's format and optionally its `source_id` (empty keeps it). Mute
-     * and gain are preserved.
+     * Changes @p owner's format and optionally its `source_id` (empty keeps it). Mute and gain are
+     * preserved. Fails with `AlreadyExistsError` if another injector uses the new `source_id`, and
+     * with `FailedPreconditionError` if @p owner is not registered.
      */
     absl::Status ReconfigureInjector(const void* owner, const AudioStreamConfig& config,
                                      std::optional<std::string_view> new_source_id = std::nullopt);
 
     /**
-     * Unregisters @p owner if it is the active injector. Its `ReadCallback` is never called again.
+     * Unregisters @p owner if it is registered. Its `ReadCallback` is never called again.
      */
     void UnregisterInjector(const void* owner);
 
@@ -208,7 +216,7 @@ class AudioInputMux {
      *
      * @return The updated snapshot, or:
      * - `InvalidArgumentError` if a `source_id` is empty or a `gain` is outside `[0.0, 4.0]`.
-     * - `NotFoundError` if a `source_id` is neither `"host"` nor the active injector.
+     * - `NotFoundError` if a `source_id` is neither `"host"` nor a registered injector.
      * - `FailedPreconditionError` after `Shutdown()`.
      */
     absl::StatusOr<AudioInputStateSnapshot> UpdateState(const AudioInputStateMutation& mutation);
@@ -244,7 +252,12 @@ class AudioInputMux {
 
     MuxVoiceHandle* FindVoice(const MuxVoiceHandle* handle) const;
     bool AnyGuestVoiceActive() const;
-    void RebuildPipeline(MuxVoiceHandle& voice) const;
+    Injector* FindInjector(const void* owner);
+    // Creates (or replaces) @p voice's converter for @p injector.
+    void BuildPipeline(MuxVoiceHandle& voice, const Injector& injector) const;
+    void RebuildPipelines(MuxVoiceHandle& voice) const;
+    // Fills @p dst with @p frames paced frames: the sum of all injectors.
+    void MixPacedFrames(MuxVoiceHandle& voice, size_t frames, uint8_t* dst);
     void OnHostDataAvailable(MuxVoiceHandle* voice, int avail_bytes);
     MicrophoneInputInfo* FindInput(std::string_view source_id);
     void ShutdownInternal();
@@ -265,7 +278,7 @@ class AudioInputMux {
     bool timer_armed_ = false;
     bool microphone_muted_ = false;
     MicrophoneInputInfo host_input_;
-    std::optional<Injector> active_injector_;
+    std::vector<Injector> injectors_;  // Registration order, which is also the snapshot order.
     uint64_t next_stream_id_ = 1;
     std::vector<std::unique_ptr<MuxVoiceHandle>> voices_;
 

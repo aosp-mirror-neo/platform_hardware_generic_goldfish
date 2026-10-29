@@ -84,7 +84,7 @@ class QemuAudioInject {
     QemuAudioInject& operator=(const QemuAudioInject&) = delete;
 
     /**
-     * Registers this injector as the exclusive active microphone source.
+     * Registers this injector as a microphone source, mixed with any other running injectors.
      *
      * @return
      * - `absl::OkStatus()` when registered (or idempotent no-op if `this` is already running).
@@ -92,7 +92,8 @@ class QemuAudioInject {
      *   `channels == 0` or `> 16`), `metadata().source_id == "host"`, or `read_cb` is empty.
      * - `absl::UnavailableError` if no `goldfish-audio-mux` is configured (e.g., RISC-V AVDs).
      * - `absl::FailedPreconditionError` if the target `GoldfishAudioBackend` has already shut down.
-     * - `absl::AlreadyExistsError` if another `QemuAudioInject` instance currently owns the mic.
+     * - `absl::AlreadyExistsError` if another running injector uses the same `source_id`.
+     * - `absl::ResourceExhaustedError` if `kMaxConcurrentMicrophoneStreams` injectors are running.
      */
     absl::Status Start() ABSL_LOCKS_EXCLUDED(mutex_);
 
