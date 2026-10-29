@@ -197,35 +197,6 @@ IFrameSource::Start VirtualDisplay::CaptureSurface(LegacySurfaceSource& source) 
     });
 }
 
-void VirtualDisplay::SendMultiTouchEvent(uint8_t slot, int x, int y, MultiTouchType type) {
-    const absl::MutexLock lock(&send_lock_);
-    if (!vhid_) return;
-
-    const Dimensions dims = GetDimensions();
-
-    qemu_loop_
-            ->Post([vhid = vhid_, slot, x, y, type, dims]() {
-                InputHandler::SendMultiTouchEvent(vhid, slot, x, y, type, dims);
-            })
-            .IgnoreError();
-
-    VLOG(2) << "[VirtualDisplay " << static_cast<int>(Id()) << "] MultiTouch -> "
-            << "Slot: " << static_cast<int>(slot) << ", X: " << x << ", Y: " << y
-            << ", Type: " << static_cast<int>(type) << "\n";
-}
-
-void VirtualDisplay::SendMouseEvent(int x, int y, int button_mask) {
-    const absl::MutexLock lock(&send_lock_);
-    if (!vhid_) return;
-    const Dimensions dims = GetDimensions();
-    qemu_loop_
-            ->Post([vhid = vhid_, x, y, button_mask, dims] {
-                InputHandler::SendMouseEvent(vhid, x, y, button_mask, dims);
-            })
-            .IgnoreError();
-    last_bmask_ = button_mask;
-}
-
 void VirtualDisplay::SendEvDevEvent(uint16_t type, uint16_t code, uint32_t value) {
     const absl::MutexLock lock(&send_lock_);
     if (!vhid_) return;

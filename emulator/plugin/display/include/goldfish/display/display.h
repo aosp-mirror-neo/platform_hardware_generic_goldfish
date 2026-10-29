@@ -45,14 +45,6 @@ namespace goldfish::display {
 
 using ::goldfish::async::EventLoop;
 
-enum class MultiTouchType : std::uint8_t {
-    kBegin,   //  = INPUT_MULTI_TOUCH_TYPE_BEGIN,
-    kUpdate,  // = INPUT_MULTI_TOUCH_TYPE_UPDATE,
-    kEnd,     // = INPUT_MULTI_TOUCH_TYPE_END,
-    kCancel,  // = INPUT_MULTI_TOUCH_TYPE_CANCEL,
-    kData,    // = INPUT_MULTI_TOUCH_TYPE_DATA,
-};
-
 enum class PixelFormat : std::uint8_t {
     // Portable Network Graphics format
     // (https://en.wikipedia.org/wiki/Portable_Network_Graphics)
@@ -237,16 +229,6 @@ class IDisplay : public std::enable_shared_from_this<IDisplay> {
     virtual absl::StatusOr<FrameInfo> GetPixels(PixelFormat fmt, int width, int height,
                                                 ImageRotation rotation, uint8_t* pixel,
                                                 size_t* c_pixels) const;
-
-    /**
-     * Sends a touch event to the proper display
-     */
-    virtual void SendMultiTouchEvent(uint8_t slot, int x, int y, MultiTouchType type) = 0;
-
-    /**
-     * Sends a mouse event to the proper display
-     */
-    virtual void SendMouseEvent(int x, int y, int button_mask) = 0;
 
     /**
      * Sends a raw evdev event to the proper display.

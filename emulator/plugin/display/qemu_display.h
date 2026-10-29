@@ -15,7 +15,6 @@
 
 #include <memory>
 
-#include "absl/base/thread_annotations.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 
@@ -47,8 +46,6 @@ class QemuDisplay : public PixmanDisplay {
     ~QemuDisplay() override;
 
     bool IsActive() const;
-    void SendMultiTouchEvent(uint8_t slot, int x, int y, MultiTouchType type) override;
-    void SendMouseEvent(int x, int y, int button_mask) override;
     void SendEvDevEvent(uint16_t type, uint16_t code, uint32_t value) override;
     void SendEvDevReport(EvDevEvents events) override;
     void WriteEvDevReportOnLoop(absl::Span<const EvDevEvent> events) override;
@@ -82,8 +79,6 @@ class QemuDisplay : public PixmanDisplay {
     EventLoop* qemu_loop_;
     ::VirtIOInputHID* vhid_ = nullptr;
     VirtioInputActiveTracker input_active_tracker_;
-    int last_bmask_ ABSL_GUARDED_BY(send_lock_) = 0;
-    struct touch_slot touch_slots_[INPUT_EVENT_SLOTS_MAX];
     absl::Mutex send_lock_;
     std::unique_ptr<DisplayChangeListener> dcl_;
     DisplaySurface* owned_surface_{nullptr};

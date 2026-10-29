@@ -25,25 +25,6 @@
 // clang-format on
 
 // A set of stubs for qemu methods we do not have.
-void qemu_input_event_sync(void) {}
-void warn_report_err(Error* err) {
-    (void)err;
-}
-void qemu_input_update_buttons(QemuConsole* src, uint32_t* button_map,  // NOLINT
-                               uint32_t button_old, uint32_t button_new) {
-    (void)src;
-    (void)button_map;
-    (void)button_old;
-    (void)button_new;
-}
-void qemu_input_queue_abs(QemuConsole* src, InputAxis axis, int value, int min_in, int max_in) {
-    (void)src;
-    (void)axis;
-    (void)value;
-    (void)min_in;
-    (void)max_in;
-}
-
 QemuConsole* qemu_console_lookup_default() {
     return NULL;
 }
@@ -208,20 +189,6 @@ void virtio_input_send(VirtIOInput* vinput, virtio_input_event* event) {
         g_virtio_input_send_hook(le16_to_cpu(event->type), le16_to_cpu(event->code),
                                  le32_to_cpu(event->value));
     }
-}
-void console_handle_touch_event(QemuConsole* con,
-                                struct touch_slot touch_slots[INPUT_EVENT_SLOTS_MAX],
-                                uint64_t num_slot, int width, int height, double x, double y,
-                                InputMultiTouchType type, Error** errp) {
-    (void)con;
-    (void)touch_slots;
-    (void)num_slot;
-    (void)width;
-    (void)height;
-    (void)x;
-    (void)y;
-    (void)type;
-    (void)errp;
 }
 
 void qemu_free_displaysurface(DisplaySurface* surface) {

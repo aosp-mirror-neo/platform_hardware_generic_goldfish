@@ -23,105 +23,7 @@ cc_library(
 
 cc_library(
     name = "slot_registry",
-    srcs = ["slot_registry.cc"],
     hdrs = ["slot_registry.h"],
-    deps = [
-        ":ev_dev_event",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/log:check",
-        "@abseil-cpp//absl/time",
-        "@abseil-cpp//absl/time:clock_interface",
-        "@qemu//:qemu-headers-exported",
-    ],
-)
-
-cc_library(
-    name = "pointer_event_dispatcher",
-    srcs = ["pointer_event_dispatcher.cc"],
-    hdrs = ["pointer_event_dispatcher.h"],
-    deps = [
-        ":ev_dev_event",
-        ":slot_registry",
-        "//emulator/plugin/display",
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/time:clock_interface",
-        "@abseil-cpp//absl/types:span",
-        "@aemu//protos/services/emulator-controller:emulator_controller_cc_grpc",
-        "@qemu//:qemu-headers-exported",
-    ],
-)
-
-cc_library(
-    name = "event_sender",
-    srcs = ["event_sender.cc"],
-    hdrs = ["include/android/emulation/control/event_sender.h"],
-    includes = ["include"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":ev_dev_event",
-        ":pointer_event_dispatcher",
-        "//emulator/libs/status_macros",
-        "//emulator/plugin/avd:avd_info",
-        "//emulator/plugin/display",
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/status",
-        "@aemu//protos/services/emulator-controller:emulator_controller_cc_grpc",
-        "@qemu//:qemu-headers-exported",
-    ],
-)
-
-cc_test(
-    name = "slot_registry_test",
-    size = "small",
-    srcs = ["slot_registry_test.cc"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":slot_registry",
-        "//emulator/libs/test:googletest_main",
-        "@abseil-cpp//absl/time",
-        "@abseil-cpp//absl/time:simulated_clock",
-    ],
-)
-
-cc_test(
-    name = "pointer_event_dispatcher_test",
-    size = "small",
-    srcs = ["pointer_event_dispatcher_test.cc"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":pointer_event_dispatcher",
-        "//emulator/libs/async:async_testing",
-        "//emulator/libs/grpc_utils:event-stream",
-        "//emulator/libs/system:test-headers",
-        "//emulator/libs/test:googletest_main",
-        "//emulator/plugin/display:test-display",
-        "@abseil-cpp//absl/flags:flag",
-        "@abseil-cpp//absl/flags:parse",
-        "@abseil-cpp//absl/time",
-        "@abseil-cpp//absl/time:simulated_clock",
-        "@bazel_tools//tools/cpp/runfiles",
-    ],
-)
-
-cc_test(
-    name = "event_sender_test",
-    size = "small",
-    srcs = ["event_sender_test.cc"],
-    data = [":binplace"],
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":event_sender",
-        "//emulator/libs/async:async_testing",
-        "//emulator/libs/test:googletest_main",
-        "//emulator/plugin/avd:fake_avd_universe",
-        "//emulator/plugin/display:test-display",
-        "@grpc",
-    ],
 )
 
 cc_library(
@@ -454,18 +356,20 @@ clang_tidy_test(
     name = "tidy",
     targets = [
         ":contact_table",
+        ":contact_table_test",
         ":dispatcher_session",
         ":dispatcher_session_test",
-        ":recording_input_dispatcher",
-        ":event_sender",
         ":input_dispatcher",
         ":input_dispatcher_interface",
+        ":input_dispatcher_test",
         ":input_session_id",
         ":keyboard_sink",
         ":multi_display_touch_devices",
         ":multi_display_touch_devices_test",
+        ":recording_input_dispatcher",
         ":touch_device",
         ":touch_encoding",
+        ":touch_encoding_test",
         ":v1_input_translator",
         ":v1_input_translator_test",
         ":v2_input_validator",

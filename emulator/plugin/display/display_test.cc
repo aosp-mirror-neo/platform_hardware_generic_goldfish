@@ -47,7 +47,6 @@ using goldfish::display::FrameEvent;
 using goldfish::display::FrameId;
 using goldfish::display::IDisplay;
 using goldfish::display::ImageRotation;
-using goldfish::display::MultiTouchType;
 using goldfish::display::ReadRequest;
 using goldfish::display::ReadTarget;
 using goldfish::display::Slot;
@@ -75,9 +74,6 @@ class TestDisplay : public IDisplay {
     TestDisplay(EventLoop* loop, uint8_t id, uint32_t width, uint32_t height)
             : IDisplay(loop, id, width, height) {}
 
-    void SendMultiTouchEvent(uint8_t /*slot*/, int /*x*/, int /*y*/,
-                             MultiTouchType /*type*/) override {}
-    void SendMouseEvent(int /*x*/, int /*y*/, int /*button_mask*/) override {}
     void SendEvDevEvent(uint16_t /*type*/, uint16_t /*code*/, uint32_t /*value*/) override {}
     void SendEvDevReport(EvDevEvents /*events*/) override {}
     void WriteEvDevReportOnLoop(absl::Span<const EvDevEvent> /*events*/) override {}
