@@ -204,7 +204,7 @@ class Launcher {
             return;
         }
         if (auto* p = emulator_process_.get()) {
-            if (qemu_shutdown_timeout_) {
+            if (qemu_shutdown_requested_) {
                 // If the user has sent another signal, e.g. another INT or TERM, then they
                 // must really want us to exit immediately so don't wait any longer.
                 LOG(WARNING)
@@ -214,6 +214,7 @@ class Launcher {
                 p->Kill(SIGKILL);
                 return;
             }
+            qemu_shutdown_requested_ = true;
             LOG(ERROR) << "Signal received, sending shutdown command to emulator: " << signum;
             if (auto s = send_emulator_grpc_shutdown(ports_.serial_number); !s.ok()) {
                 LOG(WARNING) << "Graceful gRPC shutdown failed; falling back to forceful kill with "
@@ -399,6 +400,7 @@ class Launcher {
 
     void emulator_exit(int64_t exit_status, int term_signal) {
         LOG(INFO) << "emulator exited with status " << exit_status << ", signal " << term_signal;
+        qemu_shutdown_requested_ = false;
         qemu_shutdown_timeout_.reset();
         emulator_exit_status_ = static_cast<int>(exit_status);
         emulator_process_.reset();
@@ -572,6 +574,7 @@ class Launcher {
     std::thread shutdown_thread_;
 
     std::atomic<bool> shutting_down_{false};
+    bool qemu_shutdown_requested_ = false;
 };
 
 }  // namespace
