@@ -49,6 +49,21 @@ namespace ver {
 
 namespace {
 
+#if defined(__SANITIZE_THREAD__)
+constexpr bool kIsThreadSanitizer = true;
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+constexpr bool kIsThreadSanitizer = true;
+#else
+constexpr bool kIsThreadSanitizer = false;
+#endif
+#else
+constexpr bool kIsThreadSanitizer = false;
+#endif
+
+constexpr int kAutoDecodeThreads = 0;
+constexpr int kSingleDecodeThread = 1;
+
 int getVideoStreamIndex(const AVFormatContext& fmtctx) {
     for (unsigned i = 0; i < fmtctx.nb_streams; ++i) {
         if (fmtctx.streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
@@ -152,9 +167,15 @@ std::optional<RawVideofileSource::VideoFile> RawVideofileSource::openVideoFile(
         return std::nullopt;
     }
 
-    // Set up multithreading. ffmpeg will determine the thread count
-    codecCtxWeak->thread_count = 0;
-    codecCtxWeak->thread_type = FF_THREAD_FRAME;
+    if constexpr (kIsThreadSanitizer) {
+        // @ffmpeg mixes C pthread_frame H.264 decoding with uninstrumented NASM
+        // assembly, producing false-positive TSAN races under FF_THREAD_FRAME.
+        codecCtxWeak->thread_count = kSingleDecodeThread;
+    } else {
+        // Set up multithreading. ffmpeg will determine the thread count.
+        codecCtxWeak->thread_count = kAutoDecodeThreads;
+        codecCtxWeak->thread_type = FF_THREAD_FRAME;
+    }
 
     err = avcodec_open2(codecCtxWeak, codec, nullptr);
     if (err < 0) {
@@ -163,7 +184,8 @@ std::optional<RawVideofileSource::VideoFile> RawVideofileSource::openVideoFile(
         return std::nullopt;
     }
 
-    if (codecCtxWeak->active_thread_type != FF_THREAD_FRAME) {
+    if (codecCtxWeak->thread_type == FF_THREAD_FRAME &&
+        codecCtxWeak->active_thread_type != FF_THREAD_FRAME) {
         dwarning("%s: Video codec is not using FF_THREAD_FRAME", __func__);
     }
 
