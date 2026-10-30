@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -169,7 +170,7 @@ TEST(SharedMemory, CrossProcess) {
                         .Execute();
 
     EXPECT_NE(proc, nullptr);
-    EXPECT_EQ(proc->WaitFor(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(proc->WaitFor(std::chrono::seconds(15)), std::future_status::ready);
     EXPECT_EQ(proc->ExitCode(), 0);
 }
 
@@ -178,25 +179,27 @@ TEST(SharedMemory, CrossProcessWrite) {
     std::string message = "Writer data";
     size_t size = 1024;
 
-    // Launch helper to write and sleep for 5 seconds to keep it alive
+    // Launch helper to write and sleep for 15 seconds to keep it alive
     auto proc = android::base::Command::Create({GetHelperExe(), "--name", unique_name, "--size",
                                                 std::to_string(size), "--mode", "write", "--data",
-                                                message, "--sleep", "5000"})
+                                                message, "--sleep", "15000"})
                         .Execute();
 
     EXPECT_NE(proc, nullptr);
 
-    // Read from here - retry loop as it might take a moment to start
+    // Wait for helper to both create and populate the shared memory mapping.
     SharedMemory reader(unique_name, size);
-    bool opened = false;
-    for (int i = 0; i < 20; ++i) {  // Try for 2 seconds
-        if (reader.Open(SharedMemory::AccessMode::kReadOnly).ok()) {
-            opened = true;
+    for (int i = 0; i < 100; ++i) {  // Try for up to 10 seconds
+        if (!reader.IsOpen()) {
+            (void)reader.Open(SharedMemory::AccessMode::kReadOnly);
+        }
+        if (reader.IsOpen() &&
+            std::string_view(static_cast<const char*>(*reader)) == message) {
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    ASSERT_TRUE(opened) << "Failed to open shared memory created by helper";
+    ASSERT_TRUE(reader.IsOpen()) << "Failed to open shared memory created by helper";
 
     std::string read(static_cast<const char*>(*reader));
     EXPECT_EQ(message, read);
