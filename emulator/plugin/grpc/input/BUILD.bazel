@@ -433,7 +433,6 @@ cc_test(
         ":multi_display_touch_devices",
         ":v1_input_translator",
         "//emulator/libs/async:async_testing",
-        "//emulator/libs/system:clock",
         "//emulator/libs/test:googletest_main",
         "//emulator/plugin/display:abstract_multi_display",
         "//emulator/plugin/display:base",
