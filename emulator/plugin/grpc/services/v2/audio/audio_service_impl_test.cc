@@ -37,6 +37,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/clock.h"
 #include "absl/time/time.h"
 
 #include "audio_service.grpc.pb.h"
@@ -933,7 +934,11 @@ TEST_F(AudioServiceTest, InjectAudioClipCancellationAbortsEarlyAndRestoresHostMi
     EXPECT_EQ(status.error_code(), StatusCode::CANCELLED);
     // Must abort after the first 20 ms slice rather than sleeping all 5 slices.
     EXPECT_EQ(sleep_slice_count, 1);
-    // Scoped QemuAudioInject teardown must immediately restore physical host mic passthrough.
+    // Scoped QemuAudioInject teardown on the server thread must restore host mic passthrough.
+    const absl::Time deadline = absl::Now() + absl::Seconds(5);
+    while (!host_input_.IsHostActive() && absl::Now() < deadline) {
+        absl::SleepFor(absl::Milliseconds(1));
+    }
     EXPECT_TRUE(host_input_.IsHostActive());
 
     guest_mux_.CloseVoice(voice);
@@ -1808,16 +1813,17 @@ TEST_F(AudioServiceTest,
         }
     });
 
-    std::thread state_observer([this, &start_barrier, &stop_workers]() {
+    std::atomic<bool> stop_observer{false};
+    std::thread state_observer([this, &start_barrier, &stop_observer]() {
         while (!start_barrier.load(std::memory_order_acquire)) {
             std::this_thread::yield();
         }
-        while (!stop_workers.load(std::memory_order_acquire)) {
+        while (!stop_observer.load(std::memory_order_acquire)) {
             ClientContext ctx;
             StreamAudioStateRequest req;
             auto reader = stub_->StreamAudioState(&ctx, req);
             AudioState state;
-            for (int reads = 0; reads < 3 && !stop_workers.load(std::memory_order_acquire);
+            for (int reads = 0; reads < 3 && !stop_observer.load(std::memory_order_acquire);
                  ++reads) {
                 if (!reader->Read(&state)) {
                     break;
@@ -1856,10 +1862,11 @@ TEST_F(AudioServiceTest,
         EXPECT_TRUE(status.ok()) << status.error_message();
     }
 
+    stop_observer.store(true, std::memory_order_release);
+    state_observer.join();
     stop_workers.store(true, std::memory_order_release);
     guest_worker.join();
     state_mutator.join();
-    state_observer.join();
     guest_mux_.CloseVoice(voice);
 }
 
