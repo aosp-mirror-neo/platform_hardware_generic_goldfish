@@ -14,7 +14,7 @@
 #include "android/emulation/control/keyboard/qemu_keyboard_sink.h"
 
 #include <bitset>
-#include <string>
+#include <string_view>
 
 #include "absl/log/check.h"
 
@@ -57,7 +57,7 @@ void QemuKeyboardSink::WriteKey(uint32_t evdev_code, bool down) {
 
 void QemuKeyboardSink::TypeText(std::string_view utf8) {
     DCHECK(qemu_loop_.IsOnLoopThread());
-    EmitUtf8String(std::string(utf8), [this](QemuKeyEvent event) { event.send(keyboard_state_); });
+    EmitUtf8String(utf8, [this](QemuKeyEvent event) { event.send(keyboard_state_); });
 }
 
 void QemuKeyboardSink::Reset() {

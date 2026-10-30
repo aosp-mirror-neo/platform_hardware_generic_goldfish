@@ -20,7 +20,6 @@
 #include <algorithm>
 #include <map>
 #include <memory>
-#include <ostream>
 #include <utility>
 #include <vector>
 
@@ -33,20 +32,10 @@
 
 namespace {
 
-struct SentKey {
-    QKeyCode code;
-    bool down;
-
-    friend bool operator==(const SentKey& a, const SentKey& b) {
-        return a.code == b.code && a.down == b.down;
-    }
-    friend std::ostream& operator<<(std::ostream& os, const SentKey& key) {
-        return os << "{qcode " << key.code << (key.down ? " down}" : " up}");
-    }
-};
+using ::android::emulation::control::keyboard::QemuKeyEvent;
 
 // The key events sent to QEMU's keyboard state, in order.
-std::vector<SentKey> g_sent_keys;
+std::vector<QemuKeyEvent> g_sent_keys;
 // Direct key-up and pacing events sent bypassing QKbdState during Reset().
 struct DirectEvent {
     QemuConsole* console = nullptr;
@@ -149,8 +138,8 @@ class QemuKeyboardSinkTest : public ::testing::Test {
 };
 
 TEST_F(QemuKeyboardSinkTest, WriteKeySendsOneKeyEventBeforeReturning) {
-    std::vector<SentKey> sent_by_press;
-    std::vector<SentKey> sent_by_release;
+    std::vector<QemuKeyEvent> sent_by_press;
+    std::vector<QemuKeyEvent> sent_by_release;
     RunOnLoop([&] {
         sink_->WriteKey(KEY_A, /*down=*/true);
         sent_by_press = g_sent_keys;
@@ -158,9 +147,9 @@ TEST_F(QemuKeyboardSinkTest, WriteKeySendsOneKeyEventBeforeReturning) {
         sent_by_release = g_sent_keys;
     });
 
-    EXPECT_THAT(sent_by_press, ElementsAre(SentKey{Q_KEY_CODE_A, true}));
+    EXPECT_THAT(sent_by_press, ElementsAre(QemuKeyEvent{Q_KEY_CODE_A, true}));
     EXPECT_THAT(sent_by_release,
-                ElementsAre(SentKey{Q_KEY_CODE_A, true}, SentKey{Q_KEY_CODE_A, false}));
+                ElementsAre(QemuKeyEvent{Q_KEY_CODE_A, true}, QemuKeyEvent{Q_KEY_CODE_A, false}));
 }
 
 TEST_F(QemuKeyboardSinkTest, TypeTextSendsTheKeyEventSenderSequenceBeforeReturning) {
@@ -171,19 +160,36 @@ TEST_F(QemuKeyboardSinkTest, TypeTextSendsTheKeyEventSenderSequenceBeforeReturni
         sender->send(event);
     }
     loop_->RunAll();
-    const std::vector<SentKey> posted = g_sent_keys;
+    const std::vector<QemuKeyEvent> posted = g_sent_keys;
     g_sent_keys.clear();
 
-    std::vector<SentKey> typed;
+    std::vector<QemuKeyEvent> typed;
     RunOnLoop([&] {
         sink_->TypeText("aB");
         typed = g_sent_keys;
     });
 
     EXPECT_EQ(typed, posted);
-    EXPECT_THAT(typed, ElementsAre(SentKey{Q_KEY_CODE_A, true}, SentKey{Q_KEY_CODE_A, false},
-                                   SentKey{Q_KEY_CODE_SHIFT, true}, SentKey{Q_KEY_CODE_B, true},
-                                   SentKey{Q_KEY_CODE_B, false}, SentKey{Q_KEY_CODE_SHIFT, false}));
+    EXPECT_THAT(
+            typed,
+            ElementsAre(QemuKeyEvent{Q_KEY_CODE_A, true}, QemuKeyEvent{Q_KEY_CODE_A, false},
+                        QemuKeyEvent{Q_KEY_CODE_SHIFT, true}, QemuKeyEvent{Q_KEY_CODE_B, true},
+                        QemuKeyEvent{Q_KEY_CODE_B, false}, QemuKeyEvent{Q_KEY_CODE_SHIFT, false}));
+}
+
+TEST_F(QemuKeyboardSinkTest, TypeTextSkipsMultibyteUtf8WithoutDroppingSubsequentAscii) {
+    std::vector<QemuKeyEvent> typed;
+    RunOnLoop([&] {
+        sink_->TypeText("a🚀 B");
+        typed = g_sent_keys;
+    });
+
+    EXPECT_THAT(
+            typed,
+            ElementsAre(QemuKeyEvent{Q_KEY_CODE_A, true}, QemuKeyEvent{Q_KEY_CODE_A, false},
+                        QemuKeyEvent{Q_KEY_CODE_SPC, true}, QemuKeyEvent{Q_KEY_CODE_SPC, false},
+                        QemuKeyEvent{Q_KEY_CODE_SHIFT, true}, QemuKeyEvent{Q_KEY_CODE_B, true},
+                        QemuKeyEvent{Q_KEY_CODE_B, false}, QemuKeyEvent{Q_KEY_CODE_SHIFT, false}));
 }
 
 TEST_F(QemuKeyboardSinkTest,

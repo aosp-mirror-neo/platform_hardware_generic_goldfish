@@ -28,6 +28,7 @@ typedef struct QKbdState QKbdState;
 }
 
 #include <cstdint>
+#include <ostream>
 #include <string_view>
 #include <vector>
 
@@ -67,6 +68,11 @@ struct QemuKeyEvent {
      * @brief True if the key is pressed (key down), false if released (key up).
      */
     bool down;
+
+    friend bool operator==(const QemuKeyEvent&, const QemuKeyEvent&) = default;
+    friend std::ostream& operator<<(std::ostream& os, const QemuKeyEvent& key) {
+        return os << "{qcode " << key.code << (key.down ? " down}" : " up}");
+    }
 };
 
 /**

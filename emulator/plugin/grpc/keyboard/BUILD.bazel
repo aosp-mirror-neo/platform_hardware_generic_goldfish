@@ -31,6 +31,7 @@ cc_library(
     deps = [
         ":keyconversion",
         "//emulator/libs/async:async_api",
+        "//emulator/libs/parsing:utf8_iterator",
         "@abseil-cpp//absl/functional:function_ref",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/status:statusor",
