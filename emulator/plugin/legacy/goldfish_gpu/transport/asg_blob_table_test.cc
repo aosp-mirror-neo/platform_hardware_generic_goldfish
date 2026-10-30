@@ -64,8 +64,9 @@ TEST(AsgBlobTableTest, CreateStartPingCloseDestroy) {
     ASSERT_OK(table.Start(&renderer, blob)) << "idempotent";
     ASSERT_EQ(renderer.asg_consumers.size(), 1U);
     const MockAsgConsumer* consumer = renderer.asg_consumers[0].get();
-    EXPECT_EQ(consumer->info.ring_storage, reinterpret_cast<char*>(blob.external_addr));
-    EXPECT_EQ(consumer->info.buffer_size, static_cast<uint32_t>(kBlobSize - kAsgRingRegionSize));
+    EXPECT_EQ(consumer->info.buffer, reinterpret_cast<char*>(blob.external_addr));
+    EXPECT_EQ(consumer->info.buffer_size, 65536U);
+    EXPECT_EQ(consumer->info.ring_storage, reinterpret_cast<char*>(blob.external_addr + 65536));
     EXPECT_EQ(consumer->info.callbacks.getPtr(0x10), reinterpret_cast<char*>(0x1010));
     EXPECT_THAT(table.SortedIds(), ElementsAre(1));
 
@@ -87,6 +88,20 @@ TEST(AsgBlobTableTest, CreateStartPingCloseDestroy) {
     EXPECT_EQ(table.Close(blob, false), nullptr) << "already closed";
     EXPECT_THAT(table.Ping(blob), StatusIs(absl::StatusCode::kNotFound));
     EXPECT_THAT(table.Start(&renderer, blob), StatusIs(absl::StatusCode::kNotFound));
+}
+
+// goldfish_address_space rounds the region up to the host page size; the
+// tail padding must not leak into buffer_size, which the guest uses as a
+// power-of-two ring mask.
+TEST(AsgBlobTableTest, PageAlignmentPaddingDoesNotChangeThePowerOfTwoBufferSize) {
+    MockRenderer renderer;
+    AsgBlobTable table = MakeTable();
+    ASSERT_OK_AND_ASSIGN(const AsgBlob blob, table.Create(kBlobSize + 4096));
+    ASSERT_OK(table.Start(&renderer, blob));
+    const MockAsgConsumer* consumer = renderer.asg_consumers[0].get();
+    EXPECT_EQ(consumer->info.buffer, reinterpret_cast<char*>(blob.external_addr));
+    EXPECT_EQ(consumer->info.buffer_size, 65536U);
+    EXPECT_EQ(consumer->info.ring_storage, reinterpret_cast<char*>(blob.external_addr + 65536));
 }
 
 TEST(AsgBlobTableTest, RestoreRejectsHandleZeroAndTinyBlobs) {

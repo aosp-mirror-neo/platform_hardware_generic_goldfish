@@ -20,6 +20,8 @@
 #include <limits>
 
 #include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 
 namespace goldfish::legacy {
 
@@ -225,6 +227,55 @@ std::optional<uint64_t> Bar1Allocator::GuestBlockSize(uint64_t offset) const {
         }
     }
     return std::nullopt;
+}
+
+bool Bar1Allocator::IsHostRegion(uint64_t offset, uint64_t size) const {
+    const auto aligned_size_opt = AlignUp(size, min_align_);
+    if (size == 0ULL || !aligned_size_opt.has_value()) {
+        return false;
+    }
+    for (const Span& span : spans_) {
+        if (span.offset == offset) {
+            return span.allocated && !span.guest_block && span.size == *aligned_size_opt;
+        }
+    }
+    return false;
+}
+
+absl::Status Bar1Allocator::RestoreSpans(uint64_t min_align, std::vector<Span> spans) {
+    if (!std::has_single_bit(min_align)) {
+        return absl::DataLossError(
+                absl::StrCat("bar1 min_align ", min_align, " is not a power of two"));
+    }
+    if (!spans.empty()) {
+        uint64_t expected_offset = 0ULL;
+        for (size_t i = 0; i < spans.size(); ++i) {
+            const Span& span = spans[i];
+            if (span.offset != expected_offset) {
+                return absl::DataLossError(absl::StrCat(
+                        "bar1 span ", i, " offset ", span.offset,
+                        " does not follow the previous span (expected ", expected_offset, ")"));
+            }
+            if (span.size == 0ULL || span.size > total_size_ - expected_offset) {
+                return absl::DataLossError(absl::StrCat("bar1 span ", i, " size ", span.size,
+                                                        " is outside [1, ",
+                                                        total_size_ - expected_offset, "]"));
+            }
+            if (!span.allocated && span.guest_block) {
+                return absl::DataLossError(
+                        absl::StrCat("bar1 span ", i, " at offset ", span.offset,
+                                     " is marked guest_block but not allocated"));
+            }
+            expected_offset += span.size;
+        }
+        if (expected_offset != total_size_) {
+            return absl::DataLossError(absl::StrCat("bar1 spans cover ", expected_offset,
+                                                    " bytes but BAR 1 size is ", total_size_));
+        }
+    }
+    min_align_ = min_align;
+    spans_ = std::move(spans);
+    return absl::OkStatus();
 }
 
 }  // namespace goldfish::legacy

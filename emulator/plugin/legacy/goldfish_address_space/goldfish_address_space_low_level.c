@@ -26,7 +26,8 @@
  *   (`Bar1Subregion`). Unmapping deletes the subregion and drops its QOM reference, deferring
  *   `bar1_subregion_finalize` (and the caller's `retire_cb` that frees host/gfxstream memory) until
  *   QEMU's RCU grace period / Bottom Half retires all FlatViews and RAMBlock references.
- * - **Snapshot Blocker**: Registers a QEMU migration blocker in v1 (`b/573994361`).
+ * - **Snapshot Support**: Registers `goldfish_address_space_vmsd` to serialize and restore device
+ *   registers, BAR 1 allocations, and ASG ring context state across QEMU snapshots.
  */
 
 #include "goldfish/legacy/goldfish_address_space_low_level.h"
@@ -40,6 +41,7 @@
 // IWYU pragma: begin_keep
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "qemu/queue.h"
 #include "qemu/rcu.h"
@@ -49,7 +51,9 @@
 #include "hw/core/resettable.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_device.h"
-#include "migration/blocker.h"
+#include "migration/qemu-file-types.h"
+#include "migration/snapshot.h"
+#include "migration/vmstate.h"
 #include "google/drivers/hw/acpi/goldfish_defs.h"
 #include "google/system/aemu_func_defs.h"
 // IWYU pragma: end_keep
@@ -96,7 +100,6 @@ typedef struct GoldfishAddressSpacePciState {
     MemoryRegion bar0_mr;                    /**< BAR 0: 4 KiB 32-bit MMIO control registers. */
     MemoryRegion bar1_mr;                    /**< BAR 1: 64-bit container window for subregions. */
     QTAILQ_HEAD(, Bar1Subregion) subregions; /**< Live BAR 1 RAM subregions, guarded by the BQL. */
-    Error* migration_blocker;                /**< Registered blocker preventing v1 VM snapshots. */
     struct GoldfishMmioCore core;            /**< C++ `GoldfishAddressSpaceDevice` vtable. */
     uint64_t bar1_size;                      /**< Total byte capacity of the BAR 1 window. */
 } GoldfishAddressSpacePciState;
@@ -496,25 +499,19 @@ static const MemoryRegionOps goldfish_address_space_bar0_ops = {
 };
 
 /**
- * @brief `PCIDeviceClass::realize` handler initializing BAR 0, BAR 1, migration blocker, and C++
- *        core.
+ * @brief `PCIDeviceClass::realize` handler initializing BAR 0, BAR 1, and C++ core.
  *
  * Sets up the 4 KiB 32-bit MMIO control BAR (BAR 0) and the 16 GiB / 8 GiB 64-bit container memory
  * window (BAR 1) without allocating upfront host RAM, then instantiates the C++ core via
  * `GoldfishAddressSpaceCoreCreate`.
  *
  * @param pci_dev QEMU `PCIDevice` being realized.
- * @param errp QEMU error out-parameter populated if migration blocker registration fails.
+ * @param errp QEMU error out-parameter.
  */
 static void goldfish_address_space_realize(PCIDevice* pci_dev, Error** errp) {
+    (void)errp;
     GoldfishAddressSpacePciState* s = GOLDFISH_ADDRESS_SPACE_PCI(pci_dev);
     QTAILQ_INIT(&s->subregions);
-
-    error_setg(&s->migration_blocker, "%s does not support migration/snapshots in v1",
-               TYPE_GOLDFISH_ADDRESS_SPACE);
-    if (migrate_add_blocker(&s->migration_blocker, errp) < 0) {
-        return;
-    }
 
     pci_config_set_interrupt_pin(pci_dev->config, GOLDFISH_ADDRESS_SPACE_PCI_INTERRUPT_PIN);
 
@@ -554,12 +551,10 @@ static void goldfish_address_space_realize(PCIDevice* pci_dev, Error** errp) {
 }
 
 /**
- * @brief `PCIDeviceClass::exit` (unrealize) handler tearing down the C++ core, BAR 1 subregions,
- *        and migration blocker.
+ * @brief `PCIDeviceClass::exit` (unrealize) handler tearing down the C++ core and BAR 1 subregions.
  *
  * Destroys the C++ core first (which unmaps subregions and schedules RCU retirement callbacks
- * before releasing host/gfxstream memory), then cleans up any residual subregions and removes the
- * migration blocker.
+ * before releasing host/gfxstream memory), then cleans up any residual subregions.
  *
  * @param pci_dev QEMU `PCIDevice` being unrealized.
  */
@@ -569,9 +564,6 @@ static void goldfish_address_space_exit(PCIDevice* pci_dev) {
     s->core.destroy(s->core.core);
     s->core.core = NULL;
     goldfish_as_unmap_all_subregions(s);
-    if (s->migration_blocker != NULL) {
-        migrate_del_blocker(&s->migration_blocker);
-    }
 }
 
 /**
@@ -594,6 +586,108 @@ static void goldfish_address_space_reset_hold(Object* obj, ResetType type) {
 }
 
 /**
+ * @brief VMState `put` for the C++ core stream.
+ */
+static int goldfish_address_space_vmstate_put(QEMUFile* f, void* pv, size_t size,
+                                              const VMStateField* field, JSONWriter* vmdesc) {
+    (void)size;
+    (void)field;
+    (void)vmdesc;
+    GoldfishAddressSpacePciState* s = (GoldfishAddressSpacePciState*)pv;
+    if (!GoldfishAddressSpaceCoreSave(s->core.core, f)) {
+        error_report("goldfish_address_space: failed to serialize device state");
+        return -1;
+    }
+    return 0;
+}
+
+/**
+ * @brief VMState `get` for the C++ core stream.
+ */
+static int goldfish_address_space_vmstate_get(QEMUFile* f, void* pv, size_t size,
+                                              const VMStateField* field) {
+    (void)size;
+    (void)field;
+    GoldfishAddressSpacePciState* s = (GoldfishAddressSpacePciState*)pv;
+    return GoldfishAddressSpaceCoreLoad(s->core.core, f) ? 0 : -1;
+}
+
+static const VMStateInfo goldfish_address_space_vmstate_info = {
+    .name = "goldfish_address_space_blob",
+    .get = goldfish_address_space_vmstate_get,
+    .put = goldfish_address_space_vmstate_put,
+};
+
+/**
+ * @brief VMState `put` for the parent `PCIDevice` section.
+ *
+ * `VMSTATE_PCI_DEVICE()` would embed a pointer to QEMU's `vmstate_pci_device`, which is not
+ * exported from `qemu-system-*.def`, so the Windows plugin cannot link it (b/445476051 explains
+ * why plugin VMStateFields must not reference QEMU symbols statically). `pci_device_save()` /
+ * `pci_device_load()` are exported and serialize exactly `vmstate_pci_device`, so routing the
+ * section through them keeps the stream layout identical to a `VMSTATE_PCI_DEVICE` field.
+ */
+static int goldfish_address_space_pci_device_put(QEMUFile* f, void* pv, size_t size,
+                                                 const VMStateField* field, JSONWriter* vmdesc) {
+    (void)size;
+    (void)field;
+    (void)vmdesc;
+    pci_device_save((PCIDevice*)pv, f);
+    return 0;
+}
+
+/** @brief VMState `get` counterpart of `goldfish_address_space_pci_device_put`. */
+static int goldfish_address_space_pci_device_get(QEMUFile* f, void* pv, size_t size,
+                                                 const VMStateField* field) {
+    (void)size;
+    (void)field;
+    return pci_device_load((PCIDevice*)pv, f);
+}
+
+static const VMStateInfo goldfish_address_space_pci_device_info = {
+    .name = "pci_device",
+    .get = goldfish_address_space_pci_device_get,
+    .put = goldfish_address_space_pci_device_put,
+};
+
+/*
+ * Every `.info` below points at a `static const` defined in this translation unit and the
+ * `.get`/`.put` callbacks are local functions, so the array holds no QEMU symbol addresses and
+ * can stay a compile-time constant (unlike goldfish_battery.c, whose VMSTATE_UINT32 fields embed
+ * `vmstate_info_uint32` and must be filled in at runtime on Windows).
+ */
+static const VMStateDescription goldfish_address_space_vmsd = {
+    .name = TYPE_GOLDFISH_ADDRESS_SPACE,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    // No pre_save/pre_load: the GoldfishGpu is quiesced (ASG consumers saved / destroyed) by its
+    // own "goldfish_gpu_begin" VMState section (MIG_PRI_IOMMU, before this PCI device), and its
+    // consumers are recreated by the "goldfish_gpu_end" section (MIG_PRI_LOW) after the blobs
+    // below have been restored.
+    .fields =
+            (const VMStateField[]){
+                {
+                    /* Same name, size and position as VMSTATE_PCI_DEVICE(pci_dev, ...). */
+                    .name = "pci_dev",
+                    .version_id = 0,
+                    .size = sizeof(PCIDevice),
+                    .info = &goldfish_address_space_pci_device_info,
+                    .flags = VMS_SINGLE,
+                    .offset = offsetof(GoldfishAddressSpacePciState, pci_dev),
+                },
+                {
+                    .name = "state",
+                    .version_id = 1,
+                    .size = 0,
+                    .info = &goldfish_address_space_vmstate_info,
+                    .flags = VMS_SINGLE,
+                    .offset = 0,
+                },
+                VMSTATE_END_OF_LIST(),
+            },
+};
+
+/**
  * @brief QOM `class_init` callback configuring PCI IDs (`607D:F153`), lifecycle hooks, and reset
  *        chaining for `goldfish_address_space`.
  *
@@ -614,6 +708,7 @@ static void goldfish_address_space_class_init(ObjectClass* klass, const void* da
     pc->class_id = PCI_CLASS_OTHERS;
 
     dc->desc = "goldfish address space";
+    dc->vmsd = &goldfish_address_space_vmsd;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 
     resettable_class_set_parent_phases(rc, NULL, goldfish_address_space_reset_hold, NULL,

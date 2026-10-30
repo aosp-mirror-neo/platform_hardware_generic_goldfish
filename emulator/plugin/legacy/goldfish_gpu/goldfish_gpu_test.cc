@@ -241,8 +241,9 @@ TEST_F(GoldfishGpuTest, AsgLifecycleAndSnapshot) {
     EXPECT_EQ(reinterpret_cast<uintptr_t>(blob.external_addr) % 16384U, 0U);
     ASSERT_TRUE(GetGoldfishGpu().StartAsg(blob).ok());
     ASSERT_EQ(renderer_->asg_consumers.size(), 1U);
-    EXPECT_EQ(renderer_->asg_consumers[0]->info.buffer,
-              reinterpret_cast<char*>(blob.external_addr + gfxstream::kAsgConsumerRingStorageSize));
+    EXPECT_EQ(renderer_->asg_consumers[0]->info.buffer, reinterpret_cast<char*>(blob.external_addr));
+    EXPECT_EQ(renderer_->asg_consumers[0]->info.ring_storage,
+              reinterpret_cast<char*>(blob.external_addr + 65536));
     EXPECT_EQ(renderer_->asg_consumers[0]->info.buffer_size, 65536U);
 
     // Verify PingAsg wakes OnUnavailableRead with kContinue.

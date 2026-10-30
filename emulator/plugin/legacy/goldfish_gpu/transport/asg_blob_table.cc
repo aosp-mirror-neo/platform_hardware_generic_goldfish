@@ -15,6 +15,7 @@
 #include "goldfish/legacy/goldfish_gpu/transport/asg_blob_table.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -184,6 +185,12 @@ absl::StatusOr<AsgBlob> AsgBlobTable::Restore(uint32_t context_handle, uint64_t 
         blob.blob_id = next_blob_id_++;
         entry->blob_id = blob.blob_id;
         next_handle_ = std::max(next_handle_, context_handle + 1);
+        // Deliberately replaces an entry that still carries this handle: an
+        // RCU-deferred CloseAsg() of the pre-load blob can run after the
+        // address-space device already restored the new one under the same
+        // handle. The old entry stays reachable through by_blob_id_, and
+        // Close() only erases by_handle_ when the blob_id matches, so the
+        // late close retires the old entry without touching the new one.
         by_handle_[context_handle] = entry;
         by_blob_id_[blob.blob_id] = std::move(entry);
     }
@@ -400,11 +407,20 @@ void AsgBlobTable::RaiseNextId(uint32_t value) {
 
 gfxstream::AsgConsumerCreateInfo AsgBlobTable::MakeCreateInfo(
         const std::shared_ptr<AsgConsumerEntry>& entry) {
+    // Layout agreed with goldfish_address_space (GraphicsAsgSubdevice): the
+    // write buffer at offset 0, the ring storage right after it. The buffer
+    // size is the largest power of two that fits (clamped to the 1 MiB
+    // GraphicsAsgSubdevice::kAsgBufferSize), so any page-alignment padding at
+    // the end of the region does not break the guest's power-of-two ring mask
+    // (m_writeBufferSize - 1).
+    constexpr uint64_t kMaxAsgBufferSize = uint64_t{1} << 20;
+    const auto buffer_size = static_cast<uint32_t>(
+            std::min<uint64_t>(std::bit_floor(entry->size - kAsgRingRegionSize), kMaxAsgBufferSize));
     gfxstream::AsgConsumerCreateInfo create_info;
     create_info.version = 1;
-    create_info.ring_storage = reinterpret_cast<char*>(entry->storage.get());
-    create_info.buffer = reinterpret_cast<char*>(entry->storage.get() + kAsgRingRegionSize);
-    create_info.buffer_size = static_cast<uint32_t>(entry->size - kAsgRingRegionSize);
+    create_info.buffer = reinterpret_cast<char*>(entry->storage.get());
+    create_info.ring_storage = reinterpret_cast<char*>(entry->storage.get() + buffer_size);
+    create_info.buffer_size = buffer_size;
     create_info.buffer_flush_interval = kAsgWriteStepSize;
     std::weak_ptr<AsgConsumerEntry> weak_entry = entry;
     create_info.callbacks.onUnavailableRead = [weak_entry]() {
