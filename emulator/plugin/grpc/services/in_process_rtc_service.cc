@@ -33,6 +33,7 @@
 #include "api/make_ref_counted.h"
 #include "emulator/plugin/grpc/input/dispatcher_session.h"
 #include "emulator/plugin/grpc/input/input_dispatcher_interface.h"
+#include "emulator/plugin/grpc/input/v1_input_translator.h"
 #include "emulator/plugin/grpc/input/v2_input_validator.h"
 #include "emulator/plugin/grpc/services/v2/environment/sensors_service_impl.h"
 #include "emulator/plugin/grpc/services/v2/webrtc/rtc_service_impl.h"
@@ -63,6 +64,7 @@ using ::goldfish::avd::AvdUniverse;
 using ::goldfish::display::IMultiDisplay;
 using ::goldfish::grpc::v2::DispatcherSession;
 using ::goldfish::grpc::v2::IInputDispatcher;
+using ::goldfish::grpc::v2::V1InputTranslator;
 using ::goldfish::grpc::v2::V2InputValidator;
 using ::goldfish::videobridge::DataChannelLabel;
 using ::goldfish::videobridge::GoldfishAudioDeviceModule;
@@ -78,15 +80,30 @@ using keyboard::IKeyEventSender;
 
 namespace {
 
+void LogRejectedV1InputEvent(IInputDispatcher::DispatchResult result) {
+    if (!result.status.ok()) {
+        VLOG(1) << "Dropped WebRTC v1 input event: " << result.status;
+    }
+}
+
 // Clean, testable event routing isolated from factory plumbing.
 absl::Status DispatchInProcessInputEvent(const InputEvent& request,
                                          InputEventSender& input_event_sender,
-                                         IKeyEventSender& key_event_sender) {
+                                         IKeyEventSender* key_event_sender,
+                                         DispatcherSession* session,
+                                         V1InputTranslator* translator) {
     VLOG(2) << "InProcess InputEvent: " << request.ShortDebugString();
 
     switch (request.type_case()) {
     case InputEvent::kKeyEvent:
-        key_event_sender.send(request.key_event());
+        if (session != nullptr && translator != nullptr) {
+            for (const auto& event : translator->TranslateKeyboard(request.key_event())) {
+                session->Dispatch(event, LogRejectedV1InputEvent);
+            }
+            return absl::OkStatus();
+        }
+        CHECK_NE(key_event_sender, nullptr);
+        key_event_sender->send(request.key_event());
         return absl::OkStatus();
 
     case InputEvent::kMouseEvent:
@@ -110,6 +127,44 @@ absl::Status DispatchInProcessInputEvent(const InputEvent& request,
     }
 }
 
+std::unique_ptr<InputSender> CreateV1InputSender(
+        IMultiDisplay& multidisplay, std::shared_ptr<InputEventSender> input_event_sender,
+        std::shared_ptr<IKeyEventSender> key_event_sender,
+        std::shared_ptr<IInputDispatcher> input_dispatcher,
+        V2InputValidator::Options v2_validator_options) {
+    const IInputDispatcher::SessionOptions v1_session_options{
+        .human = true, .source_id = 0, .reject_down_on_held = false};
+    auto session_holder = std::make_shared<std::unique_ptr<DispatcherSession>>();
+    std::shared_ptr<V1InputTranslator> translator;
+    if (input_dispatcher != nullptr) {
+        *session_holder = std::make_unique<DispatcherSession>(input_dispatcher, v1_session_options);
+        translator = std::make_shared<V1InputTranslator>(multidisplay,
+                                                         v2_validator_options.hw_sensor_hinge);
+    }
+    return std::make_unique<InProcessInputSender>(
+            [input_event_sender = std::move(input_event_sender),
+             key_event_sender = std::move(key_event_sender),
+             input_dispatcher = std::move(input_dispatcher), session_holder, translator,
+             v1_session_options](const InputEvent& request) {
+                if (input_dispatcher != nullptr && *session_holder == nullptr) {
+                    *session_holder = std::make_unique<DispatcherSession>(input_dispatcher,
+                                                                          v1_session_options);
+                }
+                return DispatchInProcessInputEvent(request, *input_event_sender,
+                                                   key_event_sender.get(), session_holder->get(),
+                                                   translator.get());
+            },
+            /*v2_dispatcher=*/nullptr,
+            /*v2_sensors_dispatcher=*/nullptr,
+            /*on_stop=*/
+            [session_holder, translator]() {
+                session_holder->reset();
+                if (translator != nullptr) {
+                    translator->Reset();
+                }
+            });
+}
+
 // WebRTC has no way to report a rejected event to the client.
 void LogRejectedV2InputEvent(IInputDispatcher::DispatchResult result) {
     if (!result.status.ok()) {
@@ -118,26 +173,34 @@ void LogRejectedV2InputEvent(IInputDispatcher::DispatchResult result) {
 }
 
 // One WebRTC v2 input channel: a human session on `input_dispatcher` that
-// lives as long as the sender, so closing the channel releases its input. As
-// for every v2 client, DOWN for a pointer it holds is rejected.
+// closes immediately on DataChannel close (`Stop()`) or sender destruction, so
+// closing the channel releases its input without waiting for PeerConnection
+// teardown. As for every v2 client, DOWN for a pointer it holds is rejected.
 std::unique_ptr<InputSender> CreateV2InputSender(IMultiDisplay& multidisplay,
                                                  std::shared_ptr<IInputDispatcher> input_dispatcher,
                                                  V2InputValidator::Options v2_validator_options) {
-    auto session = std::make_shared<DispatcherSession>(
-            std::move(input_dispatcher),
-            IInputDispatcher::SessionOptions{
-                .human = true, .source_id = 0, .reject_down_on_held = true});
+    const IInputDispatcher::SessionOptions v2_session_options{
+        .human = true, .source_id = 0, .reject_down_on_held = true};
+    auto session_holder = std::make_shared<std::unique_ptr<DispatcherSession>>(
+            std::make_unique<DispatcherSession>(input_dispatcher, v2_session_options));
     V2InputValidator validator(multidisplay, v2_validator_options);
     return std::make_unique<InProcessInputSender>(
-            /*dispatcher=*/nullptr, [session = std::move(session),
-                                     validator](const ::android::emulation::v2::InputEvent& event) {
+            /*dispatcher=*/nullptr,
+            [input_dispatcher = std::move(input_dispatcher), session_holder, validator,
+             v2_session_options](const ::android::emulation::v2::InputEvent& event) {
                 if (absl::Status status = validator.Validate(event); !status.ok()) {
                     VLOG(1) << "Dropped invalid WebRTC v2 input event: " << status;
                     return absl::OkStatus();
                 }
-                session->Dispatch(event, LogRejectedV2InputEvent);
+                if (*session_holder == nullptr) {
+                    *session_holder = std::make_unique<DispatcherSession>(input_dispatcher,
+                                                                          v2_session_options);
+                }
+                (*session_holder)->Dispatch(event, LogRejectedV2InputEvent);
                 return absl::OkStatus();
-            });
+            },
+            /*v2_sensors_dispatcher=*/nullptr,
+            /*on_stop=*/[session_holder]() { session_holder->reset(); });
 }
 
 static_assert(WebRtcMicrophone::kConfig.sample_rate_hz ==
@@ -177,7 +240,8 @@ InputSenderFactory CreateInProcessInputSenderFactory(
         std::shared_ptr<IInputDispatcher> input_dispatcher,
         ::goldfish::sensors::PhysicalModel* physical_model,
         V2InputValidator::Options v2_validator_options) {
-    CHECK_NE(key_event_sender, nullptr) << "key_event_sender must not be null";
+    CHECK(key_event_sender != nullptr || input_dispatcher != nullptr)
+            << "Either key_event_sender or input_dispatcher must not be null";
     auto input_event_sender = std::make_shared<InputEventSender>(&multidisplay);
     std::shared_ptr<::goldfish::grpc::v2::SensorsServiceImpl> sensors_service;
     if (physical_model != nullptr) {
@@ -201,10 +265,8 @@ InputSenderFactory CreateInProcessInputSenderFactory(
                     });
         }
 
-        return std::make_unique<InProcessInputSender>([input_event_sender, key_event_sender](
-                                                              const InputEvent& request) {
-            return DispatchInProcessInputEvent(request, *input_event_sender, *key_event_sender);
-        });
+        return CreateV1InputSender(multidisplay, input_event_sender, key_event_sender,
+                                   input_dispatcher, v2_validator_options);
     };
 }
 
