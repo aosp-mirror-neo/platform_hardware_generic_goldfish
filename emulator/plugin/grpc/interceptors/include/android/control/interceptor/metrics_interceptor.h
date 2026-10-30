@@ -79,7 +79,7 @@ class MetricsInterceptorFactory : public grpc::experimental::ServerInterceptorFa
     absl::Mutex mutex_;
     absl::flat_hash_map<std::string, MethodMetrics> server_metrics_ ABSL_GUARDED_BY(mutex_);
     absl::flat_hash_map<std::string, MethodMetrics> client_metrics_ ABSL_GUARDED_BY(mutex_);
-    std::shared_ptr<::goldfish::async::EventLoop::Timer> flush_timer_;
+    ::goldfish::async::EventLoop::ScopedTimer flush_timer_;
 };
 
 }  // namespace android::control::interceptor

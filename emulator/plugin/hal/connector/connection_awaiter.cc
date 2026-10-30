@@ -30,11 +30,6 @@ using cable::SocketPtr;
 namespace async = goldfish::async;
 
 ConnectionAwaiter::~ConnectionAwaiter() {
-    if (connection_retry_task_) {
-        VLOG(1) << "Cancelling task";
-        connection_retry_task_->Cancel();
-    }
-
     DCHECK(!socket_);
 }
 
@@ -46,10 +41,7 @@ void ConnectionAwaiter::OnConnect() {
         return;
     }
     is_connected_ = true;
-    if (connection_retry_task_) {
-        connection_retry_task_->Cancel();
-        connection_retry_task_.reset();
-    }
+    connection_retry_task_.reset();
     DCHECK(socket_);
     on_connected_(std::move(socket_));
     DCHECK(!socket_);

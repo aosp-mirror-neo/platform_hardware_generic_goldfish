@@ -30,8 +30,14 @@ class VCpuEventLoop : public ::goldfish::async::EventLoop {
   public:
     static int cpus_count() { return aemu_cpus_count(); }
 
-    class VCpuTimer : public Timer {
+    class VCpuTimer : public Timer, public std::enable_shared_from_this<VCpuTimer> {
       public:
+        static ScopedTimer Create(int cpuIndex, RepeatingTask task) {
+            auto timer = std::make_shared<VCpuTimer>(cpuIndex, std::move(task));
+            timer->mCallerPin = timer;
+            return ScopedTimer(timer.get());
+        }
+
         VCpuTimer(int cpuIndex, RepeatingTask task) : mCpuIndex(cpuIndex), mTask(std::move(task)) {
             mCallback.f = onTimer;
             mCallback.opaque = this;
@@ -39,9 +45,14 @@ class VCpuEventLoop : public ::goldfish::async::EventLoop {
 
         void Cancel() override {
             // We can't actually cancel - but we shouldn't allow rescheduling.
+            auto caller_pin = std::move(mCallerPin);
+            mCancelled.store(true);
         }
 
         void Schedule(absl::Duration new_delay, absl::Duration new_interval) override {
+            if (mCancelled.load()) {
+                return;
+            }
             if (new_delay != absl::ZeroDuration()) {
                 LOG(ERROR) << "VCpuTimer does not support delayed scheduling";
                 return;
@@ -51,7 +62,9 @@ class VCpuEventLoop : public ::goldfish::async::EventLoop {
                 return;
             }
 
+            mPendingPin = shared_from_this();
             if (!aemu_cpus_run_async(mCpuIndex, &mCallback)) {
+                mPendingPin.reset();
                 LOG(ERROR) << "Failed to schedule on vcpu: " << mCpuIndex;
             }
         }
@@ -59,11 +72,17 @@ class VCpuEventLoop : public ::goldfish::async::EventLoop {
       private:
         static void onTimer(void* opaque) {
             auto* self = static_cast<VCpuTimer*>(opaque);
-            self->mTask();
+            auto pin = std::move(self->mPendingPin);
+            if (!self->mCancelled.load()) {
+                self->mTask();
+            }
         }
 
         int mCpuIndex;
         RepeatingTask mTask;
+        std::shared_ptr<VCpuTimer> mCallerPin;
+        std::shared_ptr<VCpuTimer> mPendingPin;
+        std::atomic<bool> mCancelled{false};
 
         cpus_callback mCallback{};
     };
@@ -97,8 +116,8 @@ class VCpuEventLoop : public ::goldfish::async::EventLoop {
         return absl::UnimplementedError("");
     }
 
-    std::shared_ptr<Timer> CreateTimer(RepeatingTask task) override {
-        return std::make_shared<VCpuTimer>(mCpuIndex, std::move(task));
+    ScopedTimer CreateTimer(RepeatingTask task) override {
+        return VCpuTimer::Create(mCpuIndex, std::move(task));
     }
 
   private:

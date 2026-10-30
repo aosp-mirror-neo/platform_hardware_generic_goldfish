@@ -99,19 +99,25 @@ class EventLoop : public CallbackEventSource<LooperStatusEvent> {
      */
     using RepeatingTask = absl::AnyInvocable<bool()>;
 
+    struct TimerDeleter;
+
     /**
      * @brief An opaque handle to a scheduled task.
      *
      * Allows for the scheduling and cancellation of a delayed or repeating task.
      */
     class Timer {
-      public:
-        virtual ~Timer() = default;
+      protected:
+        friend struct EventLoop::TimerDeleter;
+
         /**
          * @brief Cancels the scheduled task.
          * If the task has already run or been cancelled, this is a no-op.
          */
         virtual void Cancel() = 0;
+
+      public:
+        virtual ~Timer() = default;
 
         /**
          * @brief (Re)Schedules a timer with a new delay and interval.
@@ -137,6 +143,12 @@ class EventLoop : public CallbackEventSource<LooperStatusEvent> {
          */
         void Schedule(absl::Duration new_delay) { Schedule(new_delay, absl::ZeroDuration()); }
     };
+
+    struct TimerDeleter {
+        void operator()(Timer* t) const { t->Cancel(); }
+    };
+
+    using ScopedTimer = std::unique_ptr<Timer, TimerDeleter>;
 
     /**
      * @brief Construct a new EventLoop object with a name.
@@ -361,17 +373,17 @@ class EventLoop : public CallbackEventSource<LooperStatusEvent> {
     /**
      * @brief Schedules a cancellable task to be executed once after a delay.
      * @param task The task to execute. Must return true to reschedule, or false to stop.
-     * @return A shared pointer to a Timer handle for scheduling and cancellation.
+     * @return A ScopedTimer handle for scheduling and cancellation.
      */
-    virtual std::shared_ptr<Timer> CreateTimer(RepeatingTask task) = 0;
+    virtual ScopedTimer CreateTimer(RepeatingTask task) = 0;
 
     /**
      * @brief Schedules a cancellable task to be executed once after a delay.
      * @param task The task to execute.
      * @param delay The duration to wait before executing the task.
-     * @return A shared pointer to a Timer handle for cancellation.
+     * @return A ScopedTimer handle for cancellation.
      */
-    std::shared_ptr<Timer> ScheduleDelayed(Task task, absl::Duration delay) {
+    ScopedTimer ScheduleDelayed(Task task, absl::Duration delay) {
         return ScheduleRepeating(
                 [task = std::move(task)]() mutable {
                     task();
@@ -385,12 +397,14 @@ class EventLoop : public CallbackEventSource<LooperStatusEvent> {
      * @param task The task to execute.
      * @param initial_delay The delay before the first execution.
      * @param interval The time between subsequent executions.
-     * @return A shared pointer to a Timer handle for cancellation.
+     * @return A ScopedTimer handle for cancellation.
      */
-    std::shared_ptr<Timer> ScheduleRepeating(RepeatingTask task, absl::Duration initial_delay,
-                                             absl::Duration interval) {
+    ScopedTimer ScheduleRepeating(RepeatingTask task, absl::Duration initial_delay,
+                                  absl::Duration interval) {
         auto timer = CreateTimer(std::move(task));
-        timer->Schedule(initial_delay, interval);
+        if (timer) {
+            timer->Schedule(initial_delay, interval);
+        }
         return timer;
     };
 

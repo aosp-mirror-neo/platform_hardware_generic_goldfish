@@ -662,10 +662,8 @@ void InputDispatcher::ReleaseSession(InputSessionId session) {
     if (it == sessions_.end()) {
         return;  // Only open sessions hold contacts or keys.
     }
-    if (it->second.idle_timer != nullptr) {
-        // On the loop, so this cancels in place rather than posting and waiting.
-        it->second.idle_timer->Cancel();
-    }
+    // On the loop, so this cancels in place rather than posting and waiting.
+    it->second.idle_timer.reset();
     ReleaseSessionInput(session);
     sessions_.erase(session);
 }

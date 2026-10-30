@@ -125,9 +125,7 @@ VirtualDisplay::VirtualDisplay(Private, EventLoop* loop, EventLoop* qloop, uint8
 
 void VirtualDisplay::Disconnect() {
     if (!disconnected_.exchange(true, std::memory_order_acq_rel)) {
-        if (poll_timer_) {
-            poll_timer_->Cancel();
-        }
+        poll_timer_.reset();
         auto* avd = avd::GetNullableAvd();
         if (auto device = avd ? avd->GetActiveMultiDisplayDevice() : nullptr) {
             device->SendDelDisplay(display_id_);
@@ -146,9 +144,7 @@ VirtualDisplay::~VirtualDisplay() {
     input_active_tracker_.Reset();
     StopProducerCalls();  // OnDemand uses poll_timer_.
     frame_producer_->Shutdown();
-    if (poll_timer_) {
-        poll_timer_->Cancel();
-    }
+    poll_timer_.reset();
 }
 
 std::pair<int, int> VirtualDisplay::ResizeKeepAspectRatio(int /*desired_width*/,
@@ -159,13 +155,20 @@ std::pair<int, int> VirtualDisplay::ResizeKeepAspectRatio(int /*desired_width*/,
 void VirtualDisplay::OnDemand(bool warm) {
     warm = warm && !disconnected_.load(std::memory_order_acquire);
     if (warm) {
+        if (!poll_timer_ && loop() != nullptr) {
+            poll_timer_ = loop()->CreateTimer([this] {
+                if (!frame_producer_->warm() || disconnected_.load(std::memory_order_acquire)) {
+                    return false;
+                }
+                OnFrameRequested();
+                return true;
+            });
+        }
         if (poll_timer_) {
             poll_timer_->Schedule(absl::Milliseconds(50), absl::Milliseconds(50));
         }
     } else {
-        if (poll_timer_) {
-            poll_timer_->Cancel();
-        }
+        poll_timer_.reset();
     }
     frame_producer_->SetDemand(warm);
 }

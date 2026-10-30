@@ -56,7 +56,7 @@ class StudioFileMetricsWriter : public MetricsWriter {
     const int pid_;
     int file_counter_{0};
 
-    std::shared_ptr<goldfish::async::EventLoop::Timer> max_file_duration_timer_;
+    goldfish::async::EventLoop::ScopedTimer max_file_duration_timer_;
 
     absl::Mutex mutex_;
     fs::path open_file_path_ ABSL_GUARDED_BY(mutex_);

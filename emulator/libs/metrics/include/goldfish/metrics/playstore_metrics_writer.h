@@ -48,7 +48,7 @@ class PlaystoreMetricsWriter : public MetricsWriter {
     const std::string playstore_url_;
     const std::string user_id_;
 
-    std::shared_ptr<goldfish::async::EventLoop::Timer> commit_timer_;
+    goldfish::async::EventLoop::ScopedTimer commit_timer_;
 
     absl::Mutex mutex_;
     std::queue<wireless_android_play_playlog::LogEvent> events_ ABSL_GUARDED_BY(mutex_);

@@ -402,7 +402,7 @@ class DisplayFrames final : public IFrameSink, public std::enable_shared_from_th
     // Display loop tasks.
     void DispatchQueue() ABSL_LOCKS_EXCLUDED(frames_mutex_);
     void UpdateDemand() ABSL_LOCKS_EXCLUDED(frames_mutex_);
-    void CoolDown(uint64_t generation) ABSL_LOCKS_EXCLUDED(frames_mutex_);
+    void CoolDown() ABSL_LOCKS_EXCLUDED(frames_mutex_);
 
     async::EventLoop* const loop_;
     const uint8_t display_id_;
@@ -429,10 +429,11 @@ class DisplayFrames final : public IFrameSink, public std::enable_shared_from_th
     // Tasks to post once the lock is released.
     mutable bool post_dispatch_ ABSL_GUARDED_BY(frames_mutex_) = false;
     mutable bool post_update_demand_ ABSL_GUARDED_BY(frames_mutex_) = false;
+    uint64_t cool_down_generation_ ABSL_GUARDED_BY(frames_mutex_) = 0;
+    uint64_t armed_cool_down_generation_ ABSL_GUARDED_BY(frames_mutex_) = 0;
 
     // Display loop only.
-    std::shared_ptr<async::EventLoop::Timer> cool_down_timer_;
-    uint64_t cool_down_generation_ = 0;
+    async::EventLoop::ScopedTimer cool_down_timer_;
 };
 
 }  // namespace goldfish::display

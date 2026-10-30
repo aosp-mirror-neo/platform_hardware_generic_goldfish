@@ -279,12 +279,8 @@ absl::Status AvdExtendedUniverse::Initialize() {
 }
 
 AvdExtendedUniverse::~AvdExtendedUniverse() {
-    if (metrics_ping_timer) {
-        metrics_ping_timer->Cancel();
-    }
-    if (perf_stat_reporter_task) {
-        perf_stat_reporter_task->Cancel();
-    }
+    metrics_ping_timer.reset();
+    perf_stat_reporter_task.reset();
 
     goldfish::vsock::clear();
 

@@ -72,7 +72,6 @@ class VirtualDisplay : public IDisplay {
     void OnFrameRequested() override;
 
   private:
-
     IFrameSource::Start CaptureSurface(LegacySurfaceSource& source);
 
     std::atomic<bool> disconnected_{false};
@@ -81,7 +80,7 @@ class VirtualDisplay : public IDisplay {
     // Declared before legacy_, which sends it re-capture requests.
     const std::shared_ptr<FrameProducer> frame_producer_;
     const std::shared_ptr<LegacySurfaceSource> legacy_;
-    std::shared_ptr<EventLoop::Timer> poll_timer_;
+    EventLoop::ScopedTimer poll_timer_;
 
     EventLoop* qemu_loop_;
     ::VirtIOInputHID* vhid_;

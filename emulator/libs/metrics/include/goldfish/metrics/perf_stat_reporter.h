@@ -71,7 +71,7 @@ class PerfStatReporter {
     CpuUsage cpu_usage_;
     const android::goldfish::HardwareConfig& hw_;
     std::unique_ptr<goldfish::metrics::TextMetricsWriter> dump_file_;
-    std::shared_ptr<::goldfish::async::EventLoop::Timer> updater_;
+    ::goldfish::async::EventLoop::ScopedTimer updater_;
 };
 
 }  // namespace goldfish::metrics

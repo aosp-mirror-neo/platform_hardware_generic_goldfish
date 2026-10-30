@@ -233,7 +233,7 @@ class SensorDevice : public ISensorDevice {
 
     void OnClose() override {
         VLOG(1) << "Bye bye! Sensors shutting down";
-        timer_->Cancel();
+        timer_.reset();
 
         // Make sure we don't get destroyed while a timer is active.
         // By posting with a self reference we guarantee that we remain alive
@@ -463,7 +463,7 @@ class SensorDevice : public ISensorDevice {
     EventLoop* const loop_;
     const ::goldfish::system::VirtualClock& clock_;
     qemud::Parser qemud_parser_;
-    std::shared_ptr<EventLoop::Timer> timer_;
+    EventLoop::ScopedTimer timer_;
     absl::Duration time_offset_;
     absl::Duration delay_{absl::Milliseconds(800)};
 

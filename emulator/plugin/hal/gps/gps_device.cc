@@ -130,10 +130,7 @@ class GpsDevice : public IGpsDevice, public std::enable_shared_from_this<GpsDevi
         VLOG(1) << "Gps device has been disconnected";
 
         location_update_subscription_.reset();
-        if (one_second_timer_) {
-            one_second_timer_->Cancel();
-            one_second_timer_.reset();
-        }
+        one_second_timer_.reset();
     }
 
     void OnReceive(std::string_view data) override {
@@ -176,7 +173,7 @@ class GpsDevice : public IGpsDevice, public std::enable_shared_from_this<GpsDevi
 
     LocationUpdateSubscription location_update_subscription_;
     EventLoop* const loop_;
-    std::shared_ptr<EventLoop::Timer> one_second_timer_;
+    EventLoop::ScopedTimer one_second_timer_;
     Location location_{};
 };
 

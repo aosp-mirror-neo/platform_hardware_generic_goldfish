@@ -12,6 +12,7 @@
 #include <thread>
 #include <vector>
 
+#include "absl/base/config.h"
 #include "absl/base/log_severity.h"
 #include "absl/log/log.h"
 #include "absl/log/scoped_mock_log.h"
@@ -23,9 +24,27 @@
 
 #include "goldfish/async/libuv_event_loop.h"
 #include "goldfish/async/qemu_event_loop.h"
+#include "goldfish/async/testing/test_event_loop.h"
 #include "goldfish/async/threaded_event_loop.h"
 #include "test/fake_qemu_callbacks.h"
 #include "uv.h"
+
+extern "C" {
+// clang-format off
+// IWYU pragma: begin_keep
+#include "qemu/osdep.h"
+#include "qemu/main-loop.h"
+#include "qemu/timer.h"
+
+#ifdef shutdown
+#undef shutdown
+#endif
+#ifdef close
+#undef close
+#endif
+// IWYU pragma: end_keep
+// clang-format on
+}
 
 using namespace std::chrono_literals;
 
@@ -598,9 +617,9 @@ TEST_P(EventLoopTest, ScheduleDelayedIsCancelledByHandle) {
             }
         });
 
-        handle->Cancel();
+        handle.reset();
     } else {
-        handle->Cancel();
+        handle.reset();
         std::this_thread::sleep_for(150ms);
     }
 
@@ -619,7 +638,6 @@ TEST_P(EventLoopTest, ScheduleDelayedIsCancelledByRAII) {
         });
 
         handle->Schedule(absl::Milliseconds(100), absl::ZeroDuration());
-        VLOG(1) << "Use count: " << handle.use_count();
 
         if (mLoopType == "qemu") {
             pin = std::async([]() {
@@ -657,7 +675,7 @@ TEST_P(EventLoopTest, ScheduleRepeatingHelperExecutesMultipleTimes) {
 
     auto future = promise.get_future();
     runUntil(future);
-    handle->Cancel();
+    handle.reset();
     ASSERT_EQ(counter.load(), target_count);
 }
 
@@ -678,7 +696,7 @@ TEST_P(EventLoopTest, ScheduleRepeatingExecutesMultipleTimes) {
 
     auto future = promise.get_future();
     runUntil(future);
-    handle->Cancel();
+    handle.reset();
     ASSERT_EQ(counter.load(), target_count);
 }
 
@@ -690,7 +708,7 @@ TEST_P(EventLoopTest, MultiThreadedCreationAndCancellation) {
     // while the worker threads are still using it.
     runInThread();
     // The shared queue for timer handles.
-    std::queue<std::shared_ptr<EventLoop::Timer>> timer_queue;
+    std::queue<EventLoop::ScopedTimer> timer_queue;
     std::mutex queue_mutex;
     std::condition_variable queue_cv;
 
@@ -721,7 +739,7 @@ TEST_P(EventLoopTest, MultiThreadedCreationAndCancellation) {
             // Push the handle into the shared queue.
             {
                 std::lock_guard<std::mutex> lock(queue_mutex);
-                timer_queue.push(handle);
+                timer_queue.push(std::move(handle));
                 created_task_count++;
             }
             queue_cv.notify_one();
@@ -733,7 +751,7 @@ TEST_P(EventLoopTest, MultiThreadedCreationAndCancellation) {
     auto canceller_thread_func = [&]() {
         // Continue while there are still tasks to cancel.
         while (cancellations_done > 0) {
-            std::shared_ptr<EventLoop::Timer> handle;
+            EventLoop::ScopedTimer handle;
             {
                 std::unique_lock<std::mutex> lock(queue_mutex);
                 // Wait for a task or for all creators to finish.
@@ -752,13 +770,13 @@ TEST_P(EventLoopTest, MultiThreadedCreationAndCancellation) {
                     break;
                 }
 
-                handle = timer_queue.front();
+                handle = std::move(timer_queue.front());
 
                 timer_queue.pop();
             }
 
             if (handle) {
-                handle->Cancel();
+                handle.reset();
                 canceled_task_count++;
                 cancellations_done--;
             }
@@ -810,7 +828,7 @@ TEST_P(EventLoopTest, ScheduleRepeatingIsCancelledMidway) {
     // Under heavy load, it's possible that the timer's callback was invoked a few times.
     // However, once we cancel, we should not see any more invocations.
     int count_before_cancel = counter.load();
-    handle->Cancel();
+    handle.reset();
 
     // Note: we can be in the middle of executing the task! (which may increase the counter, and yes
     // this does happen!)
@@ -840,7 +858,7 @@ TEST_P(EventLoopTest, ThreadedEventLoopWaitsAtMostTimeout) {
     }
     std::promise<void> task_completed;
     auto start_time = std::chrono::steady_clock::now();
-    std::shared_ptr<EventLoop::Timer> task;
+    EventLoop::ScopedTimer task;
     {
         auto threaded_loop = ThreadedEventLoop::Create(LibuvEventLoop::Create());
         (void)threaded_loop->Post([&]() { task_completed.set_value(); }, absl::Seconds(10));
@@ -861,7 +879,7 @@ TEST_P(EventLoopTest, ShutdownRaceConditionStressTest) {
 
     // A shared vector to hold all timer handles, protected by a mutex.
     absl::Mutex vec_mutex;
-    std::vector<std::shared_ptr<EventLoop::Timer>> all_timers;
+    std::vector<EventLoop::ScopedTimer> all_timers;
     all_timers.reserve(kTotalTimers);
 
     // Start the event loop in the background.
@@ -877,7 +895,7 @@ TEST_P(EventLoopTest, ShutdownRaceConditionStressTest) {
                 handle->Schedule(absl::Hours(1), absl::Hours(1));
 
                 absl::MutexLock lock(&vec_mutex);
-                all_timers.push_back(handle);
+                all_timers.push_back(std::move(handle));
             }
         });
     }
@@ -909,16 +927,16 @@ TEST_P(EventLoopTest, ShutdownRaceConditionStressTest) {
     for (int i = 0; i < kDestroyerThreads; ++i) {
         destroyers.emplace_back([&]() {
             while (true) {
-                std::shared_ptr<EventLoop::Timer> handle;
+                EventLoop::ScopedTimer handle;
                 {
                     absl::MutexLock lock(&vec_mutex);
                     if (all_timers.empty()) {
                         break;  // No more timers to destroy
                     }
-                    handle = all_timers.back();
+                    handle = std::move(all_timers.back());
                     all_timers.pop_back();
                 }
-                // Resetting the shared_ptr triggers the timer's destructor on THIS thread.
+                // Resetting the ScopedTimer triggers cancellation on THIS thread.
                 handle.reset();
             }
         });
@@ -1218,7 +1236,7 @@ TEST_P(EventLoopTest, CancelTimerBeforeLoopRunsDoesNotHang) {
         return true;
     });
     timer1->Schedule(absl::Milliseconds(10), absl::ZeroDuration());
-    timer1->Cancel();
+    timer1.reset();
 
     auto timer2 = loop->CreateTimer([&]() {
         timer2_executed = true;
@@ -1250,7 +1268,7 @@ TEST_P(EventLoopTest, CancelTimerOnLoopThreadBeforeDrainDoesNotFire) {
             return true;
         });
         timer->Schedule(absl::Milliseconds(10), absl::ZeroDuration());
-        timer->Cancel();
+        timer.reset();
         done.Notify();
     });
 
@@ -1344,7 +1362,7 @@ TEST_P(EventLoopTest, QemuSnapshotBeforeInitialDrainPreservesNotStartedAndPaused
         return true;
     });
     timer->Schedule(absl::Milliseconds(10), absl::ZeroDuration());
-    timer->Cancel();
+    timer.reset();
 
     progress.phase = QEMU_SNAPSHOT_PHASE_COMPLETED;
     fake_qemu_fire_snapshot_progress(&progress);
@@ -1498,6 +1516,56 @@ TEST(LibuvEventLoopShutdownTest, ClosesLingeringUnreferencedHandlesOnDestroyWith
 
     log.StopCapturingLogs();
     EXPECT_NE(uv_is_closing(reinterpret_cast<uv_handle_t*>(&lingering_timer)), 0);
+}
+
+TEST_P(EventLoopTest, TimerDoesNotFireAfterCancelReturnsDuringShutdown) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    int fired = 0;
+    auto timer = loop->ScheduleDelayed([&fired] { ++fired; }, absl::Milliseconds(1));
+    fake_qemu_advance_ms(1);
+
+    std::future<absl::Status> shutdown;
+    std::thread grpc([&] { shutdown = loop->Shutdown(); });
+    grpc.join();
+
+    std::thread hang_detector([&] { timer.reset(); });
+    hang_detector.join();
+
+    fake_qemu_advance_ms(1);
+    ASSERT_EQ(shutdown.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_THAT(shutdown.get(), absl_testing::IsOk());
+
+    EXPECT_EQ(fired, 0) << "the timer callback ran after ScopedTimer::reset() returned";
+}
+
+TEST(FakeQemuTest, AdvanceIsRaceFreeWithTimersRegisteredOnOtherThreads) {
+#ifndef ABSL_HAVE_THREAD_SANITIZER
+    GTEST_SKIP() << "Run with --config=tsan: only ThreadSanitizer reports this race reliably.";
+#else
+    constexpr int kTimers = 1000;
+    std::vector<QEMUTimer> timers(kTimers);
+    std::atomic<bool> start = false;
+    std::thread registrar([&] {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+        for (QEMUTimer& timer : timers) {
+            timer_init_full(
+                    &timer, nullptr, QEMU_CLOCK_VIRTUAL, SCALE_MS, 0, [](void*) {}, nullptr);
+        }
+    });
+    start.store(true, std::memory_order_release);
+    for (int i = 0; i < kTimers; ++i) {
+        fake_qemu_advance_ms(1);
+    }
+    registrar.join();
+
+    for (QEMUTimer& timer : timers) {
+        timer_del(&timer);
+    }
+    fake_qemu_reset();
+#endif
 }
 
 }  // namespace goldfish::async
