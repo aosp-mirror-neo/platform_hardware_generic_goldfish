@@ -101,7 +101,7 @@ StudioFileMetricsWriter::StudioFileMetricsWriter(const fs::path& spool_dir,
                   absl::Seconds(10), absl::Seconds(10))) {}
 
 StudioFileMetricsWriter::~StudioFileMetricsWriter() {
-    max_file_duration_timer_->Cancel();
+    max_file_duration_timer_.reset();
     absl::MutexLock lock(mutex_);
     FinalizeCurrentFile();
 }

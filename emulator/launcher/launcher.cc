@@ -210,7 +210,7 @@ class Launcher {
                 LOG(WARNING)
                         << "Signal " << signum
                         << " received while already shutting down; sending SIGKILL to emulator";
-                qemu_shutdown_timeout_->Cancel();
+                qemu_shutdown_timeout_.reset();
                 p->Kill(SIGKILL);
                 return;
             }
@@ -564,7 +564,7 @@ class Launcher {
     std::unique_ptr<::goldfish::async::ManagedProcess> fishtank_process_;
     std::unique_ptr<::goldfish::async::ManagedProcess> netsimd_process_;
     std::unique_ptr<::goldfish::async::ManagedProcess> emulator_process_;
-    std::shared_ptr<::goldfish::async::EventLoop::Timer> qemu_shutdown_timeout_;
+    ::goldfish::async::EventLoop::ScopedTimer qemu_shutdown_timeout_;
     std::shared_ptr<ModemSimulatorService> modem_simulator_service_;
 
     int emulator_exit_status_ = 0;

@@ -19,7 +19,6 @@ cc_library(
         "include/goldfish/async/looper_breadcrumb_tracker.h",
         "include/goldfish/async/process_launcher.h",
         "include/goldfish/async/scoped_async_resource.h",
-        "include/goldfish/async/scoped_async_timer.h",
         "include/goldfish/async/signal_handlers.h",
         "include/goldfish/async/when_all.h",
     ],
@@ -169,10 +168,12 @@ cc_test(
         "//emulator/libs/system",
         "//emulator/libs/system:threads",
         "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/base:config",
         "@abseil-cpp//absl/base:log_severity",
         "@abseil-cpp//absl/log:scoped_mock_log",
         "@abseil-cpp//absl/status:status_matchers",
         "@libuv",
+        "@qemu//:qemu-headers-exported",
     ],
 )
 

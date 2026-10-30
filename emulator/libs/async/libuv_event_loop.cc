@@ -32,7 +32,6 @@
 
 #include "android/base/threads/thread_utils.h"
 #include "goldfish/async/event_loop.h"
-#include "goldfish/async/scoped_async_timer.h"
 #include "goldfish/async/uv_to_absl.h"
 #include "goldfish/perfetto/perfetto_categories.h"
 #include "uv.h"
@@ -111,21 +110,18 @@ class LibuvEventLoopImpl : public LibuvEventLoop {
     void* GetRawLoop() override { return &uv_loop_handle_; }
 
     // --- Task Posting and Scheduling ---
-    std::shared_ptr<EventLoop::Timer> CreateTimer(RepeatingTask task) override;
+    ScopedTimer CreateTimer(RepeatingTask task) override;
 
   private:
     friend class LibuvTimer;
 
     void AddActiveTimer(const std::shared_ptr<LibuvTimer>& t) {
-        LOG_IF(DFATAL, !IsOnLoopThread()) << "addActiveTimer must be called from the loop thread";
         std::weak_ptr<LibuvTimer>& existing = active_timers_[t.get()];
         DCHECK(existing.expired()) << "Tried to insert a duplicate timer that was already active.";
         existing = t;
     }
 
     void RemoveActiveTimer(LibuvTimer* const t) {
-        LOG_IF(DFATAL, !IsOnLoopThread())
-                << "removeActiveTimer must be called from the loop thread";
         const size_t erased = active_timers_.erase(t);
         DCHECK(erased == 1)
                 << "Tried to remove a timer that didn't exist in the active timers set.";
@@ -172,18 +168,28 @@ class LibuvEventLoopImpl : public LibuvEventLoop {
     // Must be accessed only from the loop.
     absl::flat_hash_map<LibuvTimer*, std::weak_ptr<LibuvTimer>> active_timers_;
 
-    /// Mutex protecting access to the mTaskQueue.
-    absl::Mutex task_mutex_;
     /// Queue of tasks posted from external threads to be run on the loop.
     std::queue<QueuedTask> task_queue_ ABSL_GUARDED_BY(task_mutex_);
     size_t tasks_processed_ ABSL_GUARDED_BY(task_mutex_){0};
 
-    /// Atomic flag indicating the loop is shutting down and will not accept new tasks.
     std::promise<absl::Status> shutdown_complete_promise_;
-    std::atomic<bool> async_handle_valid_ = false;
+
+    // Keep all bools together to minimize alignment gaps.
+    std::atomic<bool> async_handle_valid_{false};
     std::atomic<bool> is_shutting_down_{false};
     std::atomic<bool> promise_set_{false};
     bool queue_is_idle_ ABSL_GUARDED_BY(task_mutex_){true};
+
+    enum class LifecycleState {
+        kNotStarted,
+        kRunning,
+        kFinished,
+    };
+    LifecycleState lifecycle_state_ ABSL_GUARDED_BY(lifecycle_mutex_){LifecycleState::kNotStarted};
+
+    // Mutexes placed at the very end.
+    absl::Mutex task_mutex_;
+    absl::Mutex lifecycle_mutex_;
 };
 
 // The timer now inherits from std::enable_shared_from_this to safely manage
@@ -199,9 +205,40 @@ class LibuvTimer : public EventLoop::Timer, public std::enable_shared_from_this<
     // this sets up the mUvTimer with a self reference so it can be
     // placed in a queue.
     static std::shared_ptr<LibuvTimer> Create(LibuvEventLoopImpl* loop,
-                                              EventLoop::RepeatingTask task, FlowId flow_id = 0) {
+                                              EventLoop::RepeatingTask task, FlowId flow_id = 0,
+                                              bool pin_for_caller = true) {
         auto timer = std::make_shared<LibuvTimer>(loop, std::move(task), flow_id, Private());
-        timer->AddItselfToActiveTimers();
+        if (pin_for_caller) {
+            timer->caller_pin_ = timer;
+        }
+        {
+            const absl::MutexLock lock(loop->lifecycle_mutex_);
+            if (loop->is_shutting_down_.load() ||
+                loop->lifecycle_state_ == LibuvEventLoopImpl::LifecycleState::kFinished) {
+                // If the loop is shutting down or finished, disarm the timer so it cannot
+                // execute or schedule work on a terminating loop.
+                timer->cancelled_.store(true);
+                return timer;
+            }
+            if (loop->lifecycle_state_ == LibuvEventLoopImpl::LifecycleState::kNotStarted) {
+                timer->InitOnLoop();
+                return timer;
+            }
+        }
+        if (loop->IsOnLoopThread()) {
+            timer->InitOnLoop();
+            return timer;
+        }
+        const absl::Status status = loop->PostAndWait([&timer]() {
+            if (timer->event_loop_->is_shutting_down_.load()) {
+                timer->cancelled_.store(true);
+                return;
+            }
+            timer->InitOnLoop();
+        });
+        if (!status.ok()) {
+            timer->cancelled_.store(true);
+        }
         return timer;
     }
 
@@ -210,10 +247,10 @@ class LibuvTimer : public EventLoop::Timer, public std::enable_shared_from_this<
         auto* uv_timer = reinterpret_cast<uv_timer_t*>(handle);
         DCHECK(uv_timer->data) << "UV timer handle must have a pointer to the LibuvTimer instance.";
         auto* that = static_cast<LibuvTimer*>(uv_timer->data);
-        DCHECK(!that->timer_handle_valid_);
-        DCHECK(that->pinned_);
+        DCHECK(that->closing_);
+        DCHECK(that->uv_pin_);
 
-        that->pinned_.reset();  // potentially calls ~LibuvTimer
+        that->uv_pin_.reset();  // potentially calls ~LibuvTimer
     }
 
     LibuvTimer(LibuvEventLoopImpl* loop, EventLoop::RepeatingTask task, FlowId flow_id, Private)
@@ -222,83 +259,78 @@ class LibuvTimer : public EventLoop::Timer, public std::enable_shared_from_this<
     }
 
     void Cancel() override {
-        // Prevent duplicate cancellation and mark the timer as cancelled atomically.
-        // This resolves a race condition where a timer is created and cancelled before
-        // AddItselfToActiveTimers executes on the loop thread.
+        auto caller_pin = std::move(caller_pin_);
         if (cancelled_.exchange(true)) {
             return;
         }
         if (event_loop_->IsOnLoopThread()) {
             DoCancel(false);
-        } else if (event_loop_->GetState() == LooperStatusEvent::State::kNotStarted ||
-                   event_loop_->GetState() == LooperStatusEvent::State::kFinished) {
-            // Avoid PostAndWait deadlock when the looper thread is not actively running.
-            DoCancel(false);
-        } else {
+            return;
+        }
+        bool cancelled_while_not_running = false;
+        {
+            const absl::MutexLock lock(event_loop_->lifecycle_mutex_);
+            if (event_loop_->lifecycle_state_ != LibuvEventLoopImpl::LifecycleState::kRunning) {
+                DoCancel(false);
+                cancelled_while_not_running = true;
+            }
+        }
+        if (!cancelled_while_not_running) {
             event_loop_->PostAndWait([this]() { DoCancel(false); }).IgnoreError();
         }
     }
 
     void Schedule(absl::Duration new_delay, absl::Duration new_interval) override {
-        event_loop_->PostImmediatelyInternal(
-                [self = shared_from_this(), new_delay_ms = absl::ToInt64Milliseconds(new_delay),
-                 new_interval_ms = absl::ToInt64Milliseconds(new_interval)] {
-                    if (self->timer_handle_valid_ && !self->cancelled_.load()) {
-                        DCHECK(self->pinned_);
-
-                        uv_timer_stop(&self->uv_timer_handle_);
-                        uv_timer_start(&self->uv_timer_handle_, OnTimerStatic, new_delay_ms,
-                                       new_interval_ms);
-                    } else {
-                        LOG(ERROR) << "Can't schedule a timer after it has been cancelled";
-                    }
-                });
+        if (cancelled_.load()) {
+            LOG(ERROR) << "Can't schedule a timer after it has been cancelled";
+            return;
+        }
+        const uint64_t seq = ++schedule_seq_;
+        event_loop_->PostImmediatelyInternal([self = shared_from_this(), seq,
+                                              new_delay_ms = absl::ToInt64Milliseconds(new_delay),
+                                              new_interval_ms =
+                                                      absl::ToInt64Milliseconds(new_interval)] {
+            if (self->cancelled_.load() || !self->uv_pin_ || self->closing_) {
+                LOG(ERROR) << "Can't schedule a timer after it has been cancelled";
+                return;
+            }
+            if (seq != self->schedule_seq_.load()) {
+                return;
+            }
+            self->active_schedule_seq_ = seq;
+            uv_timer_stop(&self->uv_timer_handle_);
+            uv_timer_start(&self->uv_timer_handle_, OnTimerStatic, new_delay_ms, new_interval_ms);
+        });
     }
 
   private:
-    void DoCancel(const bool shutting_down) {
-        cancelled_.store(true);
-        if (timer_handle_valid_.exchange(false)) {
-            if (event_loop_->IsOnLoopThread()) {
-                DCHECK(pinned_);
-
-                uv_timer_stop(&uv_timer_handle_);
-                if (!shutting_down) {
-                    event_loop_->RemoveActiveTimer(this);
-                }
-
-                uv_close(reinterpret_cast<uv_handle_t*>(&uv_timer_handle_), UnpinItselfOnClose);
-            } else {
-                pinned_.reset();
-            }
+    void InitOnLoop() {
+        DCHECK(!uv_pin_) << "Timer should not be pinned before initialization.";
+        if (const int err = uv_timer_init(&event_loop_->uv_loop_handle_, &uv_timer_handle_)) {
+            LOG(DFATAL) << "uv_timer_init failed with: " << uv_strerror(err);
         }
+        uv_timer_handle_.data = this;
+        const auto self = shared_from_this();
+        uv_pin_ = self;
+        event_loop_->AddActiveTimer(self);
     }
 
-    void AddItselfToActiveTimers() {
-        // shared_from_this() is not available in the ctor
-        event_loop_->PostImmediatelyInternal([self = shared_from_this()]() {
-            // If the timer was already cancelled before this task executed on the loop,
-            // skip initialization to prevent lingering active timers.
-            if (self->cancelled_.load()) {
-                return;
+    void DoCancel(const bool shutting_down) {
+        cancelled_.store(true);
+        if (uv_pin_ && !closing_) {
+            closing_ = true;
+            uv_timer_stop(&uv_timer_handle_);
+            if (!shutting_down) {
+                event_loop_->RemoveActiveTimer(this);
             }
-            DCHECK(!self->pinned_) << "Timer should not be pinned before initialization.";
 
-            if (const int err = uv_timer_init(&self->event_loop_->uv_loop_handle_,
-                                              &self->uv_timer_handle_)) {
-                LOG(DFATAL) << "uv_timer_init failed with: " << uv_strerror(err);
-            }
-            self->uv_timer_handle_.data = self.get();
-            self->timer_handle_valid_ = true;
-
-            self->pinned_ = self;
-            self->event_loop_->AddActiveTimer(self);
-        });
+            uv_close(reinterpret_cast<uv_handle_t*>(&uv_timer_handle_), UnpinItselfOnClose);
+        }
     }
 
     static void OnTimerStatic(uv_timer_t* handle) {
         DCHECK(handle->data) << "UV timer handle must have a pointer to the LibuvTimer instance.";
-        const auto self = static_cast<LibuvTimer*>(handle->data)->pinned_;
+        const auto self = static_cast<LibuvTimer*>(handle->data)->uv_pin_;
         DCHECK(self) << "OnTimerStatic callback called without a valid LibuvTimer instance.";
         DCHECK(self->event_loop_->IsOnLoopThread())
                 << "OnTimerStatic callback must be executed on the event loop thread.";
@@ -307,6 +339,9 @@ class LibuvTimer : public EventLoop::Timer, public std::enable_shared_from_this<
     }
 
     void OnTimer() {
+        if (cancelled_.load() || active_schedule_seq_ != schedule_seq_.load()) {
+            return;
+        }
         auto* tracker = event_loop_->tracker();
         if (flow_id_ != 0 && tracker) {
             tracker->LogExecute(flow_id_);
@@ -318,11 +353,30 @@ class LibuvTimer : public EventLoop::Timer, public std::enable_shared_from_this<
     }
 
     LibuvEventLoopImpl* const event_loop_;
-    std::shared_ptr<LibuvTimer> pinned_;  ///< prevents calling the dctor
+    // Keeps LibuvTimer alive while the caller owns a ScopedTimer handle (until
+    // TimerDeleter invokes Cancel()), even if the loop shuts down and closes
+    // uv_timer_handle_ first.
+    std::shared_ptr<LibuvTimer> caller_pin_;
+    // Keeps LibuvTimer (which embeds uv_timer_handle_) alive from
+    // uv_timer_init() until libuv invokes the asynchronous uv_close() callback
+    // (UnpinItselfOnClose), even if the caller destroys ScopedTimer earlier.
+    std::shared_ptr<LibuvTimer> uv_pin_;
     EventLoop::RepeatingTask task_;
-    uv_timer_t uv_timer_handle_;
+    uv_timer_t uv_timer_handle_{};
     const FlowId flow_id_;
-    std::atomic<bool> timer_handle_valid_{false};
+
+    // Monotonically increasing sequence number incremented on each Schedule() call.
+    // Captured in the posted task to ensure that when multiple Schedule() calls
+    // race or are posted in quick succession, older tasks running on the event loop
+    // thread discard stale updates if superseded by a newer Schedule().
+    std::atomic<uint64_t> schedule_seq_{0};
+
+    // The sequence number of the schedule currently active on the loop backend.
+    // Checked in OnTimer() to ensure an expiring timer does not fire if a newer
+    // Schedule() has superseded it.
+    uint64_t active_schedule_seq_ = 0;
+
+    bool closing_ = false;
     std::atomic<bool> cancelled_{false};
 
     friend LibuvEventLoopImpl;
@@ -402,12 +456,9 @@ void LibuvEventLoopImpl::ShutdownTimersInternal() {
     active_timers_.clear();
 }
 
-std::shared_ptr<EventLoop::Timer> LibuvEventLoopImpl::CreateTimer(RepeatingTask task) {
-    if (is_shutting_down_) {
-        return std::make_shared<ScopedTimer>(nullptr);
-    }
-    auto timer = LibuvTimer::Create(this, std::move(task));
-    return std::make_shared<ScopedTimer>(timer);
+EventLoop::ScopedTimer LibuvEventLoopImpl::CreateTimer(RepeatingTask task) {
+    auto timer = LibuvTimer::Create(this, std::move(task), /*flow_id=*/0, /*pin_for_caller=*/true);
+    return ScopedTimer(timer.get());
 }
 
 absl::Status LibuvEventLoopImpl::PostDelayed(Task task, absl::Duration delay, FlowId flow_id) {
@@ -415,16 +466,19 @@ absl::Status LibuvEventLoopImpl::PostDelayed(Task task, absl::Duration delay, Fl
         LOG(WARNING) << "LibuvEventLoopImpl is not available as it is shutting down";
         return absl::UnavailableError("LibuvEventLoopImpl is shutting down");
     }
-    // For fire-and-forget, the timer's lifetime is managed by its own async
-    // operations. We create it and immediately let go of the handle.
-    auto timer = LibuvTimer::Create(
-            this,
-            [task = std::move(task)]() mutable {
-                task();
-                return false;
-            },
-            flow_id);
-    timer->Schedule(delay, absl::ZeroDuration());
+    PostImmediatelyInternal([this, task = std::move(task), delay, flow_id]() mutable {
+        if (is_shutting_down_) {
+            return;
+        }
+        auto timer = LibuvTimer::Create(
+                this,
+                [task = std::move(task)]() mutable {
+                    task();
+                    return false;
+                },
+                flow_id, /*pin_for_caller=*/false);
+        timer->Schedule(delay, absl::ZeroDuration());
+    });
     return absl::OkStatus();
 }
 
@@ -467,9 +521,17 @@ void LibuvEventLoopImpl::ProcessTasks() {
 absl::Status LibuvEventLoopImpl::Run() {
     thread_id_ = std::this_thread::get_id();
     android::base::ThreadUtils::SetCurrentThreadName(GetName());
+    {
+        const absl::MutexLock lock(lifecycle_mutex_);
+        lifecycle_state_ = LifecycleState::kRunning;
+    }
 
     SetState(LooperStatusEvent::State::kRunning);
     const int err = uv_run(&uv_loop_handle_, UV_RUN_DEFAULT);
+    {
+        const absl::MutexLock lock(lifecycle_mutex_);
+        lifecycle_state_ = LifecycleState::kFinished;
+    }
     SetState(LooperStatusEvent::State::kFinished);
 
     auto status = UvErrToAbslStatus(err);

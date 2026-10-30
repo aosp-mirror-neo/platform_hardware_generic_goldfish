@@ -237,7 +237,7 @@ class InputDispatcher final : public IInputDispatcher {
         uint64_t armed_generation = 0;
         // Armed while the session holds input and has a positive idle_timeout.
         // Never self-cancels, so Schedule() can re-arm it.
-        std::shared_ptr<::goldfish::async::EventLoop::Timer> idle_timer;
+        ::goldfish::async::EventLoop::ScopedTimer idle_timer;
     };
     // Shared with the idle-timer callbacks and the tasks they need in loop
     // order, which may still run after the dispatcher is gone: once Shutdown()

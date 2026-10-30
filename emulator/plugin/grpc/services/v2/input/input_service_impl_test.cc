@@ -182,8 +182,10 @@ class PacingEventLoop final : public EventLoop {
     std::future<absl::Status> Shutdown() override { return inner_.Shutdown(); }
     bool IsOnLoopThread() const override { return inner_.IsOnLoopThread(); }
 
-    std::shared_ptr<Timer> CreateTimer(RepeatingTask task) override {
-        return std::make_shared<PacingTimer>(inner_, clock_, std::move(task));
+    ScopedTimer CreateTimer(RepeatingTask task) override {
+        auto timer = std::make_shared<PacingTimer>(inner_, clock_, std::move(task));
+        timer->PinCaller(timer);
+        return ScopedTimer(timer.get());
     }
 
   protected:
@@ -204,6 +206,8 @@ class PacingEventLoop final : public EventLoop {
         PacingTimer(EventLoop& loop, FakePacingClock& clock, RepeatingTask task)
                 : loop_(loop), clock_(clock), task_(std::move(task)) {}
 
+        void PinCaller(std::shared_ptr<PacingTimer> self) { caller_pin_ = std::move(self); }
+
         void Schedule(absl::Duration initial_delay, absl::Duration /*interval*/) override {
             if (!loop_.IsOnLoopThread()) {
                 loop_.WaitUntilIdle();
@@ -216,13 +220,17 @@ class PacingEventLoop final : public EventLoop {
                  }).IgnoreError();
         }
 
-        void Cancel() override { cancelled_.store(true, std::memory_order_release); }
+        void Cancel() override {
+            cancelled_.store(true, std::memory_order_release);
+            caller_pin_.reset();
+        }
 
       private:
         EventLoop& loop_;
         FakePacingClock& clock_;
         RepeatingTask task_;
         std::atomic<bool> cancelled_{false};
+        std::shared_ptr<PacingTimer> caller_pin_;
     };
 
     EventLoop& inner_;

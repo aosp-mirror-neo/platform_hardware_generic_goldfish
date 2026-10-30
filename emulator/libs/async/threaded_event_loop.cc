@@ -71,7 +71,7 @@ class ThreadedEventLoopImpl : public ThreadedEventLoop {
      */
     bool IsOnLoopThread() const override { return loop_->IsOnLoopThread(); }
 
-    std::shared_ptr<Timer> CreateTimer(RepeatingTask task) override {
+    ScopedTimer CreateTimer(RepeatingTask task) override {
         return loop_->CreateTimer(std::move(task));
     }
 

@@ -117,15 +117,13 @@ void fake_qemu_advance_ms(int64_t ms) {
 
         // Step 2: Check and dispatch any expired timers
         std::vector<QEMUBH*> scheduled_bh_from_timers;
-        std::list<QEMUTimer*> timers;
         {
             std::lock_guard<std::recursive_mutex> lock(sMutex);
-            timers = sTimers;
-        }
-        for (auto* timer : sTimers) {
-            if (timer->scale && timer->expire_time <= sFakeClockMs) {
-                timer->scale = 0;
-                scheduled_bh_from_timers.push_back(qemu_bh_new(timer->cb, timer->opaque));
+            for (auto* timer : sTimers) {
+                if (timer->scale && timer->expire_time <= sFakeClockMs) {
+                    timer->scale = 0;
+                    scheduled_bh_from_timers.push_back(qemu_bh_new(timer->cb, timer->opaque));
+                }
             }
         }
 

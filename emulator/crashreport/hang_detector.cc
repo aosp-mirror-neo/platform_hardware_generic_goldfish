@@ -77,7 +77,7 @@ class LoopWatcher {
     }
 
     void CancelHangCheck() {
-        std::shared_ptr<::goldfish::async::EventLoop::Timer> timer;
+        ::goldfish::async::EventLoop::ScopedTimer timer;
         std::unique_ptr<android::base::eventing::ScopedEventCallback<
                 ::goldfish::async::EventLoop, ::goldfish::async::LooperStatusEvent>>
                 state_subscription;
@@ -86,11 +86,6 @@ class LoopWatcher {
             timer = std::move(timer_);
             state_subscription = std::move(state_subscription_);
             is_task_running_ = false;
-        }
-
-        state_subscription.reset();
-        if (timer) {
-            timer->Cancel();
         }
     }
 
@@ -175,7 +170,7 @@ class LoopWatcher {
 
     absl::Mutex mutex_;
     ::goldfish::async::EventLoop& event_loop_;
-    std::shared_ptr<::goldfish::async::EventLoop::Timer> timer_ ABSL_GUARDED_BY(mutex_);
+    ::goldfish::async::EventLoop::ScopedTimer timer_ ABSL_GUARDED_BY(mutex_);
     std::unique_ptr<android::base::eventing::ScopedEventCallback<
             ::goldfish::async::EventLoop, ::goldfish::async::LooperStatusEvent>>
             state_subscription_ ABSL_GUARDED_BY(mutex_);

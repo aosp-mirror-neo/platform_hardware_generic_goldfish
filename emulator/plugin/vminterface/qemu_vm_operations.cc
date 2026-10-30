@@ -173,12 +173,11 @@ VmOperations::SnapshotProgress ToSnapshotProgress(const QemuSnapshotProgress& qp
     } else if (progress.phase == VmOperations::SnapshotPhase::Failed) {
         const std::string_view action =
                 progress.operation == VmOperations::SnapshotOperationType::Load ? "load" : "save";
-        const std::string_view target =
-                progress.snapshot_id.empty() ? std::string_view("<unnamed>")
-                                             : std::string_view(progress.snapshot_id);
-        progress.error_message = absl::StrCat(
-                "Cannot ", action, " snapshot '", target,
-                "': QEMU reported an unspecified snapshot failure");
+        const std::string_view target = progress.snapshot_id.empty()
+                                                ? std::string_view("<unnamed>")
+                                                : std::string_view(progress.snapshot_id);
+        progress.error_message = absl::StrCat("Cannot ", action, " snapshot '", target,
+                                              "': QEMU reported an unspecified snapshot failure");
     }
     progress.transferred_bytes = qprog.transferred_bytes;
     progress.total_bytes = qprog.total_bytes;
@@ -294,9 +293,7 @@ class QemuVmOperations : public VmOperations {
         if (watchdog_registered) {
             hang_detector_->RemovePredicate(kSnapshotWatchdogName);
         }
-        if (transfer_flush_timer_) {
-            transfer_flush_timer_->Cancel();
-        }
+        transfer_flush_timer_.reset();
     }
 
     absl::Status Stop() override { return Pause(); }
@@ -651,11 +648,11 @@ class QemuVmOperations : public VmOperations {
         const std::string recorded =
                 version.ok() ? absl::StrCat(*version)
                              : (absl::IsNotFound(version.status()) ? "missing" : "unreadable");
-        return absl::FailedPreconditionError(absl::StrCat(
-                "Cannot load snapshot '", name,
-                "': it is incompatible with this emulator (snapshot version ", recorded,
-                ", expected ", snapshot_store_->Version(),
-                "). Delete it with DeleteSnapshot and save a new one."));
+        return absl::FailedPreconditionError(
+                absl::StrCat("Cannot load snapshot '", name,
+                             "': it is incompatible with this emulator (snapshot version ",
+                             recorded, ", expected ", snapshot_store_->Version(),
+                             "). Delete it with DeleteSnapshot and save a new one."));
     }
 
     void AssertOnQemuLoop() const {
@@ -827,8 +824,7 @@ class QemuVmOperations : public VmOperations {
         absl::Duration remaining = absl::ZeroDuration();
         {
             absl::MutexLock lock(&progress_mutex_);
-            if (!transfer_flush_pending_ ||
-                cached_progress_.phase != SnapshotPhase::Transferring) {
+            if (!transfer_flush_pending_ || cached_progress_.phase != SnapshotPhase::Transferring) {
                 transfer_flush_pending_ = false;
                 return;
             }
@@ -857,7 +853,7 @@ class QemuVmOperations : public VmOperations {
     const bool snapshots_enabled_;
     ::android::crashreport::HangDetector* const hang_detector_;
     absl::Clock& clock_;
-    std::shared_ptr<::goldfish::async::EventLoop::Timer> transfer_flush_timer_;
+    ::goldfish::async::EventLoop::ScopedTimer transfer_flush_timer_;
     VMChangeStateEntry* change_state_entry_{nullptr};
     QemuSnapshotProgressEntry* snapshot_progress_entry_{nullptr};
     // Leaf mutex protecting cached_progress_, transfer-throttle, and watchdog state for BQL-free

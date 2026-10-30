@@ -65,9 +65,7 @@ MetricsInterceptorFactory::MetricsInterceptorFactory(::goldfish::metrics::Metric
 }
 
 MetricsInterceptorFactory::~MetricsInterceptorFactory() {
-    if (flush_timer_) {
-        flush_timer_->Cancel();
-    }
+    flush_timer_.reset();
     ReportMetrics();
 }
 

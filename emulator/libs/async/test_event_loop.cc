@@ -47,7 +47,7 @@ class TestEventLoopImpl : public TestEventLoop {
     bool IsOnLoopThread() const override;
     absl::Status PostImmediately(Task task, FlowId flow_id) override;
     absl::Status PostDelayed(Task task, absl::Duration delay, FlowId flow_id) override;
-    std::shared_ptr<Timer> CreateTimer(RepeatingTask task) override;
+    ScopedTimer CreateTimer(RepeatingTask task) override;
 
     // TestEventLoop Interface
     void RunAll() override;
@@ -84,20 +84,43 @@ class TestEventLoopImpl : public TestEventLoop {
 
     class TestTimer : public Timer, public std::enable_shared_from_this<TestTimer> {
       public:
+        static std::shared_ptr<TestTimer> Create(TestEventLoopImpl* loop, RepeatingTask task,
+                                                 FlowId flow_id, bool pin_for_caller) {
+            auto timer = std::make_shared<TestTimer>(loop, std::move(task), flow_id);
+            if (pin_for_caller) {
+                timer->caller_pin_ = timer;
+            } else {
+                timer->loop_pin_ = timer;
+            }
+            return timer;
+        }
+
         TestTimer(TestEventLoopImpl* loop, RepeatingTask task, FlowId flow_id = 0)
                 : loop_(loop)
                 , pending_task_(std::make_shared<RepeatingTask>(std::move(task)))
                 , flow_id_(flow_id) {}
-        ~TestTimer() override { Cancel(); }
-        void Cancel() override { cancelled_ = true; }
+        ~TestTimer() override = default;
+        void Cancel() override {
+            auto caller_pin = std::move(caller_pin_);
+            MarkCancelled();
+        }
+        void MarkCancelled() {
+            cancelled_ = true;
+            loop_pin_.reset();
+        }
         bool IsCancelled() const { return cancelled_; }
         std::shared_ptr<RepeatingTask> task() { return pending_task_; }  // NOLINT
         FlowId GetFlowId() const { return flow_id_; }
         void Schedule(absl::Duration new_delay, absl::Duration new_interval) override {
+            if (cancelled_) {
+                return;
+            }
             loop_->Reschedule(shared_from_this(), new_delay, new_interval);
         }
 
       private:
+        std::shared_ptr<TestTimer> caller_pin_;
+        std::shared_ptr<TestTimer> loop_pin_;
         std::atomic_bool cancelled_{false};
         TestEventLoopImpl* loop_;
         std::shared_ptr<RepeatingTask> pending_task_;
@@ -116,9 +139,7 @@ class TestEventLoopImpl : public TestEventLoop {
     bool IsCommandNone() const ABSL_SHARED_LOCKS_REQUIRED(mutex_) {
         return command_ == Command::kNone;
     }
-    bool IsQueueIdle() const ABSL_SHARED_LOCKS_REQUIRED(mutex_) {
-        return queue_is_idle_;
-    }
+    bool IsQueueIdle() const ABSL_SHARED_LOCKS_REQUIRED(mutex_) { return queue_is_idle_; }
 
     std::thread thread_;
     std::thread::id thread_id_;
@@ -173,6 +194,11 @@ TestEventLoopImpl::~TestEventLoopImpl() {
 
 void TestEventLoopImpl::ShutdownTimers() {
     absl::MutexLock lock(&mutex_);
+    for (auto& task : scheduled_tasks_) {
+        if (auto handle = task.handle.lock()) {
+            handle->MarkCancelled();
+        }
+    }
     scheduled_tasks_.clear();
 }
 
@@ -188,6 +214,11 @@ std::future<absl::Status> TestEventLoopImpl::Shutdown() {
     promise.set_value(absl::OkStatus());
     absl::MutexLock lock(&mutex_);
     tasks_.clear();
+    for (auto& task : scheduled_tasks_) {
+        if (auto handle = task.handle.lock()) {
+            handle->MarkCancelled();
+        }
+    }
     scheduled_tasks_.clear();
 
     return promise.get_future();
@@ -213,13 +244,13 @@ absl::Status TestEventLoopImpl::PostDelayed(Task task, absl::Duration delay, Flo
         LOG(ERROR) << "Loop is shutting down.";
         return absl::UnavailableError("test loop is shutting down");
     }
-    auto timer = std::make_shared<TestTimer>(
+    auto timer = TestTimer::Create(
             this,
             [task = std::move(task)]() mutable {
                 task();
                 return false;
             },
-            flow_id);
+            flow_id, /*pin_for_caller=*/false);
     timer->Schedule(delay, absl::ZeroDuration());
     return absl::OkStatus();
 }
@@ -229,8 +260,9 @@ size_t TestEventLoopImpl::TaskCount() const {
     return tasks_.size();
 }
 
-std::shared_ptr<EventLoop::Timer> TestEventLoopImpl::CreateTimer(RepeatingTask task) {
-    return std::make_shared<TestTimer>(this, std::move(task), 0);
+EventLoop::ScopedTimer TestEventLoopImpl::CreateTimer(RepeatingTask task) {
+    auto timer = TestTimer::Create(this, std::move(task), 0, /*pin_for_caller=*/true);
+    return ScopedTimer(timer.get());
 }
 
 void TestEventLoopImpl::Reschedule(std::shared_ptr<TestTimer> timer, absl::Duration new_delay,
@@ -379,7 +411,7 @@ void TestEventLoopImpl::AdvanceClockUnlocked(absl::Duration duration)
 
         // Reschedule task if needed.
         if (!keep_repeating) {
-            handle->Cancel();
+            handle->MarkCancelled();
         } else if (task.interval > absl::ZeroDuration()) {
             task.execution_time += task.interval;
             scheduled_tasks_.push_back(std::move(task));

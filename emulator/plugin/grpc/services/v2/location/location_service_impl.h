@@ -88,7 +88,7 @@ class LocationServiceImpl final : public LocationServiceBase {
     using Location = ::goldfish::avd_universe::gps::Location;
     using LocationEventSource = ::android::base::eventing::CallbackEventSource<Location>;
     using EventLoop = ::goldfish::async::EventLoop;
-    using TimerPtr = std::shared_ptr<EventLoop::Timer>;
+    using TimerPtr = EventLoop::ScopedTimer;
 
     using LocationState = ::android::emulation::v2::LocationState;
     using GetLocationStateRequest = ::android::emulation::v2::GetLocationStateRequest;
@@ -175,14 +175,13 @@ class LocationServiceImpl final : public LocationServiceBase {
 
     static absl::StatusOr<std::vector<PreparedWaypoint>> PrepareWaypoints(
             const PlayRouteRequest& request);
-    static void ApplyNextWaypointLocked(const std::shared_ptr<RouteState>& route_state,
-                                        uint64_t generation)
+    static void ApplyNextWaypointLocked(const std::shared_ptr<RouteState>& route_state)
             ABSL_EXCLUSIVE_LOCKS_REQUIRED(route_state->mutex);
-    static TimerPtr ScheduleWaypointTimerLocked(const std::shared_ptr<RouteState>& route_state,
-                                                uint64_t generation, absl::Duration delay)
+    static void ScheduleWaypointTimerLocked(const std::shared_ptr<RouteState>& route_state,
+                                            absl::Duration delay)
             ABSL_EXCLUSIVE_LOCKS_REQUIRED(route_state->mutex);
-    static void OnRouteTimerTick(const std::shared_ptr<RouteState>& route_state,
-                                 uint64_t generation) ABSL_LOCKS_EXCLUDED(route_state->mutex);
+    static void OnRouteTimerTick(const std::shared_ptr<RouteState>& route_state)
+            ABSL_LOCKS_EXCLUDED(route_state->mutex);
 
     void PopulateLocationState(LocationState* state) const ABSL_LOCKS_EXCLUDED(state_mutex_);
     void OnLocationUpdated(const Location& location) ABSL_LOCKS_EXCLUDED(state_mutex_);

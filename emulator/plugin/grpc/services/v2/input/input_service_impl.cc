@@ -529,9 +529,9 @@ class InputServiceImpl::StreamInputReader final : public ::SimpleServerReader<In
     }
 
     void OnCancel() override {
-        std::shared_ptr<::goldfish::async::EventLoop::Timer> timer_to_cancel;
         bool should_finish = false;
         {
+            ::goldfish::async::EventLoop::ScopedTimer timer_to_cancel;
             absl::MutexLock lock(this->reactor_lock_);
             cancelled_ = true;
             if (state_ == State::kWaitingForTimer || state_ == State::kAwaitingDispatches) {
@@ -539,22 +539,16 @@ class InputServiceImpl::StreamInputReader final : public ::SimpleServerReader<In
                 should_finish = true;
             }
         }
-        if (timer_to_cancel != nullptr) {
-            timer_to_cancel->Cancel();
-        }
         if (should_finish) {
             FinishStream(::grpc::Status::CANCELLED);
         }
     }
 
     void OnDone() override {
-        std::shared_ptr<::goldfish::async::EventLoop::Timer> timer_to_cancel;
         {
+            ::goldfish::async::EventLoop::ScopedTimer timer_to_cancel;
             absl::MutexLock lock(this->reactor_lock_);
             timer_to_cancel = std::move(pending_timer_);
-        }
-        if (timer_to_cancel != nullptr) {
-            timer_to_cancel->Cancel();
         }
         gate_->CloseAndWait();
 
@@ -717,7 +711,7 @@ class InputServiceImpl::StreamInputReader final : public ::SimpleServerReader<In
         }
         // Scheduled outside `reactor_lock_`: the loop may run the timer, or
         // report a failure, before this returns, and both take the lock.
-        std::shared_ptr<::goldfish::async::EventLoop::Timer> timer =
+        ::goldfish::async::EventLoop::ScopedTimer timer =
                 service_.options_.event_loop->ScheduleDelayed(
                         [this, gate = gate_, event = std::move(event), source_id]() mutable {
                             gate->RunIfOpen([this, event = std::move(event), source_id]() mutable {
@@ -731,16 +725,14 @@ class InputServiceImpl::StreamInputReader final : public ::SimpleServerReader<In
                 pending_timer_ = std::move(timer);
             }
         }
-        if (timer != nullptr) {
-            // The stream moved on meanwhile: the timer fired, or must not.
-            timer->Cancel();
-        }
+        // If the stream moved on meanwhile, `timer` was not moved into
+        // `pending_timer_` and its destructor cancels it here.
         return false;
     }
 
     void OnScheduledDispatch(InputEvent event, int32_t source_id) {
-        std::shared_ptr<::goldfish::async::EventLoop::Timer> expired_timer;
         {
+            ::goldfish::async::EventLoop::ScopedTimer expired_timer;
             absl::MutexLock lock(this->reactor_lock_);
             if (cancelled_ || state_ != State::kWaitingForTimer) {
                 return;
@@ -748,7 +740,6 @@ class InputServiceImpl::StreamInputReader final : public ::SimpleServerReader<In
             state_ = State::kDispatchingTimer;
             expired_timer = std::move(pending_timer_);
         }
-        expired_timer.reset();
         if (!DispatchAndRecord(std::move(event), source_id)) {
             return;
         }
@@ -785,8 +776,7 @@ class InputServiceImpl::StreamInputReader final : public ::SimpleServerReader<In
 
     int32_t dispatched_count_ ABSL_GUARDED_BY(this->reactor_lock_){0};
     StreamSessions sessions_ ABSL_GUARDED_BY(this->reactor_lock_);
-    std::shared_ptr<::goldfish::async::EventLoop::Timer> pending_timer_
-            ABSL_GUARDED_BY(this->reactor_lock_);
+    ::goldfish::async::EventLoop::ScopedTimer pending_timer_ ABSL_GUARDED_BY(this->reactor_lock_);
     State state_ ABSL_GUARDED_BY(this->reactor_lock_){State::kReading};
     bool cancelled_ ABSL_GUARDED_BY(this->reactor_lock_){false};
 };

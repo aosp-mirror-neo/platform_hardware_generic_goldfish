@@ -92,10 +92,10 @@ struct AvdExtendedUniverse : public AvdUniverse {
     devices::ConnectorRegistry test_tools_connector_registry;
     avd_universe::battery::ObservableBattery::ScopedCallbackHandle battery_subscription;
     std::unique_ptr<metrics::MetricsReporter> metrics_reporter;
-    std::shared_ptr<async::EventLoop::Timer> metrics_ping_timer;
+    async::EventLoop::ScopedTimer metrics_ping_timer;
 
     std::unique_ptr<metrics::PerfStatReporter> perf_stat_reporter;
-    std::shared_ptr<async::EventLoop::Timer> perf_stat_reporter_task;
+    async::EventLoop::ScopedTimer perf_stat_reporter_task;
 
   private:
     using DisplayEventSubscription =
