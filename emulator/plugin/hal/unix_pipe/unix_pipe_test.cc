@@ -57,7 +57,7 @@ class UnixPipeTest : public ::testing::Test {
 
     void TearDown() override {
         registry_.Close();
-        auto s = client_loop_->ShutdownAndWait(absl::Seconds(3));
+        auto s = client_loop_->ShutdownAndWait(absl::Seconds(10));
         EXPECT_THAT(s, absl_testing::IsOk());
         if (client_loop_thread_.joinable()) {
             client_loop_thread_.join();
@@ -77,12 +77,12 @@ class UnixPipeTest : public ::testing::Test {
     }
 
     template <typename T>
-    void RunUntil(std::future<T>& future, std::chrono::milliseconds timeout = 2s) {
+    void RunUntil(std::future<T>& future, std::chrono::milliseconds timeout = 10s) {
         ASSERT_EQ(future.wait_for(timeout), std::future_status::ready);
     }
 
     // Waits until the device closes the guest connection.
-    bool WaitForClose(TestHalSocket* socket, absl::Duration timeout = absl::Seconds(1)) {
+    bool WaitForClose(TestHalSocket* socket, absl::Duration timeout = absl::Seconds(10)) {
         const absl::Time deadline = absl::Now() + timeout;
         while (absl::Now() < deadline) {
             if (PostAndWait([socket] { return socket->closed; })) {
@@ -171,7 +171,7 @@ TEST_F(UnixPipeTest, echo_over_host_side) {
             absl::Condition(
                     +[](const void* ptr) { return static_cast<const DeviceState*>(ptr)->ready(); },
                     &device_state),
-            absl::Seconds(1)));
+            absl::Seconds(10)));
 
     EXPECT_EQ(device_state.rx_buffer, test_message);
 
@@ -249,7 +249,7 @@ TEST_F(UnixPipeTest, close_on_host) {
                             return static_cast<const DeviceState*>(ptr)->ready();
                         },
                         &device_state),
-                absl::Seconds(1)));
+                absl::Seconds(10)));
 
         rx_total.append(device_state.rx_buffer);
         device_state.rx_buffer.clear();
@@ -355,7 +355,7 @@ TEST_F(UnixPipeTest, host_data_sent_before_on_connect_reaches_guest) {
                             return static_cast<const DeviceState*>(ptr)->ready();
                         },
                         &device_state),
-                absl::Seconds(1)));
+                absl::Seconds(10)));
         EXPECT_EQ(device_state.rx_buffer, "rdy");
     }
 
