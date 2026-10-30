@@ -313,19 +313,10 @@ filegroup(
     }),
 )
 
-filegroup(
-    name = "glib_binaries",
-    srcs = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
-)
-
 all_binaries = [
     ":launcher_binaries",
     ":qemu_binaries",
     ":plugin_binaries",
-    ":glib_binaries",
 ] + select({
     "@goldfish_build//platforms:is_linux_aarch64": [],
     "//conditions:default": [
@@ -566,18 +557,6 @@ pkg_files(
 )
 
 pkg_files(
-    name = "glib_dlls",
-    srcs = [":glib_binaries"],
-    prefix = "lib64",
-)
-
-remapped_pkg_files(
-    name = "glib_dlls_stripped",
-    src = ":glib_dlls",
-    transform = ":goldfish_binaries_stripped",
-)
-
-pkg_files(
     name = "qemu-keymaps",
     srcs = ["@qemu//:qemu-keymaps"],
     prefix = "share/qemu/keymaps",
@@ -699,7 +678,6 @@ pkg_filegroup(
         ":emulator-access",
         ":emulator_notice_md",
         ":emulator_sbom_json",
-        ":glib_dlls_stripped",
         ":launcher_stripped",
         ":plugins_stripped",
         ":qemu-keymaps",
@@ -729,7 +707,6 @@ pkg_filegroup(
         ":emulator-access",
         ":emulator_notice_md",
         ":emulator_sbom_json",
-        ":glib_dlls",
         ":launcher",
         ":plugins",
         ":qemu",
@@ -828,7 +805,6 @@ native_symbols_pkg(
         "plugins": ":plugins",
         "egl": ":egl",
         "vulkan": ":vulkan",
-        "glib": ":glib_dlls",
     },
     package_file_name = "sdk-repo-{platform}-{product_name}-native-symbols-{build_id}.zip",
     package_variables = "//emulator/tools:aemu_version_info",

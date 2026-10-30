@@ -1,6 +1,5 @@
 load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("//emulator/tools:plugins.bzl", "collect_plugins")
 
 # buildifier: disable=no-hdrs-no-alwayslink
 cc_library(
@@ -130,25 +129,11 @@ cc_library(
     ],
 )
 
-collect_plugins(
-    name = "binplace",
-    output_dir = ".",
-    plugins = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
-)
-
 cc_test(
     name = "vminterface_unittests",
     size = "small",
     testonly = True,
     srcs = ["vm_test.cc"],
-    data = [":binplace"],
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
     includes = ["test"],
     visibility = ["//visibility:public"],
     deps = [
@@ -171,8 +156,8 @@ cc_test(
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
         "@abseil-cpp//absl/time:simulated_clock",
-        "@glib//glib:glib_import",
-        "@glib//gmodule:gmodule_import",
+        "@glib//glib",
+        "@glib//gmodule",
     ],
 )
 

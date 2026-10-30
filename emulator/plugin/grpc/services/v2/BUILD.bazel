@@ -15,19 +15,8 @@
 load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
-load("//emulator/tools:plugins.bzl", "collect_plugins")
 
 package(default_visibility = ["//visibility:public"])
-
-collect_plugins(
-    name = "binplace",
-    output_dir = ".",
-    plugins = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
-    visibility = ["//visibility:private"],
-)
 
 cc_library(
     name = "audio_service",
@@ -502,11 +491,6 @@ cc_test(
     name = "input_service_test",
     size = "small",
     srcs = ["input/input_service_impl_test.cc"],
-    data = [":binplace"],
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
     includes = ["."],
     local_defines = select({
         "@platforms//os:windows": ["NOGDI"],
@@ -534,6 +518,8 @@ cc_test(
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
         "@aemu//protos/services_v2:input_service_cc_grpc",
+        "@glib//glib",
+        "@glib//gmodule",
         "@googletest//:gtest",
         "@grpc//:grpc++",
         "@qemu//:qemu-headers-exported",

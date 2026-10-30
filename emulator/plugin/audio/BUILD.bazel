@@ -310,10 +310,6 @@ cc_binary(
     testonly = True,
     srcs = ["qtest_audio_inject_plugin.cc"],
     copts = WEBRTC_COPTS,
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
     linkshared = True,
     target_compatible_with = QTEST_TARGET_COMPATIBLE_WITH,
     linkopts = select({
@@ -326,8 +322,6 @@ cc_binary(
         ":pcm_format",
         ":qemu_audio_inject",
         "@abseil-cpp//absl/status",
-        "@glib//glib:glib_import",
-        "@glib//gmodule:gmodule_import",
         "@qemu//:aemu_func_defs",
         "@qemu//:qemu-headers-exported",
     ],
@@ -353,10 +347,6 @@ cc_test(
         "@qemu//:qemu-system-x86_64",
         "@qemu//:qtest-roms",
     ],
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
     env = {
         "ASAN_OPTIONS": "detect_leaks=0",
         "QTEST_GOLDFISH_EXTRA_PLUGIN": "$(rootpath :qtest_audio_inject_plugin)",
@@ -377,6 +367,8 @@ cc_test(
     local_defines = QTEST_LOCAL_DEFINES,
     target_compatible_with = QTEST_TARGET_COMPATIBLE_WITH,
     deps = [
+        "@glib//glib",
+        "@glib//gmodule",
         "@qemu//:libprintstub",
         "@qemu//:libqemuutil",
         "@qemu//:libqom",

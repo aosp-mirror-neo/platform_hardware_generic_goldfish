@@ -216,8 +216,6 @@ emulator/lib64/
 emulator/lib64/libEGL.dylib
 emulator/lib64/libGLESv1_CM.dylib
 emulator/lib64/libGLESv2.dylib
-emulator/lib64/libglib_shared.dylib
-emulator/lib64/libgmodule_shared.dylib
 emulator/lib64/libkosmickrisp_icd.json
 emulator/lib64/libLLVM.dylib
 emulator/lib64/libMoltenVK.dylib

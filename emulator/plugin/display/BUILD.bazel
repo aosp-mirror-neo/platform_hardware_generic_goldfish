@@ -1,6 +1,5 @@
 load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("//emulator/tools:plugins.bzl", "collect_plugins")
 
 cc_library(
     name = "write_png",
@@ -205,15 +204,8 @@ cc_library(
         ":abstract_multi_display",
         ":primary_display",
         "//emulator/plugin/virtio-input-android:api",
-    ],
-)
-
-collect_plugins(
-    name = "binplace",
-    output_dir = ".",
-    plugins = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
+        "@glib//glib",
+        "@glib//gmodule",
     ],
 )
 
@@ -229,11 +221,6 @@ cc_test(
         "pixman_display_concurrency_test.cc",
         "pixman_image_generator_test.cc",
         "qemu_display_test.cc",
-    ],
-    data = [":binplace"],
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -252,6 +239,8 @@ cc_test(
         "@abseil-cpp//absl/functional:any_invocable",
         "@abseil-cpp//absl/log:scoped_mock_log",
         "@abseil-cpp//absl/status:status_matchers",
+        "@glib//glib",
+        "@glib//gmodule",
     ],
 )
 

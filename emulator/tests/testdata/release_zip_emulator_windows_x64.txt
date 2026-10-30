@@ -217,8 +217,6 @@ emulator/lib/qemu/rutabaga_ffi.dll
 emulator/lib/qemu/rutabaga_ffi.dll.lib
 emulator/lib64/
 emulator/lib64/d3dcompiler_47.dll
-emulator/lib64/glib_shared.dll
-emulator/lib64/gmodule_shared.dll
 emulator/lib64/libEGL.dll
 emulator/lib64/libGLESv2.dll
 emulator/lib64/libshadertranslator.dll

@@ -18,7 +18,7 @@
 
 ## Dependencies
 * **Base & Windows Helpers:** `//emulator/libs/base`, `//emulator/libs/windows:scoped_file_handle`, `//emulator/libs/windows:win32_utils`.
-* **QEMU Headers & Imports:** `@qemu//:qemu-headers-exported`, `@glib//glib:glib_import`.
+* **QEMU Headers & Imports:** `@qemu//:qemu-headers-exported`.
 
 ## Threading Model
 * **Dedicated Worker per Voice:** Each `HWVoiceOut` / `HWVoiceIn` owns a dedicated `COINIT_MULTITHREADED` worker thread (boosted via MMCSS `"Pro Audio"`) that exclusively owns all COM/WASAPI interfaces and synchronizes QEMU `buf_emul` ring-buffer accesses with `buf_mutex_`.

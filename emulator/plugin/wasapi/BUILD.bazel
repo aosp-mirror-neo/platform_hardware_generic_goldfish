@@ -64,7 +64,6 @@ cc_library(
         ":wasapi_win32",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/strings:str_format",
-        "@glib//glib:glib_import",
         "@qemu//:qemu-headers-exported",
     ],
     alwayslink = True,

@@ -459,10 +459,7 @@ collect_plugins(
 collect_plugins(
     name = "shared_libraries",
     output_dir = "lib64",
-    plugins = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ] + select({
+    plugins = select({
         "darwin_aarch64": [
             "@goldfish_prebuilts_common//ANGLE:lib_darwin_aarch64",
             "@goldfish_prebuilts_common//vulkan:lib_darwin_aarch64",
