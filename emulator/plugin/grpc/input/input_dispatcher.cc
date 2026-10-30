@@ -105,11 +105,11 @@ void Complete(InputDispatcher::DispatchCallback& done, InputDispatcher::Dispatch
 // Lifts the contact in `slot`; a CANCEL marks it as a palm in `report.events`
 // and lifts it in `report.follow_up` so the guest cancels its gesture instead
 // of firing a click or drop.
-void AppendLift(PointerAction action, int slot, DeviceReport& report) {
+void AppendLift(PointerAction action, int slot, bool clear_stylus_keys, DeviceReport& report) {
     if (action == PointerAction::POINTER_ACTION_CANCEL) {
-        AppendContactCancel(slot, report.events, report.follow_up);
+        AppendContactCancel(slot, report.events, report.follow_up, clear_stylus_keys);
     } else {
-        AppendContactUp(slot, report.events);
+        AppendContactUp(slot, report.events, clear_stylus_keys);
     }
 }
 
@@ -242,16 +242,19 @@ void InputDispatcher::OnDisplayAdded(TouchDeviceId device) {
 void InputDispatcher::OnDisplayRemoved(TouchDeviceId device) {
     PostUnlessShutDown([this, device] {
         const ReleasedContacts released = contacts_.ClearDevice(device);
+        const bool had_stylus_keys = stylus_contacts_.erase(device) > 0;
         if (auto gen_it = active_generations_.find(device); gen_it != active_generations_.end()) {
             StaleDeviceSlots& stale = stale_slots_[device];
             if (stale.generation != gen_it->second) {
                 stale.generation = gen_it->second;
                 stale.slots.reset();
+                stale.has_stylus_keys = false;
             }
             for (const auto& [key, contact] : released) {
                 stale.slots.set(static_cast<size_t>(contact.slot));
             }
-            if (stale.slots.none()) {
+            stale.has_stylus_keys = stale.has_stylus_keys || had_stylus_keys;
+            if (stale.slots.none() && !stale.has_stylus_keys) {
                 stale_slots_.erase(device);
             }
             active_generations_.erase(gen_it);
@@ -417,10 +420,10 @@ absl::Status InputDispatcher::ApplyPointer(InputSessionId session, const Pointer
             DeviceReport& report = ReportFor(reports, held->device);
             if (IsContactReleased(action, pointer)) {
                 contacts_.Release(key);
-                AppendLift(action, held->slot, report);
+                AppendLift(action, held->slot, EraseStylusContact(held->device, key), report);
             } else {
-                AppendContactDownOrMove(pointer, action, held->slot, /*new_contact=*/false,
-                                        report.events);
+                RecordContactDownOrMove(held->device, key, pointer, action, held->slot,
+                                        /*new_contact=*/false, report.events);
             }
             *reported.add_pointers() = pointer;
         } else if (CreatesContact(action)) {
@@ -429,7 +432,7 @@ absl::Status InputDispatcher::ApplyPointer(InputSessionId session, const Pointer
                 result.Update(slot.status());
                 continue;
             }
-            AppendContactDownOrMove(pointer, action, *slot, /*new_contact=*/true,
+            RecordContactDownOrMove(*resolved, key, pointer, action, *slot, /*new_contact=*/true,
                                     ReportFor(reports, *resolved).events);
             *reported.add_pointers() = pointer;
         }
@@ -456,13 +459,38 @@ absl::Status InputDispatcher::CancelOnDisplay(InputSessionId session, int32_t so
     }
     InputEvent cancel = CancelEvent(source_id, display_id);
     for (const auto& [key, contact] : contacts_.ReleaseSessionOn(session, display_id)) {
-        AppendLift(action, contact.slot, ReportFor(reports, contact.device));
+        AppendLift(action, contact.slot, EraseStylusContact(contact.device, key),
+                   ReportFor(reports, contact.device));
         cancel.mutable_pointer()->add_pointers()->set_pointer_id(key.pointer_id);
     }
     WriteReports(loop_, reports, active_generations_,
                  [this](TouchDeviceId d, TouchDeviceSink& s) { FlushStaleSlots(d, s); });
     Report(std::move(cancel));
     return absl::OkStatus();
+}
+
+void InputDispatcher::RecordContactDownOrMove(TouchDeviceId device, const ContactKey& key,
+                                              const PointerEvent::Pointer& pointer,
+                                              PointerAction action, int slot, bool new_contact,
+                                              ::android::emulation::control::EvDevEvents& events) {
+    if (IsStylusOrEraser(pointer.tool_type())) {
+        stylus_contacts_[device].insert(key);
+    } else if (!new_contact && EraseStylusContact(device, key)) {
+        AppendStylusKeysReset(events);
+    }
+    AppendContactDownOrMove(pointer, action, slot, new_contact, events);
+}
+
+bool InputDispatcher::EraseStylusContact(TouchDeviceId device, const ContactKey& key) {
+    auto it = stylus_contacts_.find(device);
+    if (it == stylus_contacts_.end() || it->second.erase(key) == 0) {
+        return false;
+    }
+    if (it->second.empty()) {
+        stylus_contacts_.erase(it);
+        return true;
+    }
+    return false;
 }
 
 absl::Status InputDispatcher::ApplyKey(InputSessionId session, const KeyEvent& event) {
@@ -604,11 +632,12 @@ void InputDispatcher::ReleaseSessionInput(InputSessionId session) {
     Reports reports;
     ReleasedContacts written;
     for (const auto& [key, contact] : contacts_.ReleaseSession(session)) {
+        const bool clear_stylus_keys = EraseStylusContact(contact.device, key);
         if (!AddTarget(devices_, contact.device, reports).ok()) {
             continue;
         }
         DeviceReport& report = ReportFor(reports, contact.device);
-        AppendContactCancel(contact.slot, report.events, report.follow_up);
+        AppendContactCancel(contact.slot, report.events, report.follow_up, clear_stylus_keys);
         written.emplace_back(key, contact);
     }
     WriteReports(loop_, reports, active_generations_,
@@ -644,11 +673,13 @@ void InputDispatcher::ReleaseSession(InputSessionId session) {
 void InputDispatcher::ResetAfterSnapshotLoad() {
     DCHECK(loop_.IsOnLoopThread());
     stale_slots_.clear();
+    stylus_contacts_.clear();
     EvDevEvents palm_all;
     EvDevEvents lift_all;
     for (int slot = 0; slot < kTouchDeviceSlots; ++slot) {
         AppendContactCancel(slot, palm_all, lift_all);
     }
+    AppendStylusKeysReset(lift_all);
     for (TouchDeviceId device : devices_.Devices()) {
         TouchDeviceSink* sink = devices_.Find(device);
         if (sink != nullptr && sink->IsActive()) {
@@ -707,14 +738,20 @@ void InputDispatcher::FlushStaleSlots(TouchDeviceId device, TouchDeviceSink& sin
     }
     EvDevEvents palm;
     EvDevEvents lift;
+    const bool reset_stylus_keys = it->second.has_stylus_keys;
     for (int slot = 0; slot < kTouchDeviceSlots; ++slot) {
         if (it->second.slots.test(static_cast<size_t>(slot))) {
             AppendContactCancel(slot, palm, lift);
         }
     }
+    if (reset_stylus_keys) {
+        AppendStylusKeysReset(lift);
+    }
     stale_slots_.erase(it);
-    if (!palm.empty()) {
-        sink.WriteReport(palm);
+    if (!palm.empty() || !lift.empty()) {
+        if (!palm.empty()) {
+            sink.WriteReport(palm);
+        }
         sink.WriteReport(lift);
         active_generations_[device] = sink.ActiveGeneration();
     }
@@ -727,6 +764,7 @@ void InputDispatcher::ResyncDevices() {
             continue;
         }
         generation = sink->ActiveGeneration();
+        stylus_contacts_.erase(device);
         const ReleasedContacts released = contacts_.ClearDevice(device);
         RecordDisplayResets(released);
         ReportCancels(released);

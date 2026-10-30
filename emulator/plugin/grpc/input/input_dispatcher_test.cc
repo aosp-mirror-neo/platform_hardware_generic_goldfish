@@ -51,12 +51,14 @@ namespace {
 using ::absl_testing::IsOk;
 using ::absl_testing::StatusIs;
 using ::android::emulation::control::EvDevEvent;
+using ::android::emulation::v2::ButtonMask;
 using ::android::emulation::v2::InputActivity;
 using ::android::emulation::v2::InputEvent;
 using ::android::emulation::v2::KeyAction;
 using ::android::emulation::v2::KeyEvent;
 using ::android::emulation::v2::PointerAction;
 using ::android::emulation::v2::PointerEvent;
+using ::android::emulation::v2::ToolType;
 using ::goldfish::async::EventLoop;
 using ::goldfish::async::testing::TestEventLoop;
 using ::testing::Contains;
@@ -93,14 +95,26 @@ auto ContactAt(float x, float y) {
     return ::testing::AllOf(Field(&GuestContact::x, Abs(x)), Field(&GuestContact::y, Abs(y)));
 }
 
-// Minimal model of Android's MultiTouchMotionAccumulator over Linux multi-touch
-// protocol B: ABS_MT_SLOT selects a slot, later ABS_MT_* values update it, and
-// ABS_MT_TRACKING_ID < 0 immediately clears the slot before SYN_REPORT syncs
-// TouchInputMapper. Each WriteReport() call is one SYN_REPORT frame.
+// Minimal model of Android's MultiTouchMotionAccumulator and
+// TouchButtonAccumulator over Linux multi-touch protocol B: ABS_MT_SLOT selects
+// a slot, later ABS_MT_* values update it, EV_KEY updates global stylus/eraser
+// button state, and ABS_MT_TRACKING_ID < 0 immediately clears the slot before
+// SYN_REPORT syncs TouchInputMapper. Each WriteReport() call is one SYN_REPORT
+// frame.
 class GuestTouchState {
   public:
     void ApplyReport(absl::Span<const EvDevEvent> events) {
         for (const EvDevEvent& event : events) {
+            if (event.type == EV_KEY) {
+                if (event.code == BTN_TOOL_RUBBER) {
+                    btn_tool_rubber_ = event.value != 0;
+                } else if (event.code == BTN_STYLUS) {
+                    btn_stylus_ = event.value != 0;
+                } else {
+                    FAIL() << "unexpected EV_KEY code " << event.code;
+                }
+                continue;
+            }
             ASSERT_EQ(event.type, EV_ABS) << "the sink, not the dispatcher, appends SYN_REPORT";
             if (event.code == ABS_MT_SLOT) {
                 ASSERT_LT(event.value, slots_.size());
@@ -125,6 +139,9 @@ class GuestTouchState {
         }
     }
 
+    bool BtnToolRubber() const { return btn_tool_rubber_; }
+    bool BtnStylus() const { return btn_stylus_; }
+
     std::vector<GuestContact> Active() const {
         std::vector<GuestContact> active;
         for (int i = 0; i < kTouchDeviceSlots; ++i) {
@@ -144,6 +161,8 @@ class GuestTouchState {
         uint32_t tool_type = 0;
     };
     int selected_ = 0;
+    bool btn_tool_rubber_ = false;
+    bool btn_stylus_ = false;
     std::array<Slot, kTouchDeviceSlots> slots_{};
 };
 
@@ -290,6 +309,21 @@ PointerEvent Touch(PointerAction action, std::vector<P> pointers, int32_t displa
     return event;
 }
 
+PointerEvent PenTouch(PointerAction action, int32_t id, ToolType tool_type,
+                      uint32_t button_mask = 0, float x = 0.5F, float y = 0.5F,
+                      int32_t display_id = 0) {
+    PointerEvent event;
+    event.set_display_id(display_id);
+    event.set_action(action);
+    auto* pointer = event.add_pointers();
+    pointer->set_pointer_id(id);
+    pointer->set_x(x);
+    pointer->set_y(y);
+    pointer->set_tool_type(tool_type);
+    pointer->set_button_mask(button_mask);
+    return event;
+}
+
 constexpr PointerAction kDown = PointerAction::POINTER_ACTION_DOWN;
 constexpr PointerAction kMove = PointerAction::POINTER_ACTION_MOVE;
 constexpr PointerAction kUp = PointerAction::POINTER_ACTION_UP;
@@ -298,9 +332,7 @@ constexpr PointerAction kUp = PointerAction::POINTER_ACTION_UP;
 // timestamp.
 class TickingClock : public ::goldfish::system::SteadyClock {
   public:
-    absl::Duration Now() const override {
-        return absl::Microseconds(ticks_.fetch_add(1) + 1);
-    }
+    absl::Duration Now() const override { return absl::Microseconds(ticks_.fetch_add(1) + 1); }
 
   private:
     mutable std::atomic<int64_t> ticks_{0};
@@ -1498,12 +1530,17 @@ TEST_F(InputDispatcherTest, KeysWaitForInstalledKeyboard) {
 }
 
 TEST_F(InputDispatcherTest, SnapshotLoadReleasesAllGuestSlotsAndResetsKeyboardEvenWhenIdle) {
-    // Simulate ghost contacts left in the guest by a loaded snapshot.
-    const EvDevEvent ghost_inner[] = {{EV_ABS, ABS_MT_SLOT, 7}, {EV_ABS, ABS_MT_TRACKING_ID, 7}};
+    // Simulate ghost contacts and stuck stylus keys left in the guest by a loaded snapshot.
+    const EvDevEvent ghost_inner[] = {{EV_KEY, BTN_TOOL_RUBBER, 1},
+                                      {EV_KEY, BTN_STYLUS, 1},
+                                      {EV_ABS, ABS_MT_SLOT, 7},
+                                      {EV_ABS, ABS_MT_TRACKING_ID, 7}};
     const EvDevEvent ghost_outer[] = {{EV_ABS, ABS_MT_SLOT, 10}, {EV_ABS, ABS_MT_TRACKING_ID, 10}};
     inner_.guest.ApplyReport(ghost_inner);
     outer_.guest.ApplyReport(ghost_outer);
     ASSERT_THAT(inner_.guest.Active(), SizeIs(1));
+    ASSERT_TRUE(inner_.guest.BtnToolRubber());
+    ASSERT_TRUE(inner_.guest.BtnStylus());
     ASSERT_THAT(outer_.guest.Active(), SizeIs(1));
 
     dispatcher_.OnSnapshotLoaded();
@@ -1515,6 +1552,8 @@ TEST_F(InputDispatcherTest, SnapshotLoadReleasesAllGuestSlotsAndResetsKeyboardEv
         std::ranges::copy(Palm(slot), std::back_inserter(expected_palm));
         std::ranges::copy(Lift(slot), std::back_inserter(expected_lift));
     }
+    expected_lift.push_back({EV_KEY, BTN_TOOL_RUBBER, 0});
+    expected_lift.push_back({EV_KEY, BTN_STYLUS, 0});
     EXPECT_THAT(inner_.reports, ElementsAre(expected_palm, expected_lift));
     EXPECT_THAT(outer_.reports, ElementsAre(expected_palm, expected_lift));
     EXPECT_THAT(inner_.frames[0],
@@ -1524,6 +1563,8 @@ TEST_F(InputDispatcherTest, SnapshotLoadReleasesAllGuestSlotsAndResetsKeyboardEv
                 ElementsAre(::testing::AllOf(Field(&GuestContact::slot, 10),
                                              Field(&GuestContact::tool_type, MT_TOOL_PALM))));
     EXPECT_THAT(inner_.guest.Active(), IsEmpty());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
+    EXPECT_FALSE(inner_.guest.BtnStylus());
     EXPECT_THAT(outer_.guest.Active(), IsEmpty());
     EXPECT_THAT(log_.writes,
                 ElementsAre("touch inner", "touch inner", "touch outer", "touch outer", "reset"));
@@ -1635,8 +1676,14 @@ TEST_F(InputDispatcherTest, DisplayAddedProactivelyCancelsStaleSlotsUnlessDriver
     FakeSink secondary(*loop_, "secondary", log_);
     devices_.extra[2] = &secondary;
     const InputSessionId a = Source(1);
-    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1, 0.2F, 0.3F}, {2, 0.4F, 0.5F}}, 2)), IsOk());
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1, 0.2F, 0.3F}}, 2)), IsOk());
+    ASSERT_THAT(Dispatch(a, PenTouch(kDown, /*id=*/2, ToolType::TOOL_TYPE_ERASER,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY, 0.4F, 0.5F,
+                                     /*display_id=*/2)),
+                IsOk());
     EXPECT_THAT(secondary.guest.Active(), SizeIs(2));
+    ASSERT_TRUE(secondary.guest.BtnToolRubber());
+    ASSERT_TRUE(secondary.guest.BtnStylus());
     secondary.reports.clear();
 
     devices_.extra.erase(2);
@@ -1645,16 +1692,23 @@ TEST_F(InputDispatcherTest, DisplayAddedProactivelyCancelsStaleSlotsUnlessDriver
     EXPECT_THAT(secondary.reports, IsEmpty());
 
     // Recreating display 2 on the same permanent virtio-input device cancels
-    // the previously held guest slots right when the display is added.
+    // the previously held guest slots and resets stylus EV_KEY state right when
+    // the display is added.
     devices_.extra[2] = &secondary;
     dispatcher_.OnDisplayAdded(2);
     loop_->RunAll();
     EXPECT_THAT(secondary.reports, SizeIs(2));
     EXPECT_THAT(secondary.guest.Active(), IsEmpty());
+    EXPECT_FALSE(secondary.guest.BtnToolRubber());
+    EXPECT_FALSE(secondary.guest.BtnStylus());
 
     // If the guest driver resets while the display is removed, OnDisplayAdded
-    // drops the stale slot record without writing to the fresh driver.
-    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1, 0.2F, 0.3F}}, 2)), IsOk());
+    // drops the stale slot and stylus key record without writing to the fresh
+    // driver.
+    ASSERT_THAT(Dispatch(a, PenTouch(kDown, /*id=*/1, ToolType::TOOL_TYPE_ERASER,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY, 0.2F, 0.3F,
+                                     /*display_id=*/2)),
+                IsOk());
     devices_.extra.erase(2);
     dispatcher_.OnDisplayRemoved(2);
     loop_->RunAll();
@@ -1895,6 +1949,100 @@ TEST_F(InputDispatcherTest,
     dispatcher_.CloseSession(a);
     loop_->RunAll();
     EXPECT_EQ(tracker->Version(), 4U);
+}
+
+TEST_F(InputDispatcherTest, EraserUpResetsEvKeyStateBeforeFingerTap) {
+    const InputSessionId a = Human();
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kDown, /*id=*/10, ToolType::TOOL_TYPE_ERASER,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY)),
+                IsOk());
+    EXPECT_TRUE(inner_.guest.BtnToolRubber());
+    EXPECT_TRUE(inner_.guest.BtnStylus());
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kUp, /*id=*/10, ToolType::TOOL_TYPE_ERASER,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY)),
+                IsOk());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
+    EXPECT_FALSE(inner_.guest.BtnStylus());
+
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.25F, 0.25F}})), IsOk());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
+    EXPECT_FALSE(inner_.guest.BtnStylus());
+    EXPECT_THAT(inner_.guest.Active(),
+                ElementsAre(Field(&GuestContact::tool_type, MT_TOOL_FINGER)));
+    ASSERT_THAT(Dispatch(a, Touch(kUp, {{0, 0.25F, 0.25F}})), IsOk());
+}
+
+TEST_F(InputDispatcherTest, StylusCancelResetsEvKeyStateInLiftFrame) {
+    const InputSessionId a = Human();
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kDown, /*id=*/10, ToolType::TOOL_TYPE_STYLUS,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY)),
+                IsOk());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
+    EXPECT_TRUE(inner_.guest.BtnStylus());
+
+    ASSERT_THAT(Dispatch(a, PenTouch(PointerAction::POINTER_ACTION_CANCEL, /*id=*/10,
+                                     ToolType::TOOL_TYPE_STYLUS)),
+                IsOk());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
+    EXPECT_FALSE(inner_.guest.BtnStylus());
+}
+
+TEST_F(InputDispatcherTest, SwitchingHeldEraserToFingerResetsEvKeyState) {
+    const InputSessionId a = Human();
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kDown, /*id=*/0, ToolType::TOOL_TYPE_ERASER)), IsOk());
+    EXPECT_TRUE(inner_.guest.BtnToolRubber());
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kMove, /*id=*/0, ToolType::TOOL_TYPE_FINGER)), IsOk());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
+    EXPECT_FALSE(inner_.guest.BtnStylus());
+    ASSERT_THAT(Dispatch(a, Touch(kUp, {{0}})), IsOk());
+}
+
+TEST_F(InputDispatcherTest, CloseSessionResetsHeldEraserEvKeyState) {
+    const InputSessionId a = Human();
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kDown, /*id=*/10, ToolType::TOOL_TYPE_ERASER,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY)),
+                IsOk());
+    ASSERT_TRUE(inner_.guest.BtnToolRubber());
+    ASSERT_TRUE(inner_.guest.BtnStylus());
+
+    dispatcher_.CloseSession(a);
+    loop_->RunAll();
+    EXPECT_THAT(inner_.guest.Active(), IsEmpty());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
+    EXPECT_FALSE(inner_.guest.BtnStylus());
+}
+
+TEST_F(InputDispatcherTest, StylusKeysStaySetUntilLastStylusContactOnDeviceLifts) {
+    const InputSessionId a = Human();
+    const InputSessionId b = Human();
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kDown, /*id=*/10, ToolType::TOOL_TYPE_STYLUS,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY)),
+                IsOk());
+    ASSERT_THAT(Dispatch(b, Touch(kDown, {{0, 0.2F, 0.2F}})), IsOk());
+    EXPECT_TRUE(inner_.guest.BtnStylus());
+
+    // Lifting a concurrent finger contact must not clear the held stylus button.
+    ASSERT_THAT(Dispatch(b, Touch(kUp, {{0, 0.2F, 0.2F}})), IsOk());
+    EXPECT_TRUE(inner_.guest.BtnStylus());
+
+    // A second session touches down a stylus and lifts first; stylus keys stay
+    // active until session `a` also lifts.
+    ASSERT_THAT(Dispatch(b, PenTouch(kDown, /*id=*/10, ToolType::TOOL_TYPE_STYLUS,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY)),
+                IsOk());
+    ASSERT_THAT(Dispatch(b, PenTouch(kUp, /*id=*/10, ToolType::TOOL_TYPE_STYLUS)), IsOk());
+    EXPECT_TRUE(inner_.guest.BtnStylus());
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kUp, /*id=*/10, ToolType::TOOL_TYPE_STYLUS)), IsOk());
+    EXPECT_FALSE(inner_.guest.BtnStylus());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
 }
 
 }  // namespace

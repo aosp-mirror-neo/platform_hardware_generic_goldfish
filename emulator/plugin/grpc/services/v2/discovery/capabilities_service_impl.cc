@@ -214,8 +214,9 @@ void PopulateInputCapabilities(const HardwareConfig& hw, InputCapabilities* inpu
     }
     // TODO(jansene): These should align with what we tell the system image.
     // i.e. features: VirtioMouse, VirtioDualModeMouse
-    // Mouse pointer, relative mouse, and rotary encoder are intentionally not
-    // advertised until their guest sinks are wired.
+    // Stylus (MultiTouchInputMapper zeroes tilt without a dedicated tablet
+    // sink), mouse pointer, relative mouse, and rotary encoder are
+    // intentionally not advertised until their guest sinks are wired.
 }
 
 void PopulateVmCapabilities(VmCapabilities* vm_caps) {

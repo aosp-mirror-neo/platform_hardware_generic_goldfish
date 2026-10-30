@@ -225,6 +225,7 @@ class InputDispatcher final : public IInputDispatcher {
     struct StaleDeviceSlots {
         uint64_t generation = 0;
         std::bitset<kTouchDeviceSlots> slots;
+        bool has_stylus_keys = false;
     };
     struct Session {
         SessionOptions options;
@@ -279,6 +280,16 @@ class InputDispatcher final : public IInputDispatcher {
     // to, lifting them as `action` (CANCEL or HOVER_EXIT) does.
     absl::Status CancelOnDisplay(InputSessionId session, int32_t source_id, int32_t display_id,
                                  ::android::emulation::v2::PointerAction action);
+    // Updates `stylus_contacts_[device]` for `key` and appends its contact
+    // events (preceded by a stylus key reset when switching off stylus/eraser).
+    void RecordContactDownOrMove(TouchDeviceId device, const ContactKey& key,
+                                 const ::android::emulation::v2::PointerEvent::Pointer& pointer,
+                                 ::android::emulation::v2::PointerAction action, int slot,
+                                 bool new_contact,
+                                 ::android::emulation::control::EvDevEvents& events);
+    // Removes `key` from `stylus_contacts_[device]`. @return Whether `key` was
+    // the last stylus/eraser contact on `device`, requiring a stylus key reset.
+    bool EraseStylusContact(TouchDeviceId device, const ContactKey& key);
     bool SessionHasHeldInput(InputSessionId session) const;
     // Arms the idle timer of `session` for its current operation, if it has
     // a positive idle_timeout and holds input.
@@ -337,6 +348,8 @@ class InputDispatcher final : public IInputDispatcher {
     KeyboardSink* keyboard_;
     ContactTable contacts_;
     absl::flat_hash_map<InputSessionId, Session> sessions_;
+    // Held contacts on each device whose last update emitted stylus/eraser EV_KEYs.
+    absl::flat_hash_map<TouchDeviceId, absl::flat_hash_set<ContactKey>> stylus_contacts_;
     // The sessions holding each pressed evdev code.
     absl::flat_hash_map<uint32_t, absl::flat_hash_set<InputSessionId>> key_holders_;
     // The active generation of each device written to, as of the first write

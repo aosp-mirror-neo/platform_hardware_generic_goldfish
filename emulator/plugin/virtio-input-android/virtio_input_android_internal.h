@@ -148,11 +148,12 @@
 #define MTS_TOUCH_AXIS_RANGE_MAX 0x7fffffff
 
 /**
- * @brief Maximum value for touch orientation (representing 90 degrees).
+ * @brief Minimum and maximum values for touch orientation (representing [-90, 90] degrees).
  *
- * Defines the maximum value representing the orientation of the touch ellipse,
- * corresponding to a 90-degree rotation.
+ * Defines the degree bounds representing the orientation of the touch/stylus
+ * ellipse, corresponding to [-90, 90] degrees.
  */
+#define MTS_ORIENTATION_RANGE_MIN -90
 #define MTS_ORIENTATION_RANGE_MAX 90
 
 /**
