@@ -393,6 +393,20 @@ class WithSimpleQueueWriter : public T, public virtual WithReactorLock {
     }
 
     /**
+     * @brief Returns an unused message instance back to the recycle pool if capacity permits.
+     *
+     * @param msg The unused message object of type `W` to recycle.
+     */
+    void RecycleMessage(W&& msg) {
+        if constexpr (recycle_size > 0) {
+            const absl::MutexLock reactor_lock(this->reactor_lock_);
+            if (!status_.IsTerminated() && recycled_.queue.size() < recycle_size) {
+                recycled_.queue.push_back(std::move(msg));
+            }
+        }
+    }
+
+    /**
      * @brief Returns the number of items currently pending in the write queue.
      */
     size_t QueueSize() const {
