@@ -1352,6 +1352,87 @@ TEST_P(EventLoopTest, QemuSnapshotBeforeInitialDrainPreservesNotStartedAndPaused
     EXPECT_FALSE(timer_executed.load());
 }
 
+TEST_P(EventLoopTest, QemuLoopShutdownOnLoopThreadDrainsQueuedTasksAndReachesFinished) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+
+    std::vector<LooperStatusEvent::State> states;
+    auto subscription = android::base::eventing::MakeScopedCallback(
+            *loop, [&](const LooperStatusEvent& event) { states.push_back(event.state); });
+
+    // Establish the QEMU loop thread and transition kNotStarted -> kRunning.
+    fake_qemu_advance_ms(1);
+    ASSERT_EQ(loop->GetState(), LooperStatusEvent::State::kRunning);
+    ASSERT_TRUE(loop->IsOnLoopThread());
+
+    // Queue a task from a worker thread before Shutdown() runs on the QEMU loop thread.
+    absl::StatusOr<std::future<std::string>> queued_future;
+    std::thread worker(
+            [&]() { queued_future = loop->Post([]() -> std::string { return "测试_🚀_é"; }); });
+    worker.join();
+    ASSERT_THAT(queued_future, absl_testing::IsOk());
+
+    // Calling ShutdownAndWait() on the loop thread must drain the queued task before
+    // transitioning to kFinished.
+    ASSERT_THAT(loop->ShutdownAndWait(), absl_testing::IsOk());
+    ASSERT_EQ(queued_future->wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_EQ(queued_future->get(), "测试_🚀_é");
+    EXPECT_EQ(loop->GetState(), LooperStatusEvent::State::kFinished);
+    EXPECT_THAT(states, ::testing::ElementsAre(LooperStatusEvent::State::kRunning,
+                                               LooperStatusEvent::State::kShuttingDown,
+                                               LooperStatusEvent::State::kFinished));
+
+    // Subsequent Post and PostAndWait calls from any thread fail fast without blocking.
+    EXPECT_THAT(loop->Post([]() {}), absl_testing::StatusIs(absl::StatusCode::kUnavailable));
+    absl::Status post_after_shutdown_status = absl::OkStatus();
+    std::thread late_worker([&]() { post_after_shutdown_status = loop->PostAndWait([]() {}); });
+    late_worker.join();
+    EXPECT_THAT(post_after_shutdown_status,
+                absl_testing::StatusIs(absl::StatusCode::kFailedPrecondition));
+}
+
+TEST_P(EventLoopTest, QemuLoopConcurrentPostAndWaitDuringShutdownNeverHangs) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+
+    fake_qemu_advance_ms(1);
+    ASSERT_EQ(loop->GetState(), LooperStatusEvent::State::kRunning);
+
+    constexpr int kNumWorkers = 4;
+    constexpr int kCallsPerWorker = 50;
+    absl::BlockingCounter ready(kNumWorkers);
+    absl::Notification start;
+    std::atomic<int> completed_calls = 0;
+
+    std::vector<std::thread> workers;
+    workers.reserve(kNumWorkers);
+    for (int i = 0; i < kNumWorkers; ++i) {
+        workers.emplace_back([&]() {
+            ready.DecrementCount();
+            start.WaitForNotification();
+            for (int j = 0; j < kCallsPerWorker; ++j) {
+                const absl::Status status = loop->PostAndWait([]() {});
+                EXPECT_TRUE(status.ok() || absl::IsUnavailable(status) ||
+                            absl::IsFailedPrecondition(status))
+                        << status;
+                completed_calls.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    ready.Wait();
+    start.Notify();
+    ASSERT_THAT(loop->ShutdownAndWait(), absl_testing::IsOk());
+
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+    EXPECT_EQ(completed_calls.load(), kNumWorkers * kCallsPerWorker);
+    EXPECT_EQ(loop->GetState(), LooperStatusEvent::State::kFinished);
+}
+
 TEST(LibuvEventLoopShutdownTest, DrainsHandlesClosedAfterShutdownWithoutWarning) {
     using ::testing::_;
     using ::testing::HasSubstr;

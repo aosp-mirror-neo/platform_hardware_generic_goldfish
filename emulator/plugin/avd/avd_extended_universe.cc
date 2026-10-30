@@ -344,6 +344,15 @@ void AvdExtendedUniverse::WaitUntilEventLoopsIdle() {
 }
 
 void AvdExtendedUniverse::ShutdownQemuLoop() {
+    switch (qemu_event_loop->GetState()) {
+    case async::LooperStatusEvent::State::kShuttingDown:
+    case async::LooperStatusEvent::State::kFinished:
+        return;
+    case async::LooperStatusEvent::State::kNotStarted:
+    case async::LooperStatusEvent::State::kRunning:
+    case async::LooperStatusEvent::State::kPaused:
+        break;
+    }
     auto f = qemu_event_loop->Shutdown();
     // In the current Qemu implementation, we are already running on the Qemu main thread and so
     // shutdown will have run serially.
