@@ -178,7 +178,7 @@ absl::Status LaunchQemu::addDevices() {
 
         addDevice<ParameterList>(std::move(radio_params));
 
-        if (!o.no_netsim_modem) {
+        if (UseNetsimModem(o.no_netsim_modem, a.ApiLevel())) {
             netsim_cellular = true;
             addDevice<ParameterList>(std::initializer_list<std::string>{
                 "-chardev",
@@ -186,6 +186,10 @@ absl::Status LaunchQemu::addDevices() {
                 "-device",
                 "virtserialport,chardev=modem,name=modem",
             });
+        } else if (!o.no_netsim_modem) {
+            ABSL_LOG(INFO) << "API " << a.ApiLevel() << " guest radio HAL predates netsim modem "
+                           << "support (API " << kNetsimModemMinApiLevel
+                           << "); using the in-process modem simulator";
         }
     }
 
