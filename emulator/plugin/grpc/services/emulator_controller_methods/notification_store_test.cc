@@ -35,45 +35,45 @@ using ::testing::UnorderedElementsAre;
 
 class NotificationStoreTest : public ::testing::Test {
   protected:
-    void SetUp() override { mNotificationStore = std::make_unique<NotificationStore>(&mSource); }
+    void SetUp() override { notification_store_ = std::make_unique<NotificationStore>(&source_); }
 
-    GrpcNotificationEventSource mSource;
-    std::unique_ptr<NotificationStore> mNotificationStore;
+    GrpcNotificationEventSource source_;
+    std::unique_ptr<NotificationStore> notification_store_;
 };
 
 TEST_F(NotificationStoreTest, StoreStickyNotifications) {
-    GrpcNotification bootEvent;
-    bootEvent.mutable_booted()->set_time(1000);
-    mSource.FireEvent(bootEvent);
+    GrpcNotification boot_event;
+    boot_event.mutable_booted()->set_time(1000);
+    source_.FireEvent(boot_event);
 
-    GrpcNotification postureEvent;
-    postureEvent.mutable_posture()->set_value(Posture::POSTURE_OPENED);
-    mSource.FireEvent(postureEvent);
+    GrpcNotification posture_event;
+    posture_event.mutable_posture()->set_value(Posture::POSTURE_OPENED);
+    source_.FireEvent(posture_event);
 
-    auto latest = mNotificationStore->GetLatest();
+    auto latest = notification_store_->GetLatest();
     EXPECT_EQ(latest.size(), 2);
 
-    bool foundBoot = false;
-    bool foundPosture = false;
+    bool found_boot = false;
+    bool found_posture = false;
     for (const auto& n : latest) {
         if (n.has_booted()) {
-            foundBoot = true;
+            found_boot = true;
             EXPECT_EQ(n.booted().time(), 1000);
         } else if (n.has_posture()) {
-            foundPosture = true;
+            found_posture = true;
             EXPECT_EQ(n.posture().value(), Posture::POSTURE_OPENED);
         }
     }
-    EXPECT_TRUE(foundBoot);
-    EXPECT_TRUE(foundPosture);
+    EXPECT_TRUE(found_boot);
+    EXPECT_TRUE(found_posture);
 }
 
 TEST_F(NotificationStoreTest, NonStickyNotStored) {
-    GrpcNotification brightnessEvent;
-    brightnessEvent.mutable_brightness()->set_value(50);
-    mSource.FireEvent(brightnessEvent);
+    GrpcNotification brightness_event;
+    brightness_event.mutable_brightness()->set_value(50);
+    source_.FireEvent(brightness_event);
 
-    auto latest = mNotificationStore->GetLatest();
+    auto latest = notification_store_->GetLatest();
     EXPECT_EQ(latest.size(), 0);
 }
 
@@ -82,43 +82,43 @@ class MockEmulatorControllerService
                   EmulatorController::Service> {
   public:
     MockEmulatorControllerService(GrpcNotificationEventSource* source, NotificationStore* store)
-            : mSource(source), mStore(store) {}
+            : source_(source), store_(store) {}
 
     ::grpc::ServerWriteReactor<Notification>* streamNotification(
             ::grpc::CallbackServerContext* /*context*/, const Empty* /*request*/) override {
-        return CreateNotificationStreamWriter(mSource, mStore);
+        return CreateNotificationStreamWriter(source_, store_);
     }
 
   private:
-    GrpcNotificationEventSource* mSource;
-    NotificationStore* mStore;
+    GrpcNotificationEventSource* source_;
+    NotificationStore* store_;
 };
 
 class NotificationReplayTest : public GrcpServiceTest {
   protected:
     void SetUp() override {
-        mNotificationStore = std::make_unique<NotificationStore>(&mSource);
-        mService =
-                std::make_unique<MockEmulatorControllerService>(&mSource, mNotificationStore.get());
+        notification_store_ = std::make_unique<NotificationStore>(&source_);
+        service_ = std::make_unique<MockEmulatorControllerService>(&source_,
+                                                                   notification_store_.get());
         GrcpServiceTest::SetUp();
     }
 
-    EmulatorController::Service* getService() override { return mService.get(); }
+    EmulatorController::Service* getService() override { return service_.get(); }
 
-    GrpcNotificationEventSource mSource;
-    std::unique_ptr<NotificationStore> mNotificationStore;
-    std::unique_ptr<MockEmulatorControllerService> mService;
+    GrpcNotificationEventSource source_;
+    std::unique_ptr<NotificationStore> notification_store_;
+    std::unique_ptr<MockEmulatorControllerService> service_;
 };
 
 TEST_F(NotificationReplayTest, ReplaysStoredNotifications) {
     // 1. Fire some notifications BEFORE the client connects.
-    GrpcNotification bootEvent;
-    bootEvent.mutable_booted()->set_time(1234);
-    mSource.FireEvent(bootEvent);
+    GrpcNotification boot_event;
+    boot_event.mutable_booted()->set_time(1234);
+    source_.FireEvent(boot_event);
 
-    GrpcNotification postureEvent;
-    postureEvent.mutable_posture()->set_value(Posture::POSTURE_CLOSED);
-    mSource.FireEvent(postureEvent);
+    GrpcNotification posture_event;
+    posture_event.mutable_posture()->set_value(Posture::POSTURE_CLOSED);
+    source_.FireEvent(posture_event);
 
     // 2. Connect a client and start streaming.
     Empty request;
@@ -133,24 +133,24 @@ TEST_F(NotificationReplayTest, ReplaysStoredNotifications) {
 
     // The order might depend on the map iteration, so we check both.
     std::vector<Notification> received = {n1, n2};
-    bool foundBoot = false;
-    bool foundPosture = false;
+    bool found_boot = false;
+    bool found_posture = false;
     for (const auto& n : received) {
         if (n.has_booted()) {
-            foundBoot = true;
+            found_boot = true;
             EXPECT_EQ(n.booted().time(), 1234);
         } else if (n.has_posture()) {
-            foundPosture = true;
+            found_posture = true;
             EXPECT_EQ(n.posture().value(), Posture::POSTURE_CLOSED);
         }
     }
-    EXPECT_TRUE(foundBoot);
-    EXPECT_TRUE(foundPosture);
+    EXPECT_TRUE(found_boot);
+    EXPECT_TRUE(found_posture);
 
     // 4. Fire a new event and verify the client receives it.
-    GrpcNotification cameraEvent;
-    cameraEvent.mutable_cameranotification()->set_active(true);
-    mSource.FireEvent(cameraEvent);
+    GrpcNotification camera_event;
+    camera_event.mutable_cameranotification()->set_active(true);
+    source_.FireEvent(camera_event);
 
     Notification n3;
     EXPECT_TRUE(reader->Read(&n3));

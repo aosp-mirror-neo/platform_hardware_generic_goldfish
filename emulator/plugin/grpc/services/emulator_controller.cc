@@ -72,136 +72,136 @@ class EmulatorControllerImpl final
                                           EmulatorController::WithCallbackMethod_streamNotification<
                                                   EmulatorController::Service>>>>> {
   public:
-    EmulatorControllerImpl(VmOperations* vm, QemuConsole* keyboardConsole, AvdUniverse* avdUniverse,
-                           IMultiDisplay* multidisplay)
-            : mVmService(vm)
-            , mGrpcNotificationChannel(avdUniverse->GetGrpcNotificationChannel())
-            , mNotificationStore(&mGrpcNotificationChannel)
-            , mKeyEventSender(keyboard::createKeyEventSender(keyboardConsole,
-                                                             &avdUniverse->GetQemuEventLoop()))
-            , mStatusService(avdUniverse->GetGuestStatus(), avdUniverse->Props(), avdUniverse)
-            , mBatteryService(avdUniverse->GetBattery())
-            , mSensorService(avdUniverse->GetSensorsPhysicalModel(), &mGrpcNotificationChannel)
-            , mGpsService(avdUniverse->GetLocation())
-            , mFingerprintService(avdUniverse->GetFingerprintSensor())
-            , mClipboardService(avdUniverse->GetClipboardChannel())
-            , mInputEventSender(multidisplay)
-            , mDisplayService(multidisplay, &avdUniverse->GetSensorsPhysicalModel(),
-                              GetResizableConfig(*avdUniverse)) {}
+    EmulatorControllerImpl(VmOperations* vm, QemuConsole* keyboard_console,
+                           AvdUniverse* avd_universe, IMultiDisplay* multidisplay)
+            : vm_service_(vm)
+            , grpc_notification_channel_(avd_universe->GetGrpcNotificationChannel())
+            , notification_store_(&grpc_notification_channel_)
+            , key_event_sender_(keyboard::createKeyEventSender(keyboard_console,
+                                                               &avd_universe->GetQemuEventLoop()))
+            , status_service_(avd_universe->GetGuestStatus(), avd_universe->Props(), avd_universe)
+            , battery_service_(avd_universe->GetBattery())
+            , sensor_service_(avd_universe->GetSensorsPhysicalModel(), &grpc_notification_channel_)
+            , gps_service_(avd_universe->GetLocation())
+            , fingerprint_service_(avd_universe->GetFingerprintSensor())
+            , clipboard_service_(avd_universe->GetClipboardChannel())
+            , input_event_sender_(multidisplay)
+            , display_service_(multidisplay, &avd_universe->GetSensorsPhysicalModel(),
+                               GetResizableConfig(*avd_universe)) {}
 
     Status getBattery(ServerContext* /*context*/, const Empty* /*request*/,
                       BatteryState* reply) override {
-        return mBatteryService.getBattery(reply);
+        return battery_service_.getBattery(reply);
     }
 
     Status setBattery(ServerContext* /*context*/, const BatteryState* request,
                       Empty* /*reply*/) override {
-        return mBatteryService.setBattery(*request);
+        return battery_service_.setBattery(*request);
     }
 
     Status getStatus(ServerContext* /*context*/, const Empty* /*request*/,
                      EmulatorStatus* reply) override {
-        return mStatusService.getStatus(reply);
+        return status_service_.getStatus(reply);
     }
 
     Status setVmState(ServerContext* /*context*/, const VmRunState* request,
                       Empty* /*reply*/) override {
-        return mVmService.setVmState(*request);
+        return vm_service_.setVmState(*request);
     }
 
     Status getVmState(ServerContext* /*context*/, const Empty* /*request*/,
                       VmRunState* reply) override {
-        return mVmService.getVmState(reply);
+        return vm_service_.getVmState(reply);
     }
 
     Status getGps(ServerContext* /*context*/, const Empty* /*request*/, GpsState* reply) override {
-        return mGpsService.getGps(reply);
+        return gps_service_.getGps(reply);
     }
 
     Status setGps(ServerContext* context, const GpsState* request, Empty* /*reply*/) override {
-        return mGpsService.setGps(*request);
+        return gps_service_.setGps(*request);
     }
 
     Status setSensor(ServerContext* /*context*/, const SensorValue* request,
                      Empty* /*reply*/) override {
-        return mSensorService.setSensor(*request);
+        return sensor_service_.setSensor(*request);
     }
 
     Status getSensor(ServerContext* /*context*/, const SensorValue* request,
                      SensorValue* reply) override {
-        return mSensorService.getSensor(*request, reply);
+        return sensor_service_.getSensor(*request, reply);
     }
 
     Status setPhysicalModel(ServerContext* /*context*/, const PhysicalModelValue* request,
                             google::protobuf::Empty* /*reply*/) override {
-        return mSensorService.setPhysicalModel(*request);
+        return sensor_service_.setPhysicalModel(*request);
     }
 
     Status getPhysicalModel(ServerContext* /*context*/, const PhysicalModelValue* request,
                             PhysicalModelValue* reply) override {
-        return mSensorService.getPhysicalModel(*request, reply);
+        return sensor_service_.getPhysicalModel(*request, reply);
     }
 
     Status rotateVirtualSceneCamera(ServerContext* /*context*/, const RotationRadian* request,
                                     Empty* /*reply*/) override {
-        return mSensorService.rotateVirtualSceneCamera(*request);
+        return sensor_service_.rotateVirtualSceneCamera(*request);
     }
 
     Status setVirtualSceneCameraVelocity(ServerContext* /*context*/, const Velocity* request,
                                          Empty* /*reply*/) override {
-        return mSensorService.setVirtualSceneCameraVelocity(*request);
+        return sensor_service_.setVirtualSceneCameraVelocity(*request);
     }
 
     ::grpc::ServerWriteReactor<ClipData>* streamClipboard(::grpc::CallbackServerContext* context,
                                                           const Empty* /*request*/) override {
-        return mClipboardService.streamClipboard(ClipboardServiceImpl::getPeerId(*context));
+        return clipboard_service_.streamClipboard(ClipboardServiceImpl::getPeerId(*context));
     }
 
     Status sendFingerprint(ServerContext* /*context*/, const Fingerprint* request,
                            Empty* /*reply*/) override {
-        return mFingerprintService.sendFingerprint(*request);
+        return fingerprint_service_.sendFingerprint(*request);
     }
 
     Status sendKey(ServerContext* context, const KeyboardEvent* request,
                    Empty* /*reply*/) override {
-        mKeyEventSender->send(*request);
+        key_event_sender_->send(*request);
         return Status::OK;
     }
 
     Status sendMouse(ServerContext* context, const MouseEvent* request, Empty* /*reply*/) override {
-        return AbslStatusToGrpcStatus(mInputEventSender.Send(*request));
+        return AbslStatusToGrpcStatus(input_event_sender_.Send(*request));
     }
 
     Status sendTouch(ServerContext* context, const TouchEvent* request, Empty* /*reply*/) override {
-        return AbslStatusToGrpcStatus(mInputEventSender.Send(*request));
+        return AbslStatusToGrpcStatus(input_event_sender_.Send(*request));
     }
 
     ::grpc::ServerReadReactor<WheelEvent>* injectWheel(::grpc::CallbackServerContext* /*context*/,
                                                        Empty* /*response*/) override {
         return new SimpleServerLambdaReader<WheelEvent>([this](auto request) {
-            return AbslStatusToGrpcStatus(mInputEventSender.Send(*request));
+            return AbslStatusToGrpcStatus(input_event_sender_.Send(*request));
         });
     }
 
     ::grpc::ServerReadReactor<InputEvent>* streamInputEvent(
             ::grpc::CallbackServerContext* /*context*/, Empty* /*response*/) override {
-        SimpleServerLambdaReader<InputEvent>* eventReader =
+        SimpleServerLambdaReader<InputEvent>* event_reader =
                 new SimpleServerLambdaReader<InputEvent>([this](auto request) -> grpc::Status {
                     VLOG(2) << "InputEvent:" << request->ShortDebugString();
                     absl::Status status;
                     if (request->has_key_event()) {
-                        mKeyEventSender->send(request->key_event());
+                        key_event_sender_->send(request->key_event());
                         status = absl::OkStatus();
                     } else if (request->has_mouse_event()) {
-                        status = mInputEventSender.Send(request->mouse_event());
+                        status = input_event_sender_.Send(request->mouse_event());
                     } else if (request->has_touch_event()) {
-                        status = mInputEventSender.Send(request->touch_event());
+                        status = input_event_sender_.Send(request->touch_event());
                     } else if (request->has_android_event()) {
-                        status = mInputEventSender.Send(request->android_event());
+                        status = input_event_sender_.Send(request->android_event());
                     } else if (request->has_pen_event()) {
-                        status = mInputEventSender.Send(request->pen_event());
+                        status = input_event_sender_.Send(request->pen_event());
                     } else if (request->has_wheel_event()) {
-                        status = mInputEventSender.Send(request->wheel_event());
+                        status = input_event_sender_.Send(request->wheel_event());
                     } else {
                         status = absl::InvalidArgumentError(
                                 "Unknown event, is the emulator out of date?.");
@@ -210,53 +210,53 @@ class EmulatorControllerImpl final
                 });
         // Note that the event reader will delete itself on completion of
         // the request.
-        return eventReader;
+        return event_reader;
     }
 
     Status getClipboard(ServerContext* context, const Empty* /*request*/,
                         ClipData* reply) override {
-        return mClipboardService.getClipboard(reply);
+        return clipboard_service_.getClipboard(reply);
     }
 
     Status setClipboard(ServerContext* context, const ClipData* request,
                         Empty* /*reply*/) override {
-        return mClipboardService.setClipboard(ClipboardServiceImpl::getPeerId(*context), *request);
+        return clipboard_service_.setClipboard(ClipboardServiceImpl::getPeerId(*context), *request);
     }
 
     Status getDisplayConfigurations(ServerContext* context,
                                     const ::google::protobuf::Empty* request,
                                     DisplayConfigurations* reply) override {
-        return mDisplayService.getDisplayConfigurations(context, request, reply);
+        return display_service_.getDisplayConfigurations(context, request, reply);
     }
 
     Status setDisplayConfigurations(ServerContext* context, const DisplayConfigurations* request,
                                     DisplayConfigurations* reply) override {
-        return mDisplayService.setDisplayConfigurations(context, request, reply);
+        return display_service_.setDisplayConfigurations(context, request, reply);
     }
 
     Status getDisplayMode(ServerContext* context, const Empty* request,
                           DisplayMode* reply) override {
-        return mDisplayService.getDisplayMode(context, request, reply);
+        return display_service_.getDisplayMode(context, request, reply);
     }
 
     Status setDisplayMode(ServerContext* context, const DisplayMode* request,
                           Empty* reply) override {
-        return mDisplayService.setDisplayMode(context, request, reply);
+        return display_service_.setDisplayMode(context, request, reply);
     }
 
     Status streamScreenshot(ServerContext* context, const ImageFormat* request,
                             grpc::ServerWriter<Image>* writer) override {
-        return mDisplayService.streamScreenshot(context, request, writer);
+        return display_service_.streamScreenshot(context, request, writer);
     }
 
     Status getScreenshot(ServerContext* context, const ImageFormat* request,
                          Image* reply) override {
-        return mDisplayService.getScreenshot(context, request, reply);
+        return display_service_.getScreenshot(context, request, reply);
     }
 
     ::grpc::ServerWriteReactor<Notification>* streamNotification(
             ::grpc::CallbackServerContext* /*context*/, const Empty* /*request*/) override {
-        return CreateNotificationStreamWriter(&mGrpcNotificationChannel, &mNotificationStore);
+        return CreateNotificationStreamWriter(&grpc_notification_channel_, &notification_store_);
     }
 
     ::grpc::ServerWriteReactor<AudioPacket>* streamAudio(::grpc::CallbackServerContext* /*context*/,
@@ -265,24 +265,26 @@ class EmulatorControllerImpl final
     }
 
   private:
-    VmServiceImpl mVmService;
-    GrpcNotificationEventSource& mGrpcNotificationChannel;
-    NotificationStore mNotificationStore;
-    const std::unique_ptr<keyboard::IKeyEventSender> mKeyEventSender;
-    StatusServiceImpl mStatusService;
-    BatteryServiceImpl mBatteryService;
-    SensorServiceImpl mSensorService;
-    GpsServiceImpl mGpsService;
-    FingerprintServiceImpl mFingerprintService;
-    ClipboardServiceImpl mClipboardService;
-    InputEventSender mInputEventSender;
-    DisplayServiceImpl mDisplayService;
+    VmServiceImpl vm_service_;
+    GrpcNotificationEventSource& grpc_notification_channel_;
+    NotificationStore notification_store_;
+    const std::unique_ptr<keyboard::IKeyEventSender> key_event_sender_;
+    StatusServiceImpl status_service_;
+    BatteryServiceImpl battery_service_;
+    SensorServiceImpl sensor_service_;
+    GpsServiceImpl gps_service_;
+    FingerprintServiceImpl fingerprint_service_;
+    ClipboardServiceImpl clipboard_service_;
+    InputEventSender input_event_sender_;
+    DisplayServiceImpl display_service_;
 };
 
-std::shared_ptr<grpc::Service> getEmulatorController(VmOperations* vm, QemuConsole* keyboardConsole,
-                                                     AvdUniverse* avdUniverse,
+std::shared_ptr<grpc::Service> getEmulatorController(VmOperations* vm,
+                                                     QemuConsole* keyboard_console,
+                                                     AvdUniverse* avd_universe,
                                                      IMultiDisplay* multidisplay) {
-    return std::make_shared<EmulatorControllerImpl>(vm, keyboardConsole, avdUniverse, multidisplay);
+    return std::make_shared<EmulatorControllerImpl>(vm, keyboard_console, avd_universe,
+                                                    multidisplay);
 }
 
 }  // namespace control
