@@ -35,6 +35,13 @@ cc_test(
 cc_binary_with_manifest(
     name = "emulator-check",
     srcs = ["main.cc"],
+    linkopts = select({
+        "@platforms//os:linux": [
+            "-Wl,-rpath,$$ORIGIN/lib64",
+            "-Wl,-rpath,$$ORIGIN/lib64/vulkan",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     deps = [
         ":platform_info",
