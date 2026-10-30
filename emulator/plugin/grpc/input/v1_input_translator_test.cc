@@ -16,8 +16,11 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <numbers>
 #include <optional>
@@ -29,11 +32,13 @@
 #include "absl/status/status.h"
 #include "absl/status/status_matchers.h"
 
+#include "emulator/plugin/grpc/input/dispatcher_session.h"
 #include "emulator/plugin/grpc/input/input_dispatcher.h"
 #include "emulator/plugin/grpc/input/input_dispatcher_interface.h"
 #include "emulator/plugin/grpc/input/input_session_id.h"
 #include "emulator/plugin/grpc/input/keyboard_sink.h"
 #include "emulator/plugin/grpc/input/multi_display_touch_devices.h"
+#include "emulator/plugin/grpc/input/slot_registry.h"
 #include "emulator_controller.pb.h"
 #include "goldfish/async/testing/test_event_loop.h"
 #include "goldfish/display/abstract_multi_display.h"
@@ -42,6 +47,7 @@
 #include "goldfish/display/test/fake_pixman_display.h"
 #include "input_service.pb.h"
 #include "standard-headers/linux/input-event-codes.h"
+#include "standard-headers/linux/input.h"
 
 namespace goldfish::grpc::v2 {
 namespace {
@@ -1051,6 +1057,503 @@ TEST_F(V1InputTranslatorTest, TranslateInputEventDispatchesAllEnvelopeVariants) 
     android_env.mutable_android_event()->set_value(0);
     EXPECT_THAT(translator_.TranslateInputEvent(android_env), IsEmpty());
     EXPECT_EQ(Display(0)->evdev_reports.size(), 1U);
+}
+
+struct GuestContact {
+    uint32_t slot = 0;
+    int32_t tracking_id = -1;
+    uint32_t x = 0;
+    uint32_t y = 0;
+    uint32_t pressure = 0;
+    uint32_t touch_major = 0;
+    uint32_t touch_minor = 0;
+    int32_t orientation = 0;
+    uint32_t tool_type = MT_TOOL_FINGER;
+};
+
+class ProtocolBGuestState {
+  public:
+    void ApplyReport(const std::vector<FakeEvDevEvent>& report) {
+        for (const FakeEvDevEvent& ev : report) {
+            Apply(ev.type, ev.code, ev.value);
+        }
+    }
+
+    void Apply(uint16_t type, uint16_t code, uint32_t value) {
+        if (type == EV_SYN && code == SYN_REPORT) {
+            reported_slots_ = slots_;
+            return;
+        }
+        if (type != EV_ABS) {
+            return;
+        }
+        if (code == ABS_MT_SLOT) {
+            selected_slot_ = value;
+            return;
+        }
+        ASSERT_LT(selected_slot_, slots_.size());
+        GuestContact& slot = slots_[selected_slot_];
+        switch (code) {
+        case ABS_MT_TRACKING_ID:
+            slot.tracking_id = static_cast<int32_t>(value);
+            break;
+        case ABS_MT_POSITION_X:
+            slot.x = value;
+            break;
+        case ABS_MT_POSITION_Y:
+            slot.y = value;
+            break;
+        case ABS_MT_PRESSURE:
+            slot.pressure = value;
+            break;
+        case ABS_MT_TOUCH_MAJOR:
+            slot.touch_major = value;
+            break;
+        case ABS_MT_TOUCH_MINOR:
+            slot.touch_minor = value;
+            break;
+        case ABS_MT_ORIENTATION:
+            slot.orientation = static_cast<int32_t>(value);
+            break;
+        case ABS_MT_TOOL_TYPE:
+            slot.tool_type = value;
+            break;
+        default:
+            break;
+        }
+    }
+
+    std::vector<GuestContact> ActiveContacts() const {
+        std::vector<GuestContact> active;
+        for (const GuestContact& slot : reported_slots_) {
+            if (slot.tracking_id != -1) {
+                active.push_back(slot);
+            }
+        }
+        return active;
+    }
+
+    const GuestContact& Slot(uint32_t slot) const { return reported_slots_.at(slot); }
+
+  private:
+    static std::array<GuestContact, kTouchDeviceSlots> InitialSlots() {
+        std::array<GuestContact, kTouchDeviceSlots> slots{};
+        for (uint32_t i = 0; i < slots.size(); ++i) {
+            slots[i].slot = i;
+        }
+        return slots;
+    }
+
+    uint32_t selected_slot_ = 0;
+    std::array<GuestContact, kTouchDeviceSlots> slots_ = InitialSlots();
+    std::array<GuestContact, kTouchDeviceSlots> reported_slots_ = InitialSlots();
+};
+
+class StudioProtocolBGoldenTest : public V1InputTranslatorTest,
+                                  public ::testing::WithParamInterface<int32_t> {
+  protected:
+    static constexpr uint32_t kWidth = 1080;
+    static constexpr uint32_t kHeight = 1920;
+    static constexpr int32_t kStudioPressure = 0x400;
+    static constexpr uint32_t kDefaultTouchMajor = 0x500;
+
+    void SetUp() override {
+        V1InputTranslatorTest::SetUp();
+        multi_display_.display_0_override =
+                ActiveFakePixmanDisplay::CreateShared(loop_.get(), 0, 30, kWidth, kHeight);
+        AddDisplay(1, kWidth, kHeight);
+        Display(0)->evdev_reports.clear();
+        Display(1)->evdev_reports.clear();
+
+        touch_devices_ =
+                std::make_unique<MultiDisplayTouchDevices>(multi_display_, /*has_hinge=*/false);
+        dispatcher_ = std::make_shared<InputDispatcher>(*loop_, *touch_devices_, &keyboard_sink_,
+                                                        [](const KeyEvent& /*key*/) { return 0U; });
+        session_ = std::make_unique<DispatcherSession>(
+                dispatcher_, IInputDispatcher::SessionOptions{
+                                 .human = true, .source_id = 0, .reject_down_on_held = false});
+    }
+
+    void TearDown() override {
+        session_.reset();
+        loop_->RunAll();
+        dispatcher_->Shutdown();
+        V1InputTranslatorTest::TearDown();
+    }
+
+    static uint32_t ExpectedX(int32_t x) {
+        const float norm =
+                std::clamp(static_cast<float>(x) / static_cast<float>(kWidth), 0.0F, 1.0F);
+        return static_cast<uint32_t>(norm * 32767.0F);
+    }
+
+    static uint32_t ExpectedY(int32_t y) {
+        const float norm =
+                std::clamp(static_cast<float>(y) / static_cast<float>(kHeight), 0.0F, 1.0F);
+        return static_cast<uint32_t>(norm * 32767.0F);
+    }
+
+    void SyncReports() {
+        const auto& reports = Reports();
+        while (applied_reports_ < reports.size()) {
+            guest_.ApplyReport(reports[applied_reports_++]);
+        }
+    }
+
+    void SendV1(const ::android::emulation::control::InputEvent& v1_event) {
+        translator_.SyncResetTracker(session_->ResetTracker());
+        for (const InputEvent& v2_event : translator_.TranslateInputEvent(v1_event)) {
+            session_->Dispatch(v2_event);
+        }
+        loop_->RunAll();
+        SyncReports();
+    }
+
+    void SendMouse(int32_t x, int32_t y, int32_t buttons) {
+        ::android::emulation::control::InputEvent ev;
+        MouseEvent* mouse = ev.mutable_mouse_event();
+        mouse->set_display(GetParam());
+        mouse->set_x(x);
+        mouse->set_y(y);
+        mouse->set_buttons(buttons);
+        SendV1(ev);
+    }
+
+    void SendTouch(std::initializer_list<Touch> touches) {
+        ::android::emulation::control::InputEvent ev;
+        TouchEvent* touch_event = ev.mutable_touch_event();
+        touch_event->set_display(GetParam());
+        for (const Touch& t : touches) {
+            *touch_event->add_touches() = t;
+        }
+        SendV1(ev);
+    }
+
+    void SendPen(int32_t x, int32_t y, int32_t pressure, bool rubber, bool button_pressed,
+                 int32_t orientation = 0) {
+        ::android::emulation::control::InputEvent ev;
+        PenEvent* pen_event = ev.mutable_pen_event();
+        pen_event->set_display(GetParam());
+        Pen* pen = pen_event->add_events();
+        *pen->mutable_location() =
+                MakeTouch(/*id=*/0, x, y, pressure, /*touch_major=*/200, orientation);
+        pen->set_rubber_pointer(rubber);
+        pen->set_button_pressed(button_pressed);
+        SendV1(ev);
+    }
+
+    const std::vector<std::vector<FakeEvDevEvent>>& Reports() {
+        return Display(static_cast<DisplayId>(GetParam()))->evdev_reports;
+    }
+
+    NoopKeyboardSink keyboard_sink_;
+    std::unique_ptr<MultiDisplayTouchDevices> touch_devices_;
+    std::shared_ptr<InputDispatcher> dispatcher_;
+    std::unique_ptr<DispatcherSession> session_;
+    ProtocolBGuestState guest_;
+    size_t applied_reports_ = 0;
+};
+
+TEST_P(StudioProtocolBGoldenTest, HoverProducesZeroReports) {
+    SendMouse(100, 200, /*buttons=*/0);
+    SendMouse(150, 250, /*buttons=*/0);
+    SendMouse(200, 300, /*buttons=*/0);
+
+    EXPECT_THAT(Reports(), IsEmpty());
+    EXPECT_THAT(guest_.ActiveContacts(), IsEmpty());
+}
+
+TEST_P(StudioProtocolBGoldenTest, PressDragReleaseProducesThreeReportsOnSlotZero) {
+    SendMouse(100, 200, /*buttons=*/1);
+    ASSERT_EQ(Reports().size(), 1U);
+    ASSERT_EQ(guest_.ActiveContacts().size(), 1U);
+    EXPECT_EQ(guest_.Slot(0).tracking_id, 0);
+    EXPECT_EQ(guest_.Slot(0).x, ExpectedX(100));
+    EXPECT_EQ(guest_.Slot(0).y, ExpectedY(200));
+    EXPECT_EQ(guest_.Slot(0).pressure, static_cast<uint32_t>(kStudioPressure));
+    EXPECT_EQ(guest_.Slot(0).touch_major, kDefaultTouchMajor);
+    EXPECT_EQ(guest_.Slot(0).tool_type, static_cast<uint32_t>(MT_TOOL_FINGER));
+
+    SendMouse(300, 400, /*buttons=*/1);
+    ASSERT_EQ(Reports().size(), 2U);
+    ASSERT_EQ(guest_.ActiveContacts().size(), 1U);
+    EXPECT_EQ(guest_.Slot(0).tracking_id, 0);
+    EXPECT_EQ(guest_.Slot(0).x, ExpectedX(300));
+    EXPECT_EQ(guest_.Slot(0).y, ExpectedY(400));
+    EXPECT_EQ(guest_.Slot(0).pressure, static_cast<uint32_t>(kStudioPressure));
+
+    SendMouse(300, 400, /*buttons=*/0);
+    ASSERT_EQ(Reports().size(), 3U);
+    EXPECT_EQ(guest_.Slot(0).tracking_id, -1);
+    EXPECT_THAT(guest_.ActiveContacts(), IsEmpty());
+}
+
+TEST_P(StudioProtocolBGoldenTest, DragCrossesDisplayEdgeLiftsIgnoresRepeatsAndReenters) {
+    SendMouse(500, 600, /*buttons=*/1);
+    ASSERT_EQ(Reports().size(), 1U);
+    ASSERT_EQ(guest_.ActiveContacts().size(), 1U);
+
+    // Drag crosses display edge -> Studio sends buttons=0 at clamped edge.
+    SendMouse(1080, 600, /*buttons=*/0);
+    ASSERT_EQ(Reports().size(), 2U);
+    EXPECT_EQ(guest_.Slot(0).tracking_id, -1);
+    EXPECT_THAT(guest_.ActiveContacts(), IsEmpty());
+
+    // Repeated buttons=0 moves while outside / on edge write nothing.
+    SendMouse(1080, 650, /*buttons=*/0);
+    SendMouse(1080, 700, /*buttons=*/0);
+    EXPECT_EQ(Reports().size(), 2U);
+    EXPECT_THAT(guest_.ActiveContacts(), IsEmpty());
+
+    // Re-entry with buttons=1 starts a new contact on slot 0.
+    SendMouse(900, 700, /*buttons=*/1);
+    ASSERT_EQ(Reports().size(), 3U);
+    ASSERT_EQ(guest_.ActiveContacts().size(), 1U);
+    EXPECT_EQ(guest_.Slot(0).tracking_id, 0);
+    EXPECT_EQ(guest_.Slot(0).x, ExpectedX(900));
+    EXPECT_EQ(guest_.Slot(0).y, ExpectedY(700));
+    EXPECT_EQ(guest_.Slot(0).pressure, static_cast<uint32_t>(kStudioPressure));
+}
+
+TEST_P(StudioProtocolBGoldenTest, LeavingViewMidDragMovesSlotZeroOnNextPressWithoutSecondSlot) {
+    SendMouse(100, 200, /*buttons=*/1);
+    ASSERT_EQ(Reports().size(), 1U);
+    ASSERT_EQ(guest_.ActiveContacts().size(), 1U);
+
+    // Next press arrives without an intermediate buttons=0 release.
+    SendMouse(500, 600, /*buttons=*/1);
+    ASSERT_EQ(Reports().size(), 2U);
+    ASSERT_EQ(guest_.ActiveContacts().size(), 1U);
+    EXPECT_EQ(guest_.Slot(0).tracking_id, 0);
+    EXPECT_EQ(guest_.Slot(0).x, ExpectedX(500));
+    EXPECT_EQ(guest_.Slot(0).y, ExpectedY(600));
+    EXPECT_EQ(guest_.Slot(0).pressure, static_cast<uint32_t>(kStudioPressure));
+}
+
+TEST_P(StudioProtocolBGoldenTest, CtrlPressedMidDragMovesSlotZeroAndPressesSlotOneInOneReport) {
+    SendMouse(100, 200, /*buttons=*/1);
+    ASSERT_EQ(Reports().size(), 1U);
+
+    SendTouch({MakeTouch(/*id=*/0, /*x=*/120, /*y=*/220, kStudioPressure),
+               MakeTouch(/*id=*/1, /*x=*/880, /*y=*/1780, kStudioPressure)});
+    ASSERT_EQ(Reports().size(), 2U);
+
+    // Verify that the TouchEvent report only assigns ABS_MT_TRACKING_ID once (for slot 1).
+    int tracking_id_events = 0;
+    for (const FakeEvDevEvent& ev : Reports()[1]) {
+        if (ev.type == EV_ABS && ev.code == ABS_MT_TRACKING_ID) {
+            ++tracking_id_events;
+            EXPECT_EQ(ev.value, 1U);
+        }
+    }
+    EXPECT_EQ(tracking_id_events, 1);
+
+    ASSERT_EQ(guest_.ActiveContacts().size(), 2U);
+    EXPECT_EQ(guest_.Slot(0).tracking_id, 0);
+    EXPECT_EQ(guest_.Slot(0).x, ExpectedX(120));
+    EXPECT_EQ(guest_.Slot(0).y, ExpectedY(220));
+    EXPECT_EQ(guest_.Slot(0).pressure, static_cast<uint32_t>(kStudioPressure));
+    EXPECT_EQ(guest_.Slot(1).tracking_id, 1);
+    EXPECT_EQ(guest_.Slot(1).x, ExpectedX(880));
+    EXPECT_EQ(guest_.Slot(1).y, ExpectedY(1780));
+    EXPECT_EQ(guest_.Slot(1).pressure, static_cast<uint32_t>(kStudioPressure));
+}
+
+TEST_P(StudioProtocolBGoldenTest, CtrlReleasedMidDragLiftsBothSlotsThenMousePressesSlotZeroAgain) {
+    SendMouse(100, 200, /*buttons=*/1);
+    SendTouch({MakeTouch(/*id=*/0, /*x=*/120, /*y=*/220, kStudioPressure),
+               MakeTouch(/*id=*/1, /*x=*/880, /*y=*/1780, kStudioPressure)});
+    ASSERT_EQ(Reports().size(), 2U);
+    ASSERT_EQ(guest_.ActiveContacts().size(), 2U);
+
+    // terminateDragging sends TouchEvent with id 0 and id 1 at pressure 0 -> one report lifts both.
+    SendTouch({MakeTouch(/*id=*/0, /*x=*/120, /*y=*/220, /*pressure=*/0),
+               MakeTouch(/*id=*/1, /*x=*/880, /*y=*/1780, /*pressure=*/0)});
+    ASSERT_EQ(Reports().size(), 3U);
+    EXPECT_EQ(guest_.Slot(0).tracking_id, -1);
+    EXPECT_EQ(guest_.Slot(1).tracking_id, -1);
+    EXPECT_THAT(guest_.ActiveContacts(), IsEmpty());
+
+    // Continuing mouse drag with buttons=1 cleanly presses slot 0 again.
+    SendMouse(140, 240, /*buttons=*/1);
+    ASSERT_EQ(Reports().size(), 4U);
+    ASSERT_EQ(guest_.ActiveContacts().size(), 1U);
+    EXPECT_EQ(guest_.Slot(0).tracking_id, 0);
+    EXPECT_EQ(guest_.Slot(0).x, ExpectedX(140));
+    EXPECT_EQ(guest_.Slot(0).y, ExpectedY(240));
+    EXPECT_EQ(guest_.Slot(0).pressure, static_cast<uint32_t>(kStudioPressure));
+}
+
+TEST_P(StudioProtocolBGoldenTest, CtrlTappedWithoutMouseMoveMidDragRecoversSlotZeroCleanly) {
+    // User holds mouse button at (200, 300), taps and releases Ctrl without moving the mouse
+    // (Studio sends TouchEvent(id=0 p=0, id=1 p=0) where id=1 was never down), then drags.
+    SendMouse(200, 300, /*buttons=*/1);
+    ASSERT_EQ(guest_.ActiveContacts().size(), 1U);
+
+    SendTouch({MakeTouch(/*id=*/0, /*x=*/200, /*y=*/300, /*pressure=*/0),
+               MakeTouch(/*id=*/1, /*x=*/880, /*y=*/1620, /*pressure=*/0)});
+    EXPECT_THAT(guest_.ActiveContacts(), IsEmpty());
+
+    SendMouse(250, 350, /*buttons=*/1);
+    ASSERT_EQ(guest_.ActiveContacts().size(), 1U);
+    EXPECT_EQ(guest_.Slot(0).tracking_id, 0);
+    EXPECT_EQ(guest_.Slot(0).x, ExpectedX(250));
+    EXPECT_EQ(guest_.Slot(0).y, ExpectedY(350));
+}
+
+TEST_P(StudioProtocolBGoldenTest, StylusDownMoveUpIsolatesPointerTenFromMouseSlotZero) {
+    SendMouse(100, 200, /*buttons=*/1);
+    ASSERT_EQ(guest_.ActiveContacts().size(), 1U);
+    EXPECT_EQ(guest_.Slot(0).tool_type, static_cast<uint32_t>(MT_TOOL_FINGER));
+
+    SendPen(300, 500, /*pressure=*/512, /*rubber=*/false, /*button_pressed=*/false,
+            /*orientation=*/-45);
+    ASSERT_EQ(guest_.ActiveContacts().size(), 2U);
+    EXPECT_EQ(guest_.Slot(1).tool_type, static_cast<uint32_t>(MT_TOOL_PEN));
+    EXPECT_EQ(guest_.Slot(1).orientation, -45);
+    EXPECT_EQ(guest_.Slot(1).x, ExpectedX(300));
+    EXPECT_EQ(guest_.Slot(1).y, ExpectedY(500));
+
+    SendPen(350, 550, /*pressure=*/512, /*rubber=*/false, /*button_pressed=*/false,
+            /*orientation=*/30);
+    EXPECT_EQ(guest_.Slot(1).orientation, 30);
+    EXPECT_EQ(guest_.Slot(1).x, ExpectedX(350));
+    EXPECT_EQ(guest_.Slot(1).y, ExpectedY(550));
+
+    SendPen(350, 550, /*pressure=*/0, /*rubber=*/false, /*button_pressed=*/false);
+    ASSERT_EQ(guest_.ActiveContacts().size(), 1U);
+    EXPECT_EQ(guest_.Slot(0).tool_type, static_cast<uint32_t>(MT_TOOL_FINGER));
+
+    SendMouse(100, 200, /*buttons=*/0);
+    EXPECT_THAT(guest_.ActiveContacts(), IsEmpty());
+}
+
+TEST_P(StudioProtocolBGoldenTest, TwoFingerMirrorDownMoveUpInThreeReports) {
+    SendTouch({MakeTouch(/*id=*/0, /*x=*/200, /*y=*/400, kStudioPressure),
+               MakeTouch(/*id=*/1, /*x=*/880, /*y=*/1520, kStudioPressure)});
+    ASSERT_EQ(Reports().size(), 1U);
+    ASSERT_EQ(guest_.ActiveContacts().size(), 2U);
+    EXPECT_EQ(guest_.Slot(0).x, ExpectedX(200));
+    EXPECT_EQ(guest_.Slot(0).y, ExpectedY(400));
+    EXPECT_EQ(guest_.Slot(1).x, ExpectedX(880));
+    EXPECT_EQ(guest_.Slot(1).y, ExpectedY(1520));
+
+    SendTouch({MakeTouch(/*id=*/0, /*x=*/250, /*y=*/450, kStudioPressure),
+               MakeTouch(/*id=*/1, /*x=*/830, /*y=*/1470, kStudioPressure)});
+    ASSERT_EQ(Reports().size(), 2U);
+    ASSERT_EQ(guest_.ActiveContacts().size(), 2U);
+    EXPECT_EQ(guest_.Slot(0).x, ExpectedX(250));
+    EXPECT_EQ(guest_.Slot(0).y, ExpectedY(450));
+    EXPECT_EQ(guest_.Slot(1).x, ExpectedX(830));
+    EXPECT_EQ(guest_.Slot(1).y, ExpectedY(1470));
+
+    SendTouch({MakeTouch(/*id=*/0, /*x=*/250, /*y=*/450, /*pressure=*/0),
+               MakeTouch(/*id=*/1, /*x=*/880, /*y=*/1470, /*pressure=*/0)});
+    ASSERT_EQ(Reports().size(), 3U);
+    EXPECT_THAT(guest_.ActiveContacts(), IsEmpty());
+}
+
+TEST_P(StudioProtocolBGoldenTest, RightAndMiddleMouseButtonsProduceZeroReports) {
+    SendMouse(300, 400, /*buttons=*/2);
+    SendMouse(300, 400, /*buttons=*/4);
+    SendMouse(300, 400, /*buttons=*/6);
+
+    EXPECT_THAT(Reports(), IsEmpty());
+    EXPECT_THAT(guest_.ActiveContacts(), IsEmpty());
+}
+
+INSTANTIATE_TEST_SUITE_P(PrimaryAndSecondaryDisplays, StudioProtocolBGoldenTest,
+                         ::testing::Values(0, 1));
+
+TEST_F(V1InputTranslatorTest, StudioSingleStreamMultiDisplaySimultaneousDragAndResetRecovery) {
+    multi_display_.display_0_override =
+            ActiveFakePixmanDisplay::CreateShared(loop_.get(), 0, 30, 1080, 1920);
+    AddDisplay(1, 1920, 1080);
+    Display(0)->evdev_reports.clear();
+    Display(1)->evdev_reports.clear();
+
+    MultiDisplayTouchDevices touch_devices(multi_display_, /*has_hinge=*/false);
+    NoopKeyboardSink keyboard_sink;
+    auto dispatcher = std::make_shared<InputDispatcher>(*loop_, touch_devices, &keyboard_sink,
+                                                        [](const KeyEvent& /*key*/) { return 0U; });
+    DispatcherSession session(dispatcher,
+                              IInputDispatcher::SessionOptions{
+                                  .human = true, .source_id = 0, .reject_down_on_held = false});
+
+    ProtocolBGuestState guest_0;
+    ProtocolBGuestState guest_1;
+    size_t applied_0 = 0;
+    size_t applied_1 = 0;
+    auto sync_guests = [&]() {
+        while (applied_0 < Display(0)->evdev_reports.size()) {
+            guest_0.ApplyReport(Display(0)->evdev_reports[applied_0++]);
+        }
+        if (multi_display_.GetDisplay(1).ok()) {
+            while (applied_1 < Display(1)->evdev_reports.size()) {
+                guest_1.ApplyReport(Display(1)->evdev_reports[applied_1++]);
+            }
+        }
+    };
+
+    auto send_mouse = [&](int32_t display_id, int32_t x, int32_t y, int32_t buttons) {
+        ::android::emulation::control::InputEvent ev;
+        MouseEvent* mouse = ev.mutable_mouse_event();
+        mouse->set_display(display_id);
+        mouse->set_x(x);
+        mouse->set_y(y);
+        mouse->set_buttons(buttons);
+        translator_.SyncResetTracker(session.ResetTracker());
+        for (const InputEvent& v2_event : translator_.TranslateInputEvent(ev)) {
+            session.Dispatch(v2_event);
+        }
+        loop_->RunAll();
+        sync_guests();
+    };
+
+    // Simultaneous mouse drag on Display 0 and Display 1 over one shared session.
+    send_mouse(/*display_id=*/0, 540, 960, /*buttons=*/1);
+    send_mouse(/*display_id=*/1, 960, 540, /*buttons=*/1);
+    ASSERT_EQ(guest_0.ActiveContacts().size(), 1U);
+    ASSERT_EQ(guest_1.ActiveContacts().size(), 1U);
+
+    // Removing Display 1 mid-drag records a per-display reset for Display 1 only:
+    // Display 0 continues dragging seamlessly, while recreating Display 1 and continuing the
+    // drag re-acquires a fresh DOWN contact on Display 1.
+    Display(1)->Stop();
+    ASSERT_THAT(multi_display_.EraseDisplay(1), IsOk());
+    dispatcher->OnDisplayRemoved(1);
+    loop_->RunAll();
+
+    send_mouse(/*display_id=*/0, 560, 980, /*buttons=*/1);
+    ASSERT_EQ(guest_0.ActiveContacts().size(), 1U);
+    EXPECT_EQ(guest_0.ActiveContacts()[0].x, static_cast<uint32_t>((560.0F / 1080.0F) * 32767.0F));
+
+    guest_1 = ProtocolBGuestState{};
+    applied_1 = 0;
+    AddDisplay(1, 1920, 1080);
+    Display(1)->evdev_reports.clear();
+    dispatcher->OnDisplayAdded(1);
+    loop_->RunAll();
+    sync_guests();
+    EXPECT_THAT(guest_1.ActiveContacts(), IsEmpty());
+
+    send_mouse(/*display_id=*/1, 1000, 600, /*buttons=*/1);
+    ASSERT_EQ(guest_1.ActiveContacts().size(), 1U);
+    EXPECT_EQ(guest_1.ActiveContacts()[0].x, static_cast<uint32_t>((1000.0F / 1920.0F) * 32767.0F));
+
+    // Mid-drag snapshot load cancels guest contacts and notifies ResetTracker; the next mouse
+    // drag frame on Display 0 re-acquires a fresh DOWN contact instead of failing as unheld MOVE.
+    dispatcher->OnSnapshotLoaded();
+    loop_->RunAll();
+    sync_guests();
+    EXPECT_THAT(guest_0.ActiveContacts(), IsEmpty());
+    EXPECT_THAT(guest_1.ActiveContacts(), IsEmpty());
+
+    send_mouse(/*display_id=*/0, 600, 1000, /*buttons=*/1);
+    ASSERT_EQ(guest_0.ActiveContacts().size(), 1U);
+    EXPECT_THAT(guest_1.ActiveContacts(), IsEmpty());
+
+    dispatcher->Shutdown();
 }
 
 }  // namespace

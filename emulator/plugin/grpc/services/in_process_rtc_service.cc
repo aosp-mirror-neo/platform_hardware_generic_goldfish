@@ -28,7 +28,6 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 
-#include "android/emulation/control/event_sender.h"
 #include "android/emulation/control/in_process_media_provider.h"
 #include "api/make_ref_counted.h"
 #include "emulator/plugin/grpc/input/dispatcher_session.h"
@@ -48,13 +47,6 @@
 #include "goldfish/videobridge/media_track_provider.h"
 #include "goldfish/videobridge/rtc_service.h"
 #include "goldfish/videobridge/switchboard.h"
-extern "C" {
-typedef struct QemuConsole QemuConsole;
-// NOLINTNEXTLINE(readability-identifier-naming)
-QemuConsole* qemu_console_lookup_by_index(int index);
-// NOLINTNEXTLINE(readability-identifier-naming)
-QemuConsole* qemu_console_lookup_default(void);
-}
 
 namespace android::emulation::control {
 
@@ -76,7 +68,6 @@ using ::goldfish::videobridge::InputSenderFactory;
 using ::goldfish::videobridge::MediaTrackProvider;
 using ::goldfish::videobridge::RtcService;
 using ::goldfish::videobridge::Switchboard;
-using keyboard::IKeyEventSender;
 
 namespace {
 
@@ -86,82 +77,35 @@ void LogRejectedV1InputEvent(IInputDispatcher::DispatchResult result) {
     }
 }
 
-// Clean, testable event routing isolated from factory plumbing.
-absl::Status DispatchInProcessInputEvent(const InputEvent& request,
-                                         InputEventSender& input_event_sender,
-                                         IKeyEventSender* key_event_sender,
-                                         DispatcherSession* session,
-                                         V1InputTranslator* translator) {
-    VLOG(2) << "InProcess InputEvent: " << request.ShortDebugString();
-
-    switch (request.type_case()) {
-    case InputEvent::kKeyEvent:
-        if (session != nullptr && translator != nullptr) {
-            for (const auto& event : translator->TranslateKeyboard(request.key_event())) {
-                session->Dispatch(event, LogRejectedV1InputEvent);
-            }
-            return absl::OkStatus();
-        }
-        CHECK_NE(key_event_sender, nullptr);
-        key_event_sender->send(request.key_event());
-        return absl::OkStatus();
-
-    case InputEvent::kMouseEvent:
-        return input_event_sender.Send(request.mouse_event());
-
-    case InputEvent::kTouchEvent:
-        return input_event_sender.Send(request.touch_event());
-
-    case InputEvent::kAndroidEvent:
-        return input_event_sender.Send(request.android_event());
-
-    case InputEvent::kPenEvent:
-        return input_event_sender.Send(request.pen_event());
-
-    case InputEvent::kWheelEvent:
-        return input_event_sender.Send(request.wheel_event());
-
-    case InputEvent::TYPE_NOT_SET:
-    default:
-        return absl::InvalidArgumentError("Unknown or unset InputEvent payload");
-    }
-}
-
-std::unique_ptr<InputSender> CreateV1InputSender(
-        IMultiDisplay& multidisplay, std::shared_ptr<InputEventSender> input_event_sender,
-        std::shared_ptr<IKeyEventSender> key_event_sender,
-        std::shared_ptr<IInputDispatcher> input_dispatcher,
-        V2InputValidator::Options v2_validator_options) {
+std::unique_ptr<InputSender> CreateV1InputSender(IMultiDisplay& multidisplay,
+                                                 std::shared_ptr<IInputDispatcher> input_dispatcher,
+                                                 V2InputValidator::Options v2_validator_options) {
     const IInputDispatcher::SessionOptions v1_session_options{
         .human = true, .source_id = 0, .reject_down_on_held = false};
-    auto session_holder = std::make_shared<std::unique_ptr<DispatcherSession>>();
-    std::shared_ptr<V1InputTranslator> translator;
-    if (input_dispatcher != nullptr) {
-        *session_holder = std::make_unique<DispatcherSession>(input_dispatcher, v1_session_options);
-        translator = std::make_shared<V1InputTranslator>(multidisplay,
-                                                         v2_validator_options.hw_sensor_hinge);
-    }
+    auto session_holder = std::make_shared<std::unique_ptr<DispatcherSession>>(
+            std::make_unique<DispatcherSession>(input_dispatcher, v1_session_options));
+    auto translator =
+            std::make_shared<V1InputTranslator>(multidisplay, v2_validator_options.hw_sensor_hinge);
     return std::make_unique<InProcessInputSender>(
-            [input_event_sender = std::move(input_event_sender),
-             key_event_sender = std::move(key_event_sender),
-             input_dispatcher = std::move(input_dispatcher), session_holder, translator,
+            [input_dispatcher = std::move(input_dispatcher), session_holder, translator,
              v1_session_options](const InputEvent& request) {
-                if (input_dispatcher != nullptr && *session_holder == nullptr) {
+                VLOG(2) << "InProcess InputEvent: " << request.ShortDebugString();
+                if (*session_holder == nullptr) {
                     *session_holder = std::make_unique<DispatcherSession>(input_dispatcher,
                                                                           v1_session_options);
                 }
-                return DispatchInProcessInputEvent(request, *input_event_sender,
-                                                   key_event_sender.get(), session_holder->get(),
-                                                   translator.get());
+                translator->SyncResetTracker((*session_holder)->ResetTracker());
+                for (const auto& event : translator->TranslateInputEvent(request)) {
+                    (*session_holder)->Dispatch(event, LogRejectedV1InputEvent);
+                }
+                return absl::OkStatus();
             },
             /*v2_dispatcher=*/nullptr,
             /*v2_sensors_dispatcher=*/nullptr,
             /*on_stop=*/
             [session_holder, translator]() {
                 session_holder->reset();
-                if (translator != nullptr) {
-                    translator->Reset();
-                }
+                translator->Reset();
             });
 }
 
@@ -236,23 +180,21 @@ class InProcessMediaProvider : public MediaTrackProvider {
 }  // namespace
 
 InputSenderFactory CreateInProcessInputSenderFactory(
-        IMultiDisplay& multidisplay, std::shared_ptr<IKeyEventSender> key_event_sender,
-        std::shared_ptr<IInputDispatcher> input_dispatcher,
+        IMultiDisplay& multidisplay, std::shared_ptr<IInputDispatcher> input_dispatcher,
         ::goldfish::sensors::PhysicalModel* physical_model,
         V2InputValidator::Options v2_validator_options) {
-    CHECK(key_event_sender != nullptr || input_dispatcher != nullptr)
-            << "Either key_event_sender or input_dispatcher must not be null";
-    auto input_event_sender = std::make_shared<InputEventSender>(&multidisplay);
+    CHECK(input_dispatcher != nullptr)
+            << "Failed to create in-process InputSenderFactory: input_dispatcher is null; ensure "
+               "AvdUniverse initializes IInputDispatcher before WebRTC services";
     std::shared_ptr<::goldfish::grpc::v2::SensorsServiceImpl> sensors_service;
     if (physical_model != nullptr) {
         sensors_service =
                 std::make_shared<::goldfish::grpc::v2::SensorsServiceImpl>(*physical_model);
     }
 
-    return [&multidisplay, input_event_sender, key_event_sender = std::move(key_event_sender),
-            input_dispatcher = std::move(input_dispatcher), sensors_service,
+    return [&multidisplay, input_dispatcher = std::move(input_dispatcher), sensors_service,
             v2_validator_options](DataChannelLabel label) -> std::unique_ptr<InputSender> {
-        if (label == DataChannelLabel::kInputV2 && input_dispatcher != nullptr) {
+        if (label == DataChannelLabel::kInputV2) {
             return CreateV2InputSender(multidisplay, input_dispatcher, v2_validator_options);
         }
         if (label == DataChannelLabel::kSensorsV2 && sensors_service != nullptr) {
@@ -264,9 +206,7 @@ InputSenderFactory CreateInProcessInputSenderFactory(
                         return sensors_service->ApplySensorsUpdate(request);
                     });
         }
-
-        return CreateV1InputSender(multidisplay, input_event_sender, key_event_sender,
-                                   input_dispatcher, v2_validator_options);
+        return CreateV1InputSender(multidisplay, input_dispatcher, v2_validator_options);
     };
 }
 
@@ -292,26 +232,16 @@ std::shared_ptr<::goldfish::videobridge::MediaProvider> CreateInProcessMediaProv
 
 static std::shared_ptr<Switchboard> CreateInProcessSwitchboard(AvdUniverse& avd_universe,
                                                                uint32_t display_id,
-                                                               uint32_t console_index,
+                                                               uint32_t /*console_index*/,
                                                                AudioBackend* audio_backend) {
     auto audio_device = GoldfishAudioDeviceModule::Create();
     auto media_provider =
             CreateInProcessMediaProvider(avd_universe, display_id, audio_backend, audio_device);
 
-    QemuConsole* console = qemu_console_lookup_by_index(console_index);
-    if (console == nullptr) {
-        LOG(WARNING) << "Failed to find QemuConsole for console index " << console_index
-                     << ". Input injection will fallback to default console.";
-        console = qemu_console_lookup_default();
-    }
-
-    // keyboard::createKeyEventSender explicitly supports a null QemuConsole* gracefully.
-    std::shared_ptr<IKeyEventSender> key_event_sender =
-            keyboard::createKeyEventSender(console, &avd_universe.GetQemuEventLoop());
     const auto& hw = avd_universe.Props().hw_config;
     auto input_sender_factory = CreateInProcessInputSenderFactory(
-            avd_universe.GetMultiDisplay(), std::move(key_event_sender),
-            avd_universe.GetInputDispatcher(), &avd_universe.GetSensorsPhysicalModel(),
+            avd_universe.GetMultiDisplay(), avd_universe.GetInputDispatcher(),
+            &avd_universe.GetSensorsPhysicalModel(),
             {.hw_sensor_hinge = hw.hw_sensor_hinge, .hw_keyboard = hw.hw_keyboard});
     return std::make_shared<Switchboard>(media_provider, input_sender_factory, audio_device);
 }

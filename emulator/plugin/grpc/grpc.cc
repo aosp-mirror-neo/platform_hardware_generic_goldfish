@@ -137,8 +137,7 @@ std::vector<std::shared_ptr<::grpc::Service>> CreateServices(avd::AvdUniverse& a
     auto* vm_operations = &avd_universe.GetVmOperations();
 
     services.emplace_back(::android::emulation::control::getEmulatorController(
-            vm_operations, qemu_console_lookup_by_index(0), &avd_universe,
-            &avd_universe.GetMultiDisplay()));
+            vm_operations, &avd_universe, &avd_universe.GetMultiDisplay()));
     services.emplace_back(std::make_shared<SnapshotServiceImpl>(*vm_operations));
     services.emplace_back(std::make_shared<::android::emulation::control::VehicleServiceImpl>(
             avd_universe.GetVehicleChannel()));

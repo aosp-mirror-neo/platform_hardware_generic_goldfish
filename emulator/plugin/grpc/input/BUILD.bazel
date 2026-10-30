@@ -426,11 +426,13 @@ cc_test(
         "@glib//gmodule:gmodule_shared",
     ],
     deps = [
+        ":dispatcher_session",
         ":input_dispatcher",
         ":input_dispatcher_interface",
         ":input_session_id",
         ":keyboard_sink",
         ":multi_display_touch_devices",
+        ":slot_registry",
         ":v1_input_translator",
         "//emulator/libs/async:async_testing",
         "//emulator/libs/test:googletest_main",
