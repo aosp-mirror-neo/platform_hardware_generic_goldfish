@@ -21,18 +21,15 @@ sequenceDiagram
     Interceptor->>Interceptor: Check Token / Log
     Interceptor->>Service: Proceed()
 
-    Service->>Service: InputEventSender::send()
+    Service->>Service: V1InputTranslator + DispatcherSession::Dispatch()
 
     Service->>Async: EventLoop::Post(Task)
     Note right of Async: Marshals to QEMU thread
-    Async-->>Service: Future/Promise
+    Service-->>Client: RPC Response (OK)
 
     Note over QEMU: QEMU Main Thread
     Async->>QEMU: Execute Task
-    QEMU->>QEMU: Inject Input (qemu_input_event_send)
-
-    Async-->>Service: Task Complete (Status)
-    Service-->>Client: RPC Response (OK)
+    QEMU->>QEMU: Inject Input (virtio_input_send_evdev)
 ```
 
 ## Key Mechanisms

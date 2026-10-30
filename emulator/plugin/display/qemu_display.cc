@@ -32,7 +32,6 @@ extern "C" {
 #include "ui/console.h"
 #include "ui/surface.h"
 #include "pixman.h"
-#include "qapi/error.h"
 #include "qom/object.h"
 }
 #include "virtio_bridge.h"
@@ -42,26 +41,6 @@ extern "C" {
 namespace goldfish::display {
 
 namespace {
-
-::InputMultiTouchType TranslateTouchType(MultiTouchType type) {
-    switch (type) {
-    case MultiTouchType::kBegin:
-        return INPUT_MULTI_TOUCH_TYPE_BEGIN;
-    case MultiTouchType::kUpdate:
-        return INPUT_MULTI_TOUCH_TYPE_UPDATE;
-    case MultiTouchType::kEnd:
-        return INPUT_MULTI_TOUCH_TYPE_END;
-    case MultiTouchType::kCancel:
-        return INPUT_MULTI_TOUCH_TYPE_CANCEL;
-    case MultiTouchType::kData:
-        return INPUT_MULTI_TOUCH_TYPE_DATA;
-    }
-}
-
-uint32_t bmap[INPUT_BUTTON__MAX] = {
-    [INPUT_BUTTON_LEFT] = 0x01,     [INPUT_BUTTON_MIDDLE] = 0x02,     [INPUT_BUTTON_RIGHT] = 0x04,
-    [INPUT_BUTTON_WHEEL_UP] = 0x08, [INPUT_BUTTON_WHEEL_DOWN] = 0x10,
-};
 
 constexpr DisplayChangeListenerOps kDclOps = {
     .dpy_name = "grpc-display",
@@ -279,55 +258,6 @@ IFrameSource::Start QemuDisplay::CaptureSource(LegacySurfaceSource& source) {
         return IFrameSource::Start::kNoContent;
     }
     return source.CaptureFrom(SurfaceSourceFromPixman(img));
-}
-
-void QemuDisplay::SendMultiTouchEvent(uint8_t slot, int x, int y, MultiTouchType type) {
-    const absl::MutexLock lock(send_lock_);
-    const Dimensions dims = GetDimensions();
-    VLOG(1) << *this << ", SendMultiTouchEvent(" << static_cast<int>(slot) << ", " << x << ", " << y
-            << ", " << static_cast<int>(type) << ")";
-
-    if (Id() > 0 && vhid_) {
-        qemu_loop_
-                ->Post([vhid = vhid_, slot, x, y, type, dims]() {
-                    InputHandler::SendMultiTouchEvent(vhid, slot, x, y, type, dims);
-                })
-                .IgnoreError();
-    } else {
-        Error* error_warn;
-        auto ttype = TranslateTouchType(type);
-        console_handle_touch_event(console_, touch_slots_, slot, static_cast<int>(dims.width),
-                                   static_cast<int>(dims.height), x, y, ttype, &error_warn);
-        warn_report_err(error_warn);
-    }
-}
-
-void QemuDisplay::SendMouseEvent(int x, int y, int button_mask) {
-    const absl::MutexLock lock(send_lock_);
-    const Dimensions dims = GetDimensions();
-    VLOG(2) << *this << ", SendMouseEvent(" << x << ", " << y << ", " << button_mask << ")";
-
-    if (Id() > 0 && vhid_) {
-        qemu_loop_
-                ->Post([vhid = vhid_, x, y, button_mask, dims]() {
-                    InputHandler::SendMouseEvent(vhid, x, y, button_mask, dims);
-                })
-                .IgnoreError();
-    } else {
-        qemu_loop_
-                ->Post([con = console_, x, y, iw = static_cast<int>(dims.width),
-                        ih = static_cast<int>(dims.height), last = last_bmask_,
-                        mask = button_mask] {
-                    if (last != mask) {
-                        qemu_input_update_buttons(con, bmap, last, mask);
-                    }
-                    qemu_input_queue_abs(con, INPUT_AXIS_X, x, 0, iw);
-                    qemu_input_queue_abs(con, INPUT_AXIS_Y, y, 0, ih);
-                    qemu_input_event_sync();
-                })
-                .IgnoreError();
-    }
-    last_bmask_ = button_mask;
 }
 
 void QemuDisplay::SendEvDevEvent(uint16_t type, uint16_t code, uint32_t value) {

@@ -106,9 +106,6 @@ class BenchmarkDisplay final : public ::goldfish::display::IDisplay {
                                absl::Now());
     }
 
-    void SendMultiTouchEvent(uint8_t /*slot*/, int /*x*/, int /*y*/,
-                             ::goldfish::display::MultiTouchType /*type*/) override {}
-    void SendMouseEvent(int /*x*/, int /*y*/, int /*button_mask*/) override {}
     void SendEvDevEvent(uint16_t /*type*/, uint16_t /*code*/, uint32_t /*value*/) override {}
     void SendEvDevReport(::goldfish::display::EvDevEvents /*events*/) override {}
     void WriteEvDevReportOnLoop(

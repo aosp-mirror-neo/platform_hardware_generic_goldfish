@@ -303,11 +303,8 @@ TEST_F(QemuDisplayConcurrencyTest, Teardown_FromNonLoopThread_UnregisteredDCL) {
 TEST_F(QemuDisplayConcurrencyTest, InputEvents_DispatchedToQemuLoop) {
     EXPECT_EQ(qemu_loop_->TaskCount(), 0);
 
-    display_->SendMouseEvent(10, 20, 1);
-    EXPECT_EQ(qemu_loop_->TaskCount(), 1);
-
     display_->SendEvDevEvent(1, 2, 3);
-    EXPECT_EQ(qemu_loop_->TaskCount(), 2);
+    EXPECT_EQ(qemu_loop_->TaskCount(), 1);
 
     qemu_loop_->RunAll();
     EXPECT_EQ(qemu_loop_->TaskCount(), 0);

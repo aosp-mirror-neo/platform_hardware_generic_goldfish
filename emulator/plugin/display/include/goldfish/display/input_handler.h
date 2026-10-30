@@ -14,11 +14,8 @@
 
 #pragma once
 
-#include <cstdint>
-
 #include "absl/types/span.h"
 
-#include "goldfish/display/display.h"
 #include "goldfish/display/ev_dev_event.h"
 
 struct VirtIOInputHID;
@@ -27,37 +24,10 @@ namespace goldfish::display {
 
 /**
  * @class InputHandler
- * @brief Utility class to handle coordinate translation, scaling, and
- *        sending input events to virtio-input devices.
+ * @brief Utility class to send input events to virtio-input devices.
  */
 class InputHandler {
   public:
-    /**
-     * @brief Translates and scales coordinates, then sends a multi-touch event.
-     *
-     * @param vhid The virtio-input device handle.
-     * @param slot The touch slot.
-     * @param x The logical X coordinate.
-     * @param y The logical Y coordinate.
-     * @param type The multi-touch event type.
-     * @param dims The current physical dimensions of the display.
-     */
-    static void SendMultiTouchEvent(VirtIOInputHID* vhid, uint8_t slot, int x, int y,
-                                    MultiTouchType type, const Dimensions& dims);
-
-    /**
-     * @brief Translates and scales coordinates, then sends a mouse event
-     *        mapped to a multi-touch event.
-     *
-     * @param vhid The virtio-input device handle.
-     * @param x The logical X coordinate.
-     * @param y The logical Y coordinate.
-     * @param button_mask The mouse button mask.
-     * @param dims The current physical dimensions of the display.
-     */
-    static void SendMouseEvent(VirtIOInputHID* vhid, int x, int y, int button_mask,
-                               const Dimensions& dims);
-
     /**
      * @brief Writes `events`, then EV_SYN/SYN_REPORT, to the device in order.
      *
