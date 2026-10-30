@@ -592,7 +592,7 @@ TEST_F(InputDispatcherTest, DriverResetPushEagerlyCancelsContactsWithoutSubseque
     ASSERT_THAT(inner_.reports.back(), SizeIs(::testing::Ge(2)));
     EXPECT_EQ(inner_.reports.back()[0], (EvDevEvent{EV_ABS, ABS_MT_SLOT, 0}));
     EXPECT_EQ(inner_.reports.back()[1], (EvDevEvent{EV_ABS, ABS_MT_TRACKING_ID, 0}));
-    ASSERT_THAT(Dispatch(a, Touch(kMove, {{2, 0.75F, 0.75F}})), IsOk());
+    ASSERT_THAT(Dispatch(a, Touch(kMove, {{2, 0.75F, 0.75F}}, 1)), IsOk());
     EXPECT_THAT(outer_.guest.Active(), ElementsAre(ContactAt(0.75F, 0.75F)));
 }
 
@@ -1777,6 +1777,124 @@ TEST_F(InputDispatcherTest, IdleTimerFiringAfterShutdownOrDestructionIsIgnored) 
     loop_->RunAll();
     loop_->AdvanceClock(absl::Seconds(60));
     EXPECT_THAT(log_.writes, IsEmpty());
+}
+
+TEST_F(InputDispatcherTest, SameSessionSamePointerIdOnDifferentDisplaysAreIndependentContacts) {
+    const InputSessionId a = dispatcher_.OpenSession({.source_id = 1, .reject_down_on_held = true});
+
+    // Pointer 0 pressed on display 0 and pointer 0 pressed on display 1 do not
+    // collide or trigger reject_down_on_held.
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.2F, 0.2F}}, /*display_id=*/0)), IsOk());
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.8F, 0.8F}}, /*display_id=*/1)), IsOk());
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.2F, 0.2F)));
+    EXPECT_THAT(outer_.guest.Active(), ElementsAre(ContactAt(0.8F, 0.8F)));
+
+    // Moving each display's pointer 0 updates only that display's device.
+    ASSERT_THAT(Dispatch(a, Touch(kMove, {{0, 0.3F, 0.3F}}, /*display_id=*/0)), IsOk());
+    ASSERT_THAT(Dispatch(a, Touch(kMove, {{0, 0.7F, 0.7F}}, /*display_id=*/1)), IsOk());
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.3F, 0.3F)));
+    EXPECT_THAT(outer_.guest.Active(), ElementsAre(ContactAt(0.7F, 0.7F)));
+
+    // Lifting pointer 0 on display 0 leaves pointer 0 on display 1 active.
+    ASSERT_THAT(Dispatch(a, Touch(kUp, {{0, 0.3F, 0.3F}}, /*display_id=*/0)), IsOk());
+    EXPECT_THAT(inner_.guest.Active(), IsEmpty());
+    EXPECT_THAT(outer_.guest.Active(), ElementsAre(ContactAt(0.7F, 0.7F)));
+
+    ASSERT_THAT(Dispatch(a, Touch(kUp, {{0, 0.7F, 0.7F}}, /*display_id=*/1)), IsOk());
+    EXPECT_THAT(outer_.guest.Active(), IsEmpty());
+}
+
+TEST_F(InputDispatcherTest, PointerlessCancelScopesToRequestedDisplayWhenDisplaysShareTouchDevice) {
+    const InputSessionId a = Source(1);
+    devices_.remap[2] = kInner;  // Display 2 shares the inner touch device with display 0.
+
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.2F, 0.2F}}, /*display_id=*/0)), IsOk());
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.8F, 0.8F}}, /*display_id=*/2)), IsOk());
+    ASSERT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.2F, 0.2F), ContactAt(0.8F, 0.8F)));
+    Activities();
+
+    ASSERT_THAT(Dispatch(a, Touch(PointerAction::POINTER_ACTION_CANCEL, {}, /*display_id=*/0)),
+                IsOk());
+
+    // Only display 0's contact is cancelled; display 2's contact on the shared device survives.
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.8F, 0.8F)));
+    EXPECT_THAT(Activities(), ElementsAre("src1 POINTER_ACTION_CANCEL display 0 ids 0"));
+}
+
+TEST_F(InputDispatcherTest, PointerlessCancelLiftsContactsAcrossPostureRemap) {
+    const InputSessionId a = Source(1);
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.2F, 0.2F}}, /*display_id=*/0)), IsOk());
+    devices_.remap[0] = kOuter;  // The foldable folds mid-gesture while pointer 0 is still held.
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1, 0.8F, 0.8F}}, /*display_id=*/0)), IsOk());
+    Activities();
+    inner_.reports.clear();
+    outer_.reports.clear();
+
+    ASSERT_THAT(Dispatch(a, Touch(PointerAction::POINTER_ACTION_CANCEL, {}, /*display_id=*/0)),
+                IsOk());
+
+    EXPECT_THAT(inner_.guest.Active(), IsEmpty());
+    EXPECT_THAT(outer_.guest.Active(), IsEmpty());
+    EXPECT_THAT(inner_.reports, SizeIs(2));
+    EXPECT_THAT(outer_.reports, SizeIs(2));
+    EXPECT_THAT(Activities(), ElementsAre("src1 POINTER_ACTION_CANCEL display 0 ids 0 1"));
+}
+
+TEST_F(InputDispatcherTest,
+       SessionResetTrackerRecordsIdleTimeoutSnapshotLoadDisplayRemovalAndDriverReset) {
+    auto tracker = std::make_shared<SessionResetTracker>();
+    const InputSessionId a = dispatcher_.OpenSession({
+        .source_id = 1,
+        .idle_timeout = absl::Seconds(60),
+        .reset_tracker = tracker,
+    });
+    EXPECT_EQ(tracker->Version(), 0U);
+
+    // 1. Driver reset on display 1 records a per-display reset for display 1 only.
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.2F, 0.2F}}, /*display_id=*/0)), IsOk());
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.8F, 0.8F}}, /*display_id=*/1)), IsOk());
+    devices_.ResetDriver(kOuter);
+    loop_->RunAll();
+
+    EXPECT_EQ(tracker->Version(), 1U);
+    auto snap = tracker->ReadSnapshot();
+    EXPECT_EQ(snap.full_generation, 0U);
+    EXPECT_FALSE(snap.display_generations.contains(0));
+    ASSERT_TRUE(snap.display_generations.contains(1));
+    EXPECT_EQ(snap.display_generations.at(1), 1U);
+
+    // 2. Display removal on device 2 records a per-display reset for display 2.
+    FakeSink secondary(*loop_, "secondary", log_);
+    devices_.extra[2] = &secondary;
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.5F, 0.5F}, {1, 0.6F, 0.6F}}, /*display_id=*/2)),
+                IsOk());
+    dispatcher_.OnDisplayRemoved(2);
+    loop_->RunAll();
+
+    EXPECT_EQ(tracker->Version(), 2U);
+    snap = tracker->ReadSnapshot();
+    EXPECT_EQ(snap.full_generation, 0U);
+    ASSERT_TRUE(snap.display_generations.contains(2));
+    EXPECT_EQ(snap.display_generations.at(2), 1U);
+
+    // 3. Idle timeout records a full reset and clears per-display entries.
+    loop_->AdvanceClock(absl::Seconds(60));
+    EXPECT_EQ(tracker->Version(), 3U);
+    snap = tracker->ReadSnapshot();
+    EXPECT_EQ(snap.full_generation, 1U);
+    EXPECT_THAT(snap.display_generations, IsEmpty());
+
+    // 4. Snapshot load records a full reset on every open session.
+    dispatcher_.OnSnapshotLoaded();
+    loop_->RunAll();
+    EXPECT_EQ(tracker->Version(), 4U);
+    snap = tracker->ReadSnapshot();
+    EXPECT_EQ(snap.full_generation, 2U);
+
+    // 5. Explicit CloseSession does not record an extra reset.
+    dispatcher_.CloseSession(a);
+    loop_->RunAll();
+    EXPECT_EQ(tracker->Version(), 4U);
 }
 
 }  // namespace

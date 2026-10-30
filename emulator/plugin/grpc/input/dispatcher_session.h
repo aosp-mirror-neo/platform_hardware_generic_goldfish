@@ -65,8 +65,15 @@ class DispatcherSession {
     void Dispatch(const ::android::emulation::v2::InputEvent& event,
                   DispatchCallback done = nullptr);
 
+    /**
+     * @brief Returns the tracker incremented whenever the dispatcher forcibly
+     * clears contacts held by this session.
+     */
+    const SessionResetTracker& ResetTracker() const { return *reset_tracker_; }
+
   private:
     const std::shared_ptr<IInputDispatcher> dispatcher_;
+    const std::shared_ptr<SessionResetTracker> reset_tracker_;
     const InputSessionId id_;
 };
 
