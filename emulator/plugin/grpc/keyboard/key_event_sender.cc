@@ -14,16 +14,16 @@
 #include "android/emulation/control/keyboard/key_event_sender.h"
 
 #include <cstdint>
+#include <ios>
 #include <memory>
-#include <string>
 #include <string_view>
 
-#include "absl/log/check.h"
 #include "absl/log/log.h"
 
 #include "android/emulation/control/keyboard/key_conversion.h"
 #include "emulator_controller.pb.h"
 #include "goldfish/async/event_loop.h"
+#include "goldfish/parsing/utf8_iterator.h"
 #include "key_event_emitter.h"
 
 extern "C" {
@@ -53,6 +53,8 @@ using goldfish::async::EventLoop;
 #undef send
 
 namespace {
+
+constexpr int32_t kMaxAsciiCodepoint = 0x7F;
 
 // Translates keyboard requests into QEMU key events, handing each to `emit`.
 // Lives only for the duration of one EmitKeyboardEvent() or EmitUtf8String().
@@ -134,7 +136,7 @@ class KeyEventConverter {
         }
     }
 
-    void SendUtf8String(const std::string& utf8) {
+    void SendUtf8String(std::string_view utf8) {
         VLOG(1) << "Sending utf8 string: " << utf8;
         // We need to convert every individual character to a sequence of evdev
         // events. This is due to the fact that a single character can be
@@ -144,27 +146,13 @@ class KeyEventConverter {
         // translated as [42, 18, 18]. If we deliver this sequence as down + up, we
         // would see "EE" in android. By splitting this up in individual chars we
         // guarantee that this doesn't happen.
-        const char* start = utf8.c_str();  // Guaranteed 0 terminated.
-        const char* end = utf8.c_str();
-        while (*end != '\0') {
-            char ch = *end;
-            end++;  // Can point to \0, but not beyond \0
-
-            // For utf-8 we have that if the two high bits set to 10, it's a
-            // continuation byte. What we are doing here is checking if the first
-            // two bits are not 10 and hence indicate a new character. This means
-            // we have found a single utf-8 char between start and end (of at most 4
-            // bytes).
-            if ((ch & 0xc0) != 0x80) {
-                DCHECK(start < end);
-                DCHECK(end - start <= 4);
-                auto len = end - start;
-                if (len > 1) {
-                    LOG(ERROR) << "The utf-8 char: " << std::string_view(start, len)
-                               << " will not be translated.";
-                }
-                EmitAsciiEvents(*start, KeyboardEvent::keypress);
-                start = end;
+        goldfish::parsing::Utf8Iterator utf8_it(utf8);
+        for (int32_t codepoint = utf8_it(); codepoint >= 0; codepoint = utf8_it()) {
+            if (codepoint <= kMaxAsciiCodepoint) {
+                EmitAsciiEvents(static_cast<unsigned short>(codepoint), KeyboardEvent::keypress);
+            } else {
+                VLOG(1) << "Skipping non-ASCII UTF-8 codepoint U+" << std::hex << codepoint
+                        << std::dec;
             }
         }
     }
@@ -179,7 +167,7 @@ void EmitKeyboardEvent(const KeyboardEvent& request, QemuKeyEmitter emit) {
     KeyEventConverter(emit).DispatchKeyboardEvent(request);
 }
 
-void EmitUtf8String(const std::string& utf8, QemuKeyEmitter emit) {
+void EmitUtf8String(std::string_view utf8, QemuKeyEmitter emit) {
     KeyEventConverter(emit).SendUtf8String(utf8);
 }
 

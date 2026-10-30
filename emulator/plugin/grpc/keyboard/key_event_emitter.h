@@ -13,7 +13,7 @@
 // limitations under the License.
 #pragma once
 
-#include <string>
+#include <string_view>
 
 #include "absl/functional/function_ref.h"
 
@@ -45,6 +45,6 @@ void EmitKeyboardEvent(const KeyboardEvent& request, QemuKeyEmitter emit);
  * @brief Translates `utf8` into a press and release per character, with
  * modifiers as needed. Only ASCII characters are translated.
  */
-void EmitUtf8String(const std::string& utf8, QemuKeyEmitter emit);
+void EmitUtf8String(std::string_view utf8, QemuKeyEmitter emit);
 
 }  // namespace android::emulation::control::keyboard
