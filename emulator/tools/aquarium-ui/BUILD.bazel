@@ -99,7 +99,7 @@ py_binary(
 
 py_test(
     name = "clownfish_e2e_test",
-    size = "small",
+    size = "medium",
     srcs = ["test/clownfish_e2e_test.py"],
     data = [
         ":aquarium-ui",
