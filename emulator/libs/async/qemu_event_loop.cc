@@ -257,10 +257,9 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
     };
 
     void OnInitialDrain() {
-        if (GetState() == LooperStatusEvent::State::kNotStarted) {
-            SetState(snapshot_in_progress_.load() ? LooperStatusEvent::State::kPaused
-                                                  : LooperStatusEvent::State::kRunning);
-        }
+        CompareAndSetState(LooperStatusEvent::State::kNotStarted,
+                           snapshot_in_progress_.load() ? LooperStatusEvent::State::kPaused
+                                                        : LooperStatusEvent::State::kRunning);
     }
 
     void ShutdownTimers() override;
@@ -346,22 +345,22 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
         self->HandleSnapshotProgress(*progress);
     }
 
+    // Uses compare-and-set so that kPaused/kRunning never overwrite kShuttingDown or kFinished
+    // set by a concurrent Shutdown().
     void HandleSnapshotProgress(const QemuSnapshotProgress& progress) {
         switch (progress.phase) {
         case QEMU_SNAPSHOT_PHASE_PREPARING:
         case QEMU_SNAPSHOT_PHASE_TRANSFERRING:
             snapshot_in_progress_.store(true);
-            if (GetState() == LooperStatusEvent::State::kRunning) {
-                SetState(LooperStatusEvent::State::kPaused);
-            }
+            CompareAndSetState<LooperStatusEvent::State::kRunning,
+                               LooperStatusEvent::State::kPaused>();
             break;
         case QEMU_SNAPSHOT_PHASE_COMPLETED:
         case QEMU_SNAPSHOT_PHASE_FAILED:
         case QEMU_SNAPSHOT_PHASE_NONE:
             snapshot_in_progress_.store(false);
-            if (GetState() == LooperStatusEvent::State::kPaused) {
-                SetState(LooperStatusEvent::State::kRunning);
-            }
+            CompareAndSetState<LooperStatusEvent::State::kPaused,
+                               LooperStatusEvent::State::kRunning>();
             break;
         }
     }
