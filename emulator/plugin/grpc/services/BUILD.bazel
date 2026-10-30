@@ -2,19 +2,8 @@ load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//emulator/tools:cc_binary_with_manifest.bzl", "cc_binary_with_manifest")
-load("//emulator/tools:plugins.bzl", "collect_plugins")
 
 package(default_visibility = ["//visibility:public"])
-
-collect_plugins(
-    name = "binplace",
-    output_dir = ".",
-    plugins = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
-    visibility = ["//visibility:private"],
-)
 
 cc_library(
     name = "emulator_controller",
@@ -51,11 +40,6 @@ cc_test(
     name = "emulator_controller_input_test",
     size = "small",
     srcs = ["emulator_controller_input_test.cc"],
-    data = [":binplace"],
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
     deps = [
         ":emulator_controller",
         "//emulator/libs/async:async_testing",
@@ -81,6 +65,8 @@ cc_test(
         "@abseil-cpp//absl/time",
         "@aemu//protos/services/emulator-controller:emulator_controller_cc_grpc",
         "@aemu//protos/services_v2:input_service_cc_proto",
+        "@glib//glib",
+        "@glib//gmodule",
         "@grpc//:grpc++",
         "@qemu//:qemu-headers-exported",
     ],
@@ -326,11 +312,6 @@ cc_test(
         "@platforms//os:windows": ["/GR-"],
         "//conditions:default": ["-fno-rtti"],
     }),
-    data = [":binplace"],
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
     linkopts = select({
         "@platforms//os:macos": [
             "-Wl,-ObjC",
@@ -374,6 +355,8 @@ cc_test(
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/time",
         "@aemu//protos/services_v2:input_service_cc_proto",
+        "@glib//glib",
+        "@glib//gmodule",
         "@googletest//:gtest",
         "@grpc//:grpc++",
         "@qemu//:qemu-headers-exported",

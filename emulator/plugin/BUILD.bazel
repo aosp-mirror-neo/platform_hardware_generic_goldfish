@@ -4,10 +4,6 @@ load("@rules_cc//cc:defs.bzl", "cc_binary")
     cc_binary(
         name = "goldfish_" + arch,
         srcs = ["plugin.cc"],
-        dynamic_deps = [
-            "@glib//glib:glib_shared",
-            "@glib//gmodule:gmodule_shared",
-        ],
         linkopts = select({
             "@platforms//os:macos": [
                 "-undefined dynamic_lookup",
@@ -71,8 +67,6 @@ load("@rules_cc//cc:defs.bzl", "cc_binary")
             "//emulator/plugin/legacy/goldfish_pipe:impl_" + arch,
             "//emulator/plugin/legacy/goldfish_sync:impl_" + arch,
             "//emulator/plugin/vsock_goldfish:vsock_impl_" + arch,
-            "@glib//glib:glib_import",
-            "@glib//gmodule:gmodule_import",
         ] + select({
             "@platforms//os:windows": [
                 "@qemu//:qemu-system-" + arch + ".if",

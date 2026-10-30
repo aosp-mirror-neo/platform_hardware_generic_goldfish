@@ -1,6 +1,5 @@
 load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("//emulator/tools:plugins.bzl", "collect_plugins")
 
 cc_library(
     name = "multidisplay",
@@ -32,25 +31,11 @@ cc_library(
     ],
 )
 
-collect_plugins(
-    name = "binplace",
-    output_dir = ".",
-    plugins = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
-)
-
 cc_test(
     name = "multidisplay_unittests",
     size = "small",
     srcs = [
         "multidisplay_device_test.cc",
-    ],
-    data = [":binplace"],
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -62,8 +47,8 @@ cc_test(
         "//emulator/plugin/hal/connector:test-helpers",
         "//emulator/plugin/hal/plug:fake_vsock",
         "@abseil-cpp//absl/synchronization",
-        "@glib//glib:glib_import",
-        "@glib//gmodule:gmodule_import",
+        "@glib//glib",
+        "@glib//gmodule",
     ],
 )
 

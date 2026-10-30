@@ -1,18 +1,7 @@
 load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("//emulator/tools:plugins.bzl", "collect_plugins")
 
 package(default_visibility = ["//visibility:public"])
-
-collect_plugins(
-    name = "binplace",
-    output_dir = ".",
-    plugins = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
-    visibility = ["//visibility:private"],
-)
 
 cc_library(
     name = "ev_dev_event",
@@ -177,11 +166,6 @@ cc_test(
     name = "multi_display_touch_devices_test",
     size = "small",
     srcs = ["multi_display_touch_devices_test.cc"],
-    data = [":binplace"],
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
     deps = [
         ":ev_dev_event",
         ":multi_display_touch_devices",
@@ -192,6 +176,8 @@ cc_test(
         "//emulator/plugin/display:test-display",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:status_matchers",
+        "@glib//glib",
+        "@glib//gmodule",
         "@googletest//:gtest",
         "@qemu//:qemu-headers-exported",
     ],
@@ -224,11 +210,6 @@ cc_test(
     name = "v2_input_validator_test",
     size = "small",
     srcs = ["v2_input_validator_test.cc"],
-    data = [":binplace"],
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
     deps = [
         ":v2_input_validator",
         "//emulator/libs/async:async_testing",
@@ -238,6 +219,8 @@ cc_test(
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:status_matchers",
         "@aemu//protos/services_v2:input_service_cc_proto",
+        "@glib//glib",
+        "@glib//gmodule",
         "@googletest//:gtest",
     ],
 )
@@ -322,11 +305,6 @@ cc_test(
     name = "v1_input_translator_test",
     size = "small",
     srcs = ["v1_input_translator_test.cc"],
-    data = [":binplace"],
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
     deps = [
         ":dispatcher_session",
         ":input_dispatcher",
@@ -347,6 +325,8 @@ cc_test(
         "@abseil-cpp//absl/status:status_matchers",
         "@aemu//protos/services/emulator-controller:emulator_controller_cc_proto",
         "@aemu//protos/services_v2:input_service_cc_proto",
+        "@glib//glib",
+        "@glib//gmodule",
         "@googletest//:gtest",
         "@qemu//:qemu-headers-exported",
     ],
