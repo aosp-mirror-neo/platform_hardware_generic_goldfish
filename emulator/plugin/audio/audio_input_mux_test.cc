@@ -610,12 +610,15 @@ TEST_F(AudioInputMuxTest, InjectorChurnBesideALongLivedInjectorIsRaceFree) {
     FakeHostAudioInput host;
     AudioInputMux mux(&host);
     std::atomic<size_t> person_frames{0};
+    absl::Notification person_pulled;
     int person = 0;
     ASSERT_TRUE(mux.RegisterInjector(
                            &person, kMono48kS16,
-                           [&person_frames](void* dst, size_t frames) {
+                           [&person_frames, &person_pulled](void* dst, size_t frames) {
                                std::fill_n(static_cast<int16_t*>(dst), frames, 0);
-                               person_frames.fetch_add(frames);
+                               if (person_frames.fetch_add(frames) == 0 && frames > 0) {
+                                   person_pulled.Notify();
+                               }
                                return frames;
                            },
                            nullptr)
@@ -665,6 +668,7 @@ TEST_F(AudioInputMuxTest, InjectorChurnBesideALongLivedInjectorIsRaceFree) {
         EXPECT_EQ(pulls_after_removal.load(), 0);
     }
 
+    EXPECT_TRUE(person_pulled.WaitForNotificationWithTimeout(absl::Seconds(5)));
     stop.store(true);
     reader.join();
     ScopedVmLock lock;
