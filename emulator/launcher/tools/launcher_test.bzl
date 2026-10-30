@@ -9,7 +9,8 @@ def create_launch_emulator_test(
         repeat = 0,
         params = None,
         count_log_pattern = None,
-        expected_occurrences = None):
+        expected_occurrences = None,
+        target_compatible_with = None):
     """Tests that the emulator can launch and that the given target_log_line regular expression is logged.
 
     This macro creates a `py_test` target configured to launch an Android emulator
@@ -31,6 +32,7 @@ def create_launch_emulator_test(
         params: Additional parameters that need to be passed on to the emulator launcher.
         count_log_pattern: An optional regular expression pattern to count in emulator logs.
         expected_occurrences: An optional integer specifying the exact expected count of count_log_pattern.
+        target_compatible_with: An optional target platform constraint list or select expression.
     """
     args = ["--target_log_line", target_log_line, "--repeat", str(repeat)]
     if count_log_pattern:
@@ -49,14 +51,20 @@ def create_launch_emulator_test(
             "@platforms//os:macos": ["--timeout_seconds", str(max(timeout_seconds, 300))],
             "//conditions:default": ["--timeout_seconds", str(timeout_seconds)],
         })
-    _create_launch_emulator_test(name, args, "@goldfish//emulator/launcher")
+    _create_launch_emulator_test(
+        name,
+        args,
+        "@goldfish//emulator/launcher",
+        target_compatible_with = target_compatible_with,
+    )
     _create_launch_emulator_test(
         name + "_zip",
         args + ["--use_zip"],
         "@goldfish//emulator:release",
+        target_compatible_with = target_compatible_with,
     )
 
-def _create_launch_emulator_test(name, args, goldfish_dep):
+def _create_launch_emulator_test(name, args, goldfish_dep, target_compatible_with = None):
     py_test(
         name = name,
         size = "large",
@@ -91,5 +99,7 @@ def _create_launch_emulator_test(name, args, goldfish_dep):
         target_compatible_with = select({
             "@platforms//os:windows": ["@platforms//:incompatible"],
             "//conditions:default": [],
-        }),
+        }) + (target_compatible_with or select({
+            "//conditions:default": [],
+        })),
     )
