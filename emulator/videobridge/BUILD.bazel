@@ -1149,6 +1149,7 @@ clang_tidy_test(
         ":grpc_audio_source_test",
         ":grpc_audio_source_perf",
         ":grpc_input_sender_test",
+        ":in_process_input_sender_test",
         ":nvenc_loader",
         ":nvenc_loader_test",
         ":nvenc_video_encoder",

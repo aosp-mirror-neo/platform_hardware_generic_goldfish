@@ -394,6 +394,61 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "v1_input_translator",
+    srcs = ["v1_input_translator.cc"],
+    hdrs = ["v1_input_translator.h"],
+    deps = [
+        ":ev_dev_event",
+        ":input_dispatcher_interface",
+        "//emulator/libs/status_macros",
+        "//emulator/plugin/display:abstract_multi_display",
+        "//emulator/plugin/display:base",
+        "//emulator/plugin/grpc/keyboard:keyconversion",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@aemu//protos/services/emulator-controller:emulator_controller_cc_proto",
+        "@aemu//protos/services_v2:input_service_cc_proto",
+        "@qemu//:qemu-headers-exported",
+    ],
+)
+
+cc_test(
+    name = "v1_input_translator_test",
+    size = "small",
+    srcs = ["v1_input_translator_test.cc"],
+    data = [":binplace"],
+    dynamic_deps = [
+        "@glib//glib:glib_shared",
+        "@glib//gmodule:gmodule_shared",
+    ],
+    deps = [
+        ":input_dispatcher",
+        ":input_dispatcher_interface",
+        ":input_session_id",
+        ":keyboard_sink",
+        ":multi_display_touch_devices",
+        ":v1_input_translator",
+        "//emulator/libs/async:async_testing",
+        "//emulator/libs/system:clock",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/display:abstract_multi_display",
+        "//emulator/plugin/display:base",
+        "//emulator/plugin/display:test-display",
+        "//emulator/plugin/grpc/keyboard:test_qemu_input_stub",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@aemu//protos/services/emulator-controller:emulator_controller_cc_proto",
+        "@aemu//protos/services_v2:input_service_cc_proto",
+        "@googletest//:gtest",
+        "@qemu//:qemu-headers-exported",
+    ],
+)
+
 clang_tidy_test(
     name = "tidy",
     targets = [
@@ -410,6 +465,8 @@ clang_tidy_test(
         ":multi_display_touch_devices_test",
         ":touch_device",
         ":touch_encoding",
+        ":v1_input_translator",
+        ":v1_input_translator_test",
         ":v2_input_validator",
         ":v2_input_validator_test",
     ],

@@ -101,5 +101,29 @@ TEST(InProcessInputSenderTest, V2EventDispatching) {
     EXPECT_EQ(v2_count, 1);
 }
 
+TEST(InProcessInputSenderTest, StopCallbackFiresOncePerActiveCycle) {
+    int stop_count = 0;
+    InProcessInputSender sender([](const InputEvent& /*event*/) { return absl::OkStatus(); },
+                                /*v2_dispatcher=*/nullptr,
+                                /*v2_sensors_dispatcher=*/nullptr,
+                                /*on_stop=*/[&stop_count]() { ++stop_count; });
+
+    // Stop before Start must not invoke on_stop.
+    sender.Stop();
+    EXPECT_EQ(stop_count, 0);
+
+    // Start followed by Closing + Closed Stop() calls invokes on_stop once.
+    ASSERT_TRUE(sender.Start().ok());
+    sender.Stop();
+    EXPECT_EQ(stop_count, 1);
+    sender.Stop();
+    EXPECT_EQ(stop_count, 1);
+
+    // Re-starting and stopping fires on_stop once more.
+    ASSERT_TRUE(sender.Start().ok());
+    sender.Stop();
+    EXPECT_EQ(stop_count, 2);
+}
+
 }  // namespace
 }  // namespace goldfish::videobridge

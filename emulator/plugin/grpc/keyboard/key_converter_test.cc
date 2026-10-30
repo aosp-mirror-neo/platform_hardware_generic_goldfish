@@ -193,6 +193,44 @@ TEST(KeyConversionTest, AndroidKeycodeToEvdevUnsupportedIsZero) {
     EXPECT_EQ(android_keycode_to_evdev(-1), 0U);
 }
 
+TEST(KeyConversionTest, EvdevToDomCodeRoundTripsKnownKeys) {
+    EXPECT_EQ(evdev_to_dom_code(KEY_A), "KeyA");
+    EXPECT_EQ(evdev_to_dom_code(KEY_ENTER), "Enter");
+    EXPECT_EQ(evdev_to_dom_code(KEY_SPACE), "Space");
+    EXPECT_EQ(evdev_to_dom_code(KEY_LEFTSHIFT), "ShiftLeft");
+    EXPECT_EQ(evdev_to_dom_code(KEY_VOLUMEUP), "AudioVolumeUp");
+    EXPECT_EQ(evdev_to_dom_code(KEY_BACK), "GoBack");
+    EXPECT_EQ(evdev_to_dom_code(KEY_HOME), "GoHome");
+    EXPECT_EQ(evdev_to_dom_code(KEY_APPSELECT), "AppSwitch");
+    EXPECT_EQ(evdev_to_dom_code(0), "");
+    EXPECT_EQ(evdev_to_dom_code(0xFFFF), "");
+}
+
+TEST(KeyConversionTest, QcodeToEvdevCoversAsciiTableAndModifiers) {
+    EXPECT_EQ(qcode_to_evdev(Q_KEY_CODE_SHIFT), static_cast<uint32_t>(KEY_LEFTSHIFT));
+    EXPECT_EQ(qcode_to_evdev(Q_KEY_CODE_ALT), static_cast<uint32_t>(KEY_LEFTALT));
+    EXPECT_EQ(qcode_to_evdev(Q_KEY_CODE_A), static_cast<uint32_t>(KEY_A));
+    EXPECT_EQ(qcode_to_evdev(Q_KEY_CODE_SPC), static_cast<uint32_t>(KEY_SPACE));
+    EXPECT_EQ(qcode_to_evdev(Q_KEY_CODE_LF), static_cast<uint32_t>(KEY_ENTER));
+    EXPECT_EQ(qcode_to_evdev(Q_KEY_CODE_UNMAPPED), 0U);
+}
+
+TEST(KeyConversionTest, ResolveDomKeyClassifiesNonPrintablePrintableAndUnknown) {
+    const DomKeyResolution enter = resolve_dom_key("Enter");
+    EXPECT_EQ(enter.kind, DomKeyResolution::Kind::kNonPrintable);
+    EXPECT_EQ(enter.evdev, static_cast<uint32_t>(KEY_ENTER));
+
+    const DomKeyResolution char_a = resolve_dom_key("a");
+    EXPECT_EQ(char_a.kind, DomKeyResolution::Kind::kCharacter);
+    EXPECT_EQ(char_a.character, 'a');
+
+    const DomKeyResolution dead = resolve_dom_key("Dead");
+    EXPECT_EQ(dead.kind, DomKeyResolution::Kind::kNone);
+
+    const DomKeyResolution dom_code = resolve_dom_key("KeyA");
+    EXPECT_EQ(dom_code.kind, DomKeyResolution::Kind::kNone);
+}
+
 }  // namespace keyboard
 }  // namespace control
 }  // namespace emulation
