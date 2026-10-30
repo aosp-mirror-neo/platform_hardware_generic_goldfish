@@ -58,6 +58,8 @@ class FakeAvdUniverse : private detail::FakeAvdVirtualClockHolder, public AvdUni
     android::goldfish::VmOperations& GetVmOperations() override;
     display::IMultiDisplay& GetMultiDisplay() const override;
     std::shared_ptr<grpc::v2::IInputDispatcher> GetInputDispatcher() override;
+    /** @brief Shuts down `GetInputDispatcher()`; there is no QEMU loop to stop. */
+    void OnPreGrpcShutdown() override;
 
     /** @brief Returns the test event loop driving `GetInputDispatcher()`. */
     async::testing::TestEventLoop& input_loop() { return *input_loop_; }

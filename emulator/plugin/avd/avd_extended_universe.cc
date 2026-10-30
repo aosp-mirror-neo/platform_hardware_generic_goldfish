@@ -30,6 +30,7 @@
 #include "android/emulation/control/keyboard/key_code_resolver.h"
 #include "android/goldfish/qemu_vm_operations.h"
 #include "android/goldfish/vm_interface.h"
+#include "emulator/plugin/vminterface/vm_lock.h"
 #include "goldfish/adb/adb_host_server.h"
 #include "goldfish/archive/collections/string.h"
 #include "goldfish/archive/reader.h"
@@ -361,6 +362,18 @@ void AvdExtendedUniverse::ShutdownQemuLoop() {
     }
     auto s = f.get();
     LOG_IF(QFATAL, !s.ok()) << "Qemu loop shutdown failed: " << s;
+}
+
+void AvdExtendedUniverse::OnPreGrpcShutdown() {
+    DCHECK(bql_locked()) << "OnPreGrpcShutdown() needs the BQL to run the tasks still queued on "
+                            "the QEMU loop; call it from a QEMU main loop exit notifier";
+    // Runs the queued tasks and fails later posts, so RPCs waiting on the loop return instead of
+    // blocking the gRPC server shutdown.
+    ShutdownQemuLoop();
+
+    // Without the BQL, as it runs completion callbacks.
+    android::goldfish::ScopedVmUnlock unlock;
+    input_dispatcher_->Shutdown();
 }
 
 async::EventLoop& AvdExtendedUniverse::GetQemuEventLoop() {
