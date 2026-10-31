@@ -218,6 +218,9 @@ TEST_F(HostInfoVulkanTest, setDeviceNameMappings) {
     const std::pair<std::string, EmulatorAvdInfo::EmulatorDeviceName> kTestCases[] = {
         {"pixel_10a", EmulatorAvdInfo::PIXEL_10A},
         {"pixel_11_pro_fold", EmulatorAvdInfo::PIXEL_11_PRO_FOLD},
+        {"foldable_4_3", EmulatorAvdInfo::FOLDABLE_4_3},
+        {"foldable_1_1", EmulatorAvdInfo::FOLDABLE_1_1},
+        {"foldable_4_3_测试_🚀_é", EmulatorAvdInfo::UNKNOWN_EMULATOR_DEVICE_NAME},
         {"ai_glasses_device", EmulatorAvdInfo::AI_GLASSES_DEVICE},
         {"ai_glasses_displayless", EmulatorAvdInfo::AI_GLASSES_AUDIO_DEVICE},
         {"non_existent_device", EmulatorAvdInfo::UNKNOWN_EMULATOR_DEVICE_NAME},
