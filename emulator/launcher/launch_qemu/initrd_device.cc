@@ -145,7 +145,7 @@ std::vector<std::pair<std::string, std::string>> getUserspaceBootProperties(
         params.push_back({"androidboot.serialno", serialno});
     }
 
-    // Use Guest ANGLE by default on API 37+
+    // Use Guest ANGLE by default on API 37+. API <= 36 only supports GL for now.
     if (!is_legacy && !opts.no_guest_angle &&
         feature_flags.IsEnabled(android_studio::EmulatorFeatureFlagState::GUEST_ANGLE)) {
         // Enable GuestAngle (ro.hardware.egl = angle).
@@ -195,7 +195,9 @@ std::vector<std::pair<std::string, std::string>> getUserspaceBootProperties(
         }
     }
 
-    params.push_back({"androidboot.hardware.vulkan", "ranchu"});
+    if (!is_legacy) {
+        params.push_back({"androidboot.hardware.vulkan", "ranchu"});
+    }
 
     // Put software vulkan driver version, based on software driver version
     // and the CTS requirements

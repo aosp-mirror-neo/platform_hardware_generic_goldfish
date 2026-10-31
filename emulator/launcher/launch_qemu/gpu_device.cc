@@ -413,9 +413,19 @@ GpuSelection selectGpu(const EmulatorConfig& emulator) {
         chosen_gpu_mode = "lavapipe";
     }
 
-    const bool use_host_gpu =
+    bool use_host_gpu =
             (chosen_gpu_mode == "host") ||
             (chosen_gpu_mode == "auto" && !isHostGpuDenyListed(probed_gpus, selected_gpu_index));
+    if (use_host_gpu && a.ApiLevel() < kVirtioReadyApiLevel) {
+        // The goldfish_pipe (API < 37) path cannot drive the host GPU yet; every
+        // software mode on this emulator resolves to lavapipe (SwiftShader is
+        // being removed, b/570473107), so fall back to it instead of silently
+        // picking a different renderer than the one that was asked for.
+        LOG(WARNING) << "Host GPU rendering is not available below API " << kVirtioReadyApiLevel
+                     << " yet (this AVD is API " << a.ApiLevel() << "); requested GPU mode '"
+                     << chosen_gpu_mode << "' falls back to lavapipe.";
+        use_host_gpu = false;
+    }
 
     std::string chosen_emu_renderer;
     std::string chosen_vulkan_icd;
@@ -467,9 +477,11 @@ absl::Status GpuDevice::initialize(const EmulatorConfig& emulator) {
                         "'-virtio-gpu-device rutabaga'); if it does not work for you, please "
                         "report the problem at "
                      << kVirtioGpuBugReportUrl << " so it can be fixed before the removal.";
-    } else if (!emulator.opts().virtio_gpu_device) {
-        // Only when the user did not choose: an explicit -virtio-gpu-device
-        // gfxstream needs no nudge on every launch.
+    } else if (!emulator.opts().virtio_gpu_device &&
+               emulator.avd().ApiLevel() >= kVirtioReadyApiLevel) {
+        // Only when the user did not choose on a virtio-gpu AVD: an explicit
+        // -virtio-gpu-device gfxstream (or a legacy goldfish_pipe AVD) needs no
+        // nudge on every launch.
         LOG(WARNING) << "virtio-gpu-gfxstream is now used by default. If you hit a problem, "
                         "please report it at "
                      << kVirtioGpuBugReportUrl
@@ -506,6 +518,21 @@ absl::flat_hash_map<std::string, std::string> GpuDevice::getQemuEnv(
     }
 
 #ifdef __linux__
+    // The bundled Mesa libGLESv2.so/libEGL.so (used when the renderer needs
+    // GLES, e.g. API < 37 guests) pull in lib64/libgallium_dri.so, which has a
+    // ~4.4 KiB initial-exec TLS segment. glibc only reserves 512 bytes of
+    // static TLS for dlopen()ed libraries, so the dlopen fails with "cannot
+    // allocate memory in static TLS block" and gfxstream falls back to the
+    // host's libGLESv2.so.2 (absent on minimal machines: crash). Reserve more.
+    constexpr std::string_view kStaticTlsTunable = "glibc.rtld.optional_static_tls=16384";
+    if (std::string tunables = System::Get()->EnvGet("GLIBC_TUNABLES"); tunables.empty()) {
+        env["GLIBC_TUNABLES"] = std::string(kStaticTlsTunable);
+    } else if (!absl::StrContains(tunables, "glibc.rtld.optional_static_tls")) {
+        env["GLIBC_TUNABLES"] = absl::StrCat(tunables, ":", kStaticTlsTunable);
+    } else {
+        env["GLIBC_TUNABLES"] = std::move(tunables);
+    }
+
     // Bug: 417138854: work around the log spam "bad fde: FDE is really a CIE"
     // when using the host system's libvulkan_lvp.so.
     if (System::Get()->EnvGet("ANDROID_EMU_PRELOAD_LIBGCC") == "1") {
@@ -589,14 +616,11 @@ absl::flat_hash_map<std::string, std::string> GpuDevice::getQemuEnv(
 }
 
 std::vector<std::string> GpuDevice::getQemuParameters(const EmulatorConfig& emulator) const {
-    if (emulator.avd().ApiLevel() < kVirtioReadyApiLevel) {
-        return {};
-    }
-
     using S = android_studio::EmulatorFeatureFlagState;
     const auto& hw = emulator.avd().Hw();
     const AndroidOptions& opts = emulator.opts();
     const auto& ff = emulator.feature_flags();
+    const bool legacy_goldfish_gpu = emulator.avd().ApiLevel() < kVirtioReadyApiLevel;
 
     std::vector<std::string> renderer_features;
     if (opts.renderer_features && *opts.renderer_features != '\0') {
@@ -604,7 +628,7 @@ std::vector<std::string> GpuDevice::getQemuParameters(const EmulatorConfig& emul
     }
 
     bool needs_gles = true;
-    if (!opts.no_guest_angle && ff.IsEnabled(S::GUEST_ANGLE)) {
+    if (!legacy_goldfish_gpu && !opts.no_guest_angle && ff.IsEnabled(S::GUEST_ANGLE)) {
         renderer_features.push_back("GuestVulkanOnly:enabled");
 
         // VulkanNativeSwapchain composition should only be enabled with GuestVulkanOnly
@@ -614,18 +638,23 @@ std::vector<std::string> GpuDevice::getQemuParameters(const EmulatorConfig& emul
         }
     }
 
-    // Use skiavkthreaded by default, unless user specifies otherwise
+    // Use skiavkthreaded by default on API 37+, skiaglthreaded on legacy API < 37
     std::string systemui_renderer =
-            opts.systemui_renderer ? opts.systemui_renderer : "skiavkthreaded";
+            opts.systemui_renderer ? opts.systemui_renderer
+                                   : (legacy_goldfish_gpu ? "skiaglthreaded" : "skiavkthreaded");
 
     // Enable virtual queue for non-skiagl renderers, or when explicitly requested for skiagl.
-    if (ff.IsEnabled(S::VULKAN_VIRTUAL_QUEUE) &&
+    if (!legacy_goldfish_gpu && ff.IsEnabled(S::VULKAN_VIRTUAL_QUEUE) &&
         (!systemui_renderer.starts_with("skiagl") || ff.IsOverridden(S::VULKAN_VIRTUAL_QUEUE))) {
         renderer_features.push_back("VulkanVirtualQueue:enabled");
     }
 
     // Snapshots can also be taken at runtime (gRPC, console), not only at exit.
-    if (mSnapshotDevice.snapshots_enabled() && ff.IsEnabled(S::VULKAN_SNAPSHOTS)) {
+    // On legacy GL-only (API <= 36), Vulkan is disabled so VkDecoderGlobalState
+    // is never initialized; enabling VulkanSnapshots would abort in
+    // FrameBuffer::onSave/onLoad when calling VkDecoderGlobalState::get().
+    if (!legacy_goldfish_gpu && mSnapshotDevice.snapshots_enabled() &&
+        ff.IsEnabled(S::VULKAN_SNAPSHOTS)) {
         renderer_features.push_back("VulkanSnapshots:enabled");
     }
 
@@ -633,11 +662,23 @@ std::vector<std::string> GpuDevice::getQemuParameters(const EmulatorConfig& emul
                                         ? "VulkanBatchedDescriptorSetUpdate:enabled"
                                         : "VulkanBatchedDescriptorSetUpdate:disabled");
 
-    // Use a separate memory type for Ahb allocations, to avoid marking them
-    // as host visible and coherent on lavapipe, which is not very well supported
-    // in virtio-gpu path right now.
+    if (legacy_goldfish_gpu) {
+        // API <= 36 (goldfish_pipe) only supports GL for now.
+        renderer_features.push_back("Vulkan:disabled");
+        renderer_features.push_back("GlAsyncSwap:enabled");
+        renderer_features.push_back("GlDirectMem:enabled");
+        renderer_features.push_back("HasSharedSlotsHostMemoryAllocator:enabled");
+        renderer_features.push_back("RefCountPipe:enabled");
+        renderer_features.push_back("YuvCache:enabled");
+        renderer_features.push_back("HostComposition:disabled");
+    } else if (ff.IsEnabled(S::VULKAN_USE_DEDICATED_AHB_MEMORY_TYPE)) {
+        // Use a separate memory type for Ahb allocations, to avoid marking them
+        // as host visible and coherent on lavapipe, which is not very well supported
+        // in virtio-gpu path right now.
+        renderer_features.push_back("VulkanUseDedicatedAhbMemoryType:enabled");
+    }
+
     constexpr std::pair<EmulatorFeatureFlag, std::string_view> kOptionalRendererFeatures[] = {
-        {S::VULKAN_USE_DEDICATED_AHB_MEMORY_TYPE, "VulkanUseDedicatedAhbMemoryType"},
         {S::BYPASS_VULKAN_DEVICE_FEATURE_OVERRIDES, "BypassVulkanDeviceFeatureOverrides"},
         {S::VULKAN_ALLOCATE_DEVICE_MEMORY_ONLY, "VulkanAllocateDeviceMemoryOnly"},
         {S::VULKAN_ALLOCATE_HOST_MEMORY, "VulkanAllocateHostMemory"},
@@ -673,42 +714,6 @@ std::vector<std::string> GpuDevice::getQemuParameters(const EmulatorConfig& emul
                                                  opts.vulkan_validation_exclude_filter));
     }
 
-    std::string gfxstream_backends = "gfxstream-vulkan=on";
-    if (needs_gles) {
-        gfxstream_backends.append(",x-gfxstream-gles=on");
-    }
-
-    // Exactly one of virtio-gpu-rutabaga (QEMU, via librutabaga_ffi) or
-    // virtio-gpu-gfxstream (goldfish plugin, via libgfxstream_backend); both
-    // take the same properties. See virtio_gpu_selection.h.
-    std::vector<std::string> params = {std::string(VirtioGpuDeviceName(mVirtioGpuDevice))};
-    if (hw.hw_sensor_hinge) {
-        params.push_back("edid=off");
-        params.push_back("max_outputs=2");
-    }
-    if (opts.no_window) {
-        params.push_back("wsi=headless");
-    }
-
-    params.push_back(absl::StrCat("id=", id()));
-    params.push_back("hostmem=4096M");
-    params.push_back(gfxstream_backends);
-    params.push_back("x-gfxstream-composer=on");
-    params.push_back(absl::StrCat("renderer_features=",
-                                  EscapeQemuOptionValue(absl::StrJoin(renderer_features, ";"))));
-    if (mSnapshotDevice.snapshots_enabled()) {
-        // The virtio-gpu device keeps the renderer state of each snapshot under
-        // <snapshot_directory>/<snapshot name>/renderer/, next to the version.txt
-        // that SnapshotStore writes to <snapshot_directory>/<snapshot name>/.
-        const fs::path snapshot_directory =
-                ::goldfish::snapshot::FileSnapshotStore(emulator.avd().GetContentPath(),
-                                                        SnapshotVersionFor(mVirtioGpuDevice))
-                        .Root() /
-                "";
-        params.push_back(absl::StrCat("snapshot_directory=",
-                                      EscapeQemuOptionValue(snapshot_directory.string())));
-    }
-
     size_t width;
     size_t height;
     if (hw.hw_resizable_configs.empty()) {
@@ -735,6 +740,66 @@ std::vector<std::string> GpuDevice::getQemuParameters(const EmulatorConfig& emul
                       "width="
                    << width << " height=" << height;
         return {};
+    }
+
+    const std::string joined_features = absl::StrJoin(renderer_features, ";");
+
+    // The GPU device keeps the renderer state of each snapshot under
+    // <snapshot_directory>/<snapshot name>/renderer/, next to the version.txt
+    // that SnapshotStore writes to <snapshot_directory>/<snapshot name>/.
+    std::optional<fs::path> snapshot_directory;
+    if (mSnapshotDevice.snapshots_enabled()) {
+        snapshot_directory =
+                ::goldfish::snapshot::FileSnapshotStore(emulator.avd().GetContentPath(),
+                                                        SnapshotVersionFor(mVirtioGpuDevice))
+                        .Root() /
+                "";
+    }
+
+    if (legacy_goldfish_gpu) {
+        std::vector<std::string> args;
+        const auto global = [&args](std::string_view property, std::string_view value) {
+            args.push_back("-global");
+            args.push_back(absl::StrCat("driver=goldfish_pipe,property=", property,
+                                        ",value=", EscapeQemuOptionValue(value)));
+        };
+        global("xres", absl::StrCat(width));
+        global("yres", absl::StrCat(height));
+        // The gfxstream RenderLib needs the guest's API level (setGuestAndroidApiLevel);
+        // goldfish_pipe refuses to start graphics without it.
+        global("guest_api_level", absl::StrCat(emulator.avd().ApiLevel()));
+        global("renderer_features", joined_features);
+        if (snapshot_directory) {
+            global("snapshot_directory", snapshot_directory->string());
+        }
+        return args;
+    }
+
+    std::string gfxstream_backends = "gfxstream-vulkan=on";
+    if (needs_gles) {
+        gfxstream_backends.append(",x-gfxstream-gles=on");
+    }
+
+    // Exactly one of virtio-gpu-rutabaga (QEMU, via librutabaga_ffi) or
+    // virtio-gpu-gfxstream (goldfish plugin, via libgfxstream_backend); both
+    // take the same properties. See virtio_gpu_selection.h.
+    std::vector<std::string> params = {std::string(VirtioGpuDeviceName(mVirtioGpuDevice))};
+    if (hw.hw_sensor_hinge) {
+        params.push_back("edid=off");
+        params.push_back("max_outputs=2");
+    }
+    if (opts.no_window) {
+        params.push_back("wsi=headless");
+    }
+
+    params.push_back(absl::StrCat("id=", id()));
+    params.push_back("hostmem=4096M");
+    params.push_back(gfxstream_backends);
+    params.push_back("x-gfxstream-composer=on");
+    params.push_back(absl::StrCat("renderer_features=", EscapeQemuOptionValue(joined_features)));
+    if (snapshot_directory) {
+        params.push_back(absl::StrCat("snapshot_directory=",
+                                      EscapeQemuOptionValue(snapshot_directory->string())));
     }
 
     params.push_back(absl::StrCat("xres=", width));

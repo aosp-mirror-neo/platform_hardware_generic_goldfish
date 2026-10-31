@@ -599,6 +599,8 @@ TEST(BootProperties, LegacyGraphicsPropertiesBelowApi37) {
                        }));
     EXPECT_THAT(props, testing::Not(testing::Contains(
                                testing::Pair("androidboot.hardware.gralloc", testing::_))));
+    EXPECT_THAT(props, testing::Not(testing::Contains(
+                               testing::Pair("androidboot.hardware.vulkan", testing::_))));
     EXPECT_THAT(
             props,
             testing::Not(testing::Contains(testing::Pair("androidboot.hardwareegl", testing::_))));
