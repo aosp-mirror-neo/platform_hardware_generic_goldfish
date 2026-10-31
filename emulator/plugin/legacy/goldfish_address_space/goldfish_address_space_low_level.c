@@ -241,7 +241,7 @@ static void bar1_subregion_finalize(Object* obj) {
         node->retire_cb = NULL;
         node->retire_opaque = NULL;
         /* RCU finalizers may run on QEMU's RCU call_rcu thread without the BQL; acquire it first
-         * because retire callbacks may call into IGoldfishGraphicsBridge::DestroyAsg. */
+         * because retire callbacks may call into IGoldfishGraphicsBridge::CloseAsg. */
         const bool need_bql = !bql_locked();
         if (need_bql) {
             bql_lock();

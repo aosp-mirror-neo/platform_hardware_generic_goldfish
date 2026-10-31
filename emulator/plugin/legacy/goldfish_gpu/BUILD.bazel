@@ -1,35 +1,129 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
-package(default_visibility = ["//visibility:public"])
+# Legacy GoldfishGpu: the gfxstream host for goldfish_pipe / goldfish_address_space /
+# goldfish_sync guests. This package holds only the facade; everything else lives in a
+# layer sub-package (see ARCHITECTURE.md):
+#
+#   api/        public C++ interface (IGoldfishGpu), C ABI header, test fake
+#   renderer/   finding, loading and configuring libgfxstream_backend
+#   transport/  guest-facing tables: ASG blobs, "pipe:opengles" render channels
+#   snapshot/   phase tracker, meta-blob codec, on-disk streams, posted-frame cache
+#   verify/     invariant checks over read-only views of the above
+#   qemu/       C ABI shim and the QEMU VMState sections
+#   testing/    in-process gfxstream fakes shared by every test
+#
+# External consumers keep depending on the labels below (":goldfish_gpu", ":impl",
+# ":impl_<arch>", ":fake_goldfish_gpu", ":goldfish_gpu_interface").
 
+package(
+    default_applicable_licenses = ["//emulator:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+# The IGoldfishGpu facade implementation (goldfish_gpu.cc). The C ABI in
+# //emulator/plugin/legacy/goldfish_gpu/qemu:c_api layers on top of it.
 cc_library(
-    name = "goldfish_gpu",
-    srcs = [
-        "goldfish_gpu.cc",
-    ],
-    hdrs = [
-        "include/goldfish/legacy/goldfish_gpu/goldfish_gpu.h",
-    ],
-    includes = ["include"],
+    name = "facade",
+    srcs = ["goldfish_gpu.cc"],
     deps = [
+        "//emulator/libs/os",
+        "//emulator/libs/status_macros",
+        "//emulator/libs/system",
+        "//emulator/plugin/legacy/goldfish_gpu/api:goldfish_gpu_interface",
+        "//emulator/plugin/legacy/goldfish_gpu/renderer:gfxstream_library_loader",
+        "//emulator/plugin/legacy/goldfish_gpu/renderer:render_lib_bridge",
+        "//emulator/plugin/legacy/goldfish_gpu/renderer:renderer_config",
+        "//emulator/plugin/legacy/goldfish_gpu/snapshot:gpu_snapshot_codec",
+        "//emulator/plugin/legacy/goldfish_gpu/snapshot:gpu_snapshot_files",
+        "//emulator/plugin/legacy/goldfish_gpu/snapshot:posted_frame_cache",
+        "//emulator/plugin/legacy/goldfish_gpu/snapshot:snapshot_phase_tracker",
+        "//emulator/plugin/legacy/goldfish_gpu/snapshot:snapshot_streams",
+        "//emulator/plugin/legacy/goldfish_gpu/transport:asg_blob_table",
+        "//emulator/plugin/legacy/goldfish_gpu/transport:opengles_pipe_table",
+        "//emulator/plugin/legacy/goldfish_gpu/verify:goldfish_gpu_verifier",
         "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/base:no_destructor",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
+        "@gfxstream//host:gfxstream_backend_headers",
     ],
 )
 
+# What the devices and the QEMU glue link against: the facade plus its C ABI.
 cc_library(
-    name = "fake_goldfish_gpu",
-    testonly = True,
-    hdrs = [
-        "include/goldfish/legacy/goldfish_gpu/fake_goldfish_gpu.h",
+    name = "goldfish_gpu",
+    linkopts = select({
+        "@platforms//os:linux": ["-Wl,--warn-backrefs-exclude=*"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":facade",
+        "//emulator/plugin/legacy/goldfish_gpu/api:goldfish_gpu_interface",
+        "//emulator/plugin/legacy/goldfish_gpu/qemu:c_api",
     ],
-    includes = ["include"],
+)
+
+alias(
+    name = "goldfish_gpu_interface",
+    actual = "//emulator/plugin/legacy/goldfish_gpu/api:goldfish_gpu_interface",
+)
+
+alias(
+    name = "fake_goldfish_gpu",
+    actual = "//emulator/plugin/legacy/goldfish_gpu/api:fake_goldfish_gpu",
+)
+
+# QEMU VMState shim ("goldfish_gpu_begin" / "goldfish_gpu_end" sections). Linked into the
+# plugin only; no test links it.
+alias(
+    name = "impl",
+    actual = "//emulator/plugin/legacy/goldfish_gpu/qemu:impl",
+)
+
+[
+    alias(
+        name = "impl_" + arch,
+        actual = "//emulator/plugin/legacy/goldfish_gpu/qemu:impl",
+    )
+    for arch in [
+        "aarch64",
+        "x86_64",
+    ]
+]
+
+# Integration suite over IGoldfishGpu and the C ABI with the gfxstream fakes.
+cc_test(
+    name = "goldfish_gpu_test",
+    size = "small",
+    srcs = ["goldfish_gpu_test.cc"],
     deps = [
         ":goldfish_gpu",
+        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/system",
+        "//emulator/libs/system:test-headers",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/legacy/goldfish_gpu/testing:mock_gfxstream",
         "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
         "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@gfxstream//host:gfxstream_backend_headers",
+        "@googletest//:gtest",
     ],
+)
+
+clang_tidy_test(
+    name = "tidy",
+    targets = [
+        ":facade",
+        ":goldfish_gpu",
+        ":goldfish_gpu_test",
+    ],
+    tidy_config_file = "//:clang_tidy_config",
 )

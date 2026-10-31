@@ -51,25 +51,11 @@ class TestGoldfishGpu : public FakeGoldfishGpu {
         trigger_wait_calls++;
     }
 
-    void ReceiveHostCmdResult(uint32_t cmd, uint64_t handle, uint32_t time_arg,
-                              uint64_t hostcmd_handle) override {
-        last_result_cmd = cmd;
-        last_result_handle = handle;
-        last_result_time_arg = time_arg;
-        last_result_hostcmd = hostcmd_handle;
-        result_calls++;
-    }
-
     TimelineIncCallback timeline_inc_cb;
     uint64_t last_glsync = 0;
     uint64_t last_thread = 0;
     uint64_t last_timeline = 0;
-    uint64_t last_result_handle = 0;
-    uint64_t last_result_hostcmd = 0;
-    uint32_t last_result_cmd = 0;
-    uint32_t last_result_time_arg = 0;
     int trigger_wait_calls = 0;
-    int result_calls = 0;
 
   private:
     const bool keep_stale_callback_ = false;
@@ -208,18 +194,20 @@ TEST(GoldfishSyncTest, BatchCommandAddr32BitProgrammingWorksWithoutHighRegisterW
     EXPECT_EQ(out.handle, 0x55U);
     EXPECT_EQ(out.time_arg, 7U);
 
-    // Also verify writing a host command result works with 32-bit address programming.
-    GoldfishSyncCommand reply{};
-    reply.cmd = kSyncCmdCreateSyncTimeline;
-    reply.handle = 0x1234;
-    reply.time_arg = 0;
-    reply.hostcmd_handle = 0x5678;
-    mem_ptr->Put(kBatchCmdGpa32, reply);
-    dev.Write(kSyncRegBatchCommand, 0);
-    EXPECT_EQ(gpu.result_calls, 1);
-    EXPECT_EQ(gpu.last_result_cmd, kSyncCmdCreateSyncTimeline);
-    EXPECT_EQ(gpu.last_result_handle, 0x1234U);
-    EXPECT_EQ(gpu.last_result_hostcmd, 0x5678U);
+    // Also verify guest command dispatch works with 32-bit address programming.
+    constexpr uint32_t kGuestCmdGpa32 = 0x5000;
+    dev.Write(kSyncRegBatchGuestCommandAddr, kGuestCmdGpa32);
+    GoldfishSyncGuestCommand gcmd{};
+    gcmd.host_command = kSyncCmdTriggerHostWait;
+    gcmd.glsync_handle = 0x1234;
+    gcmd.thread_handle = 0x5678;
+    gcmd.guest_timeline_handle = 0x9ABC;
+    mem_ptr->Put(kGuestCmdGpa32, gcmd);
+    dev.Write(kSyncRegBatchGuestCommand, 0);
+    EXPECT_EQ(gpu.trigger_wait_calls, 1);
+    EXPECT_EQ(gpu.last_glsync, 0x1234U);
+    EXPECT_EQ(gpu.last_thread, 0x5678U);
+    EXPECT_EQ(gpu.last_timeline, 0x9ABCU);
 }
 
 }  // namespace

@@ -127,7 +127,7 @@ class GraphicsAsgSubdevice final : public IAddressSpaceSubdevice {
                        << "(external_addr=" << static_cast<const void*>(blob->external_addr)
                        << ", size=" << blob->size << ", required=" << kAsgTotalAllocationSize
                        << ")";
-            gpu.DestroyAsg(*blob);
+            gpu.CloseAsg(*blob);
             return nullptr;
         }
 
@@ -136,7 +136,7 @@ class GraphicsAsgSubdevice final : public IAddressSpaceSubdevice {
             LOG(ERROR) << "goldfish_address_space: BAR 1 out of space for ASG ring+buffer "
                        << "(size=" << kAsgTotalAllocationSize << ", page_size=" << page_size
                        << ", bar1_size=" << bar1->Size() << ")";
-            gpu.DestroyAsg(*blob);
+            gpu.CloseAsg(*blob);
             return nullptr;
         }
 
@@ -146,7 +146,7 @@ class GraphicsAsgSubdevice final : public IAddressSpaceSubdevice {
                        << ", end=" << (*bar_off + kAsgTotalAllocationSize)
                        << ", bar1_size=" << bar1->Size() << ")";
             allocator->Free(*bar_off);
-            gpu.DestroyAsg(*blob);
+            gpu.CloseAsg(*blob);
             return nullptr;
         }
 
@@ -231,7 +231,7 @@ class GraphicsAsgSubdevice final : public IAddressSpaceSubdevice {
         const AsgBlob blob_copy = blob_;
         IGoldfishGpu* gpu_ptr = &gpu_;
         bar1_->UnmapAndRetire(bar_offset_,
-                              [gpu_ptr, blob_copy]() { gpu_ptr->DestroyAsg(blob_copy); });
+                              [gpu_ptr, blob_copy]() { gpu_ptr->CloseAsg(blob_copy); });
         allocator_->Free(bar_offset_);
         blob_ = AsgBlob{};
         consumer_started_ = false;

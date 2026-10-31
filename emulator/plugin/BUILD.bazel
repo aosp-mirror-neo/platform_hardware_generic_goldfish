@@ -64,6 +64,7 @@ load("@rules_cc//cc:defs.bzl", "cc_binary")
             "@qemu//:aemu_func_defs",
             "@qemu//:qemu-headers-exported",
             "//emulator/plugin/legacy/goldfish_address_space:impl_" + arch,
+            "//emulator/plugin/legacy/goldfish_gpu:impl_" + arch,
             "//emulator/plugin/legacy/goldfish_pipe:impl_" + arch,
             "//emulator/plugin/legacy/goldfish_sync:impl_" + arch,
             "//emulator/plugin/vsock_goldfish:vsock_impl_" + arch,

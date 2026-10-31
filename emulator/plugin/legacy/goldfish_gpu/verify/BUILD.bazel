@@ -1,0 +1,51 @@
+load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+# State-invariant checks (ASG-*, PIPE-*, FRAME-*, LIFE-*, DISK-*) over read-only Views of
+# the transport tables and snapshot state, mirroring virtio_gpu_gfxstream_verify. Pure
+# functions: the facade assembles a GpuVerifyInput, nothing here touches live state.
+
+package(
+    default_applicable_licenses = ["//emulator:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "goldfish_gpu_verifier",
+    srcs = ["goldfish_gpu_verifier.cc"],
+    hdrs = ["include/goldfish/legacy/goldfish_gpu/verify/goldfish_gpu_verifier.h"],
+    includes = ["include"],
+    deps = [
+        "//emulator/plugin/legacy/goldfish_gpu/api:goldfish_gpu_interface",
+        "//emulator/plugin/legacy/goldfish_gpu/renderer:renderer_config",
+        "//emulator/plugin/legacy/goldfish_gpu/snapshot:gpu_snapshot_codec",
+        "//emulator/plugin/legacy/goldfish_gpu/snapshot:snapshot_phase_tracker",
+        "//emulator/plugin/legacy/goldfish_gpu/transport:asg_blob_table",
+        "//emulator/plugin/legacy/goldfish_gpu/transport:opengles_pipe_table",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "goldfish_gpu_verifier_test",
+    size = "small",
+    srcs = ["goldfish_gpu_verifier_test.cc"],
+    deps = [
+        ":goldfish_gpu_verifier",
+        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/status",
+        "@googletest//:gtest",
+    ],
+)
+
+clang_tidy_test(
+    name = "tidy",
+    targets = [
+        ":goldfish_gpu_verifier",
+        ":goldfish_gpu_verifier_test",
+    ],
+    tidy_config_file = "//:clang_tidy_config",
+)

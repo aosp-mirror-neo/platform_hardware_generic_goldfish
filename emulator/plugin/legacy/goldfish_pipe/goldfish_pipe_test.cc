@@ -42,7 +42,8 @@ class TestGoldfishGpu : public FakeGoldfishGpu {
 
     void ColorBufferLastRef(uint32_t handle) override { closed_color_buffers.push_back(handle); }
 
-    absl::StatusOr<uint32_t> OpenOpenglesPipe(OpenglesReadCallback on_host_data) override {
+    absl::StatusOr<uint32_t> CreateOpenglesPipe(OpenglesReadCallback on_host_data,
+                                              OpenglesWritableCallback /*on_writable*/) override {
         last_read_cb = std::move(on_host_data);
         uint32_t id = next_pipe_id++;
         opened_pipes.push_back(id);

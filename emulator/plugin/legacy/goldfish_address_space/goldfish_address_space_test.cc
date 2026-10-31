@@ -139,7 +139,7 @@ class TestGoldfishGpu : public FakeGoldfishGpu {
         return absl::OkStatus();
     }
 
-    void DestroyAsg(const AsgBlob& /*blob*/) override { destroy_asg_calls++; }
+    void CloseAsg(const AsgBlob& /*blob*/) override { destroy_asg_calls++; }
 
     MapUserMemoryCallback map_user_memory_cb;
     UnmapUserMemoryCallback unmap_user_memory_cb;

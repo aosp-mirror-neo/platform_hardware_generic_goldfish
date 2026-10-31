@@ -24,6 +24,7 @@
 | **audio** | QEMU guest audio capture and WebRTC audio bridge. | [Architecture](audio/ARCHITECTURE.md) |
 | **wasapi** | Windows WASAPI audio backend (`AudioMixengBackend`). | [Architecture](wasapi/ARCHITECTURE.md) |
 | **hal** | Hardware Abstraction Layer devices (GPS, Sensors, Camera, Vehicle, Multi-Display, virtio-gpu-gfxstream). | [Architecture](hal/ARCHITECTURE.md) |
+| **legacy/goldfish_gpu** | gfxstream renderer host for API <= 36 guests (`goldfish_pipe` / `goldfish_address_space` / `goldfish_sync` transport, snapshots). | [Architecture](legacy/goldfish_gpu/ARCHITECTURE.md) |
 
 ### Control & Management
 | Plugin | Role | Documentation |

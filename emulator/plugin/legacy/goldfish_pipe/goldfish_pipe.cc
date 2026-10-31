@@ -172,7 +172,7 @@ class OpenglesPipeService final : public IPipeService {
         std::weak_ptr<SharedState> weak_state = state;
 
         absl::StatusOr<uint32_t> stream_id =
-                gpu.OpenOpenglesPipe([weak_state](const uint8_t* data, size_t size) {
+                gpu.CreateOpenglesPipe([weak_state](const uint8_t* data, size_t size) {
                     if (data == nullptr || size == 0) {
                         return;
                     }
@@ -192,9 +192,10 @@ class OpenglesPipeService final : public IPipeService {
                     if (wake_cb != nullptr) {
                         wake_cb(kPipeWakeRead);
                     }
-                });
+                },
+                /*on_writable=*/nullptr);
         if (!stream_id.ok()) {
-            LOG(ERROR) << "goldfish_pipe: OpenOpenglesPipe failed: " << stream_id.status();
+            LOG(ERROR) << "goldfish_pipe: CreateOpenglesPipe failed: " << stream_id.status();
             return nullptr;
         }
         return std::unique_ptr<OpenglesPipeService>(

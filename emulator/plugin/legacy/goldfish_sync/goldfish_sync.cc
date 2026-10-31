@@ -173,18 +173,14 @@ void GoldfishSyncDevice::Write(uint32_t offset, uint32_t value) ABSL_LOCKS_EXCLU
     }
     case kSyncRegBatchCommand: {
         GoldfishSyncCommand cmd{};
-        {
-            absl::MutexLock lock(&mu_);
-            if (batch_cmd_addr_ == 0) {
-                break;
-            }
-            if (!memory_->Read(batch_cmd_addr_, &cmd, sizeof(cmd))) {
-                LOG(WARNING) << "goldfish_sync: failed to read batch command at 0x" << std::hex
-                             << batch_cmd_addr_;
-                break;
-            }
+        absl::MutexLock lock(&mu_);
+        if (batch_cmd_addr_ == 0) {
+            break;
         }
-        gpu_.ReceiveHostCmdResult(cmd.cmd, cmd.handle, cmd.time_arg, cmd.hostcmd_handle);
+        if (!memory_->Read(batch_cmd_addr_, &cmd, sizeof(cmd))) {
+            LOG(WARNING) << "goldfish_sync: failed to read batch command at 0x" << std::hex
+                         << batch_cmd_addr_;
+        }
         break;
     }
     case kSyncRegBatchGuestCommand: {
