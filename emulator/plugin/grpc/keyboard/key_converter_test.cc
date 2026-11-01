@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <vector>
 
 #include "android/emulation/control/keyboard/key_conversion.h"
@@ -146,6 +147,20 @@ TEST(KeyConversionTest, AsciiToQcodeAllAlphabetLettersValid) {
         auto events = ascii_to_qcode(c, true);
         ASSERT_EQ(events.size(), 1) << "Failed for lowercase letter " << c;
         EXPECT_TRUE(IsValidQKeyCode(events[0].code));
+    }
+}
+
+TEST(KeyConversionTest, TypeableCodePointsArePrintableAsciiNewlineAndTab) {
+    for (int32_t code_point = ' '; code_point <= '~'; ++code_point) {
+        EXPECT_TRUE(IsTypeableCodePoint(code_point)) << code_point;
+    }
+    EXPECT_TRUE(IsTypeableCodePoint('\n'));
+    EXPECT_TRUE(IsTypeableCodePoint('\t'));
+
+    // 0xAB ('«') has an Alt mapping in the key map but is not ASCII, so typing skips it.
+    constexpr int32_t kUntypeable[] = {-1, 0, '\b', '\r', 0x1B, 0x7F, 0xAB, 0xE9, 0x6D4B, 0x1F680};
+    for (int32_t code_point : kUntypeable) {
+        EXPECT_FALSE(IsTypeableCodePoint(code_point)) << code_point;
     }
 }
 

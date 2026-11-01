@@ -54,8 +54,6 @@ using goldfish::async::EventLoop;
 
 namespace {
 
-constexpr int32_t kMaxAsciiCodepoint = 0x7F;
-
 // Translates keyboard requests into QEMU key events, handing each to `emit`.
 // Lives only for the duration of one EmitKeyboardEvent() or EmitUtf8String().
 class KeyEventConverter {
@@ -148,10 +146,10 @@ class KeyEventConverter {
         // guarantee that this doesn't happen.
         goldfish::parsing::Utf8Iterator utf8_it(utf8);
         for (int32_t codepoint = utf8_it(); codepoint >= 0; codepoint = utf8_it()) {
-            if (codepoint <= kMaxAsciiCodepoint) {
+            if (IsTypeableCodePoint(codepoint)) {
                 EmitAsciiEvents(static_cast<unsigned short>(codepoint), KeyboardEvent::keypress);
             } else {
-                VLOG(1) << "Skipping non-ASCII UTF-8 codepoint U+" << std::hex << codepoint
+                VLOG(1) << "Skipping untypeable UTF-8 codepoint U+" << std::hex << codepoint
                         << std::dec;
             }
         }

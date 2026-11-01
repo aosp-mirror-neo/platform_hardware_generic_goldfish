@@ -68,6 +68,7 @@ Why this design:
 
 - **Dedicated relative-mouse or touchpad virtio devices:** Mouse input is emulated as a single-finger touch contact (`SingleFingerMouseTranslator`). Dedicated mouse/trackpad devices belong to future v2 capabilities.
 - **Wheel and rotary input without a guest sink:** v1 `WheelEvent` is ignored (`VLOG(1)`), and v2 rotary `AxisEvent` is rejected by `V2InputValidator` unless a hardware rotary sink is configured (`hw_rotary_input`).
+- **Unicode text input:** Text is typed as US English key presses, so only printable ASCII, `\n`, and `\t` can be typed (`IsTypeableCodePoint()`, derived from the key map and shared with text typing). `V2InputValidator` rejects a v2 `TextEvent` containing any other character, including the `\r` of Windows line endings (`INVALID_ARGUMENT`, naming the character and its index), while v1 `KeyboardEvent.text` drops such characters.
 - **Preempting agent touches on human contact:** Rather than cancelling active agent gestures when the human touches the screen, `ContactTable` reserves `kReservedHumanSlots = 2` slots per device exclusively for human sessions (`SessionOptions::human = true`).
 
 ---

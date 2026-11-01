@@ -691,6 +691,15 @@ TEST_F(InputServiceImplTest, SendInputEventsFailsForKeyThatIsNotAW3cCode) {
     EXPECT_THAT(keyboard_.Writes(), IsEmpty());
 }
 
+TEST_F(InputServiceImplTest, SendInputEventsRejectsNonAsciiTextBeforeTypingAnything) {
+    const auto status = Send({Text("ok"), Text("测试_🚀_é")});
+
+    EXPECT_EQ(status.error_code(), ::grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_THAT(status.error_message(), HasSubstr("events[1]"));
+    EXPECT_THAT(status.error_message(), HasSubstr("U+6D4B at index 0"));
+    EXPECT_THAT(keyboard_.Writes(), IsEmpty());
+}
+
 TEST_F(InputServiceImplTest, RejectsUnsupportedPeripheralsWithFailedPrecondition) {
     auto opts = DefaultOptions();
     opts.hw_keyboard = false;
@@ -1066,10 +1075,10 @@ TEST_F(InputServiceImplTest, StreamInputEventsCancellationReleasesHeldContactsCl
     down.set_timestamp_nanos(10'000'000LL);
     ASSERT_TRUE(writer->Write(down));
 
-    InputEvent marker = Text("测试_🚀_é");
+    InputEvent marker = Text("marker");
     marker.set_timestamp_nanos(20'000'000LL);
     ASSERT_TRUE(writer->Write(marker));
-    keyboard_.AwaitWrite("text 测试_🚀_é");
+    keyboard_.AwaitWrite("text marker");
 
     stream_ctx.TryCancel();
     const ::grpc::Status status = writer->Finish();
@@ -1079,9 +1088,8 @@ TEST_F(InputServiceImplTest, StreamInputEventsCancellationReleasesHeldContactsCl
     // async OnCancel()/OnDone() callback runs; wait for the synthesized cancel.
     recorder_.AwaitCount(3);
     const std::string src = absl::StrCat("src", expected_source);
-    EXPECT_THAT(Activities(),
-                ElementsAre(src + " POINTER_ACTION_DOWN ids 0", src + " text 测试_🚀_é",
-                            src + " synthesized POINTER_ACTION_CANCEL ids 0"));
+    EXPECT_THAT(Activities(), ElementsAre(src + " POINTER_ACTION_DOWN ids 0", src + " text marker",
+                                          src + " synthesized POINTER_ACTION_CANCEL ids 0"));
 }
 
 TEST_F(InputServiceImplTest,
@@ -1107,7 +1115,7 @@ TEST_F(InputServiceImplTest,
                 SendInputEventsRequest req;
                 auto* ev = req.add_events();
                 ev->set_input_source_id(t + 1);
-                ev->mutable_text()->set_text(absl::StrCat("测试_🚀_é_", t, "_", i));
+                ev->mutable_text()->set_text(absl::StrCat("text_", t, "_", i));
                 SendInputEventsResponse resp;
                 EXPECT_TRUE(service_->SendInputEvents(&ctx, &req, &resp).ok());
             }

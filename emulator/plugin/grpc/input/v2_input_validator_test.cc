@@ -18,6 +18,8 @@
 
 #include <limits>
 #include <memory>
+#include <string>
+#include <utility>
 
 #include "absl/status/status.h"
 #include "absl/status/status_matchers.h"
@@ -51,6 +53,12 @@ InputEvent FingerDown(float x = 0.5F, float y = 0.5F) {
     p->set_tool_type(ToolType::TOOL_TYPE_FINGER);
     p->set_x(x);
     p->set_y(y);
+    return event;
+}
+
+InputEvent TextInput(std::string text) {
+    InputEvent event;
+    event.mutable_text()->set_text(std::move(text));
     return event;
 }
 
@@ -161,10 +169,41 @@ TEST_F(V2InputValidatorTest, RejectsUnknownOrEmptyDomCodeWithInvalidArgument) {
     unicode_dom.mutable_key()->set_action(KeyAction::KEY_ACTION_PRESS);
     unicode_dom.mutable_key()->set_dom_code("测试_🚀_é");
     EXPECT_THAT(validator_.Validate(unicode_dom), StatusIs(absl::StatusCode::kInvalidArgument));
+}
 
-    InputEvent unicode_text;
-    unicode_text.mutable_text()->set_text("测试_🚀_é");
-    EXPECT_THAT(validator_.Validate(unicode_text), IsOk());
+TEST_F(V2InputValidatorTest, AcceptsPrintableAsciiNewlineAndTabText) {
+    EXPECT_THAT(validator_.Validate(TextInput("")), IsOk());
+    EXPECT_THAT(validator_.Validate(TextInput(" Hello, World! `~{}|\\\n\t")), IsOk());
+}
+
+TEST_F(V2InputValidatorTest, RejectsTextOutsidePrintableAsciiWithInvalidArgument) {
+    const struct {
+        std::string text;
+        std::string expected_error;
+    } cases[] = {
+        {"Café", "U+00E9 at index 3"},
+        {"测试_🚀_é", "U+6D4B at index 0"},
+        {"go 🚀", "U+1F680 at index 3"},
+        {"line\r\n", "U+000D at index 4"},
+        {"back\b", "U+0008 at index 4"},
+        {"del\x7f", "U+007F at index 3"},
+        {std::string("nul\0", 4), "U+0000 at index 3"},
+        {"bad\xff", "U+FFFD at index 3"},
+    };
+    for (const auto& [text, expected_error] : cases) {
+        EXPECT_THAT(
+                validator_.Validate(TextInput(text)),
+                StatusIs(absl::StatusCode::kInvalidArgument, ::testing::HasSubstr(expected_error)))
+                << expected_error;
+    }
+
+    // Only a rejected '\r' explains how to fix Windows line endings.
+    EXPECT_THAT(validator_.Validate(TextInput("line\r\n")),
+                StatusIs(absl::StatusCode::kInvalidArgument,
+                         ::testing::HasSubstr("Convert '\\r\\n' line endings to '\\n'.")));
+    EXPECT_THAT(validator_.Validate(TextInput("Café")),
+                StatusIs(absl::StatusCode::kInvalidArgument,
+                         ::testing::Not(::testing::HasSubstr("line endings"))));
 }
 
 TEST_F(V2InputValidatorTest, RejectsRotaryEncoderByDefaultWithFailedPrecondition) {
