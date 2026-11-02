@@ -35,8 +35,20 @@ load("@rules_cc//cc:defs.bzl", "cc_binary")
             "@platforms//os:windows": "goldfish_" + arch + ".def",
             "//conditions:default": None,
         }),
-        deps = [
+        # AEMU compat headers must come before crashreport (which pulls in crashpad)
+        # to ensure AEMU's getopt.h and sys/types.h are preferred over Crashpad's.
+        # buildifier: leave-alone
+        deps = select({
+            "@platforms//os:windows": [
+                "@aemu//windows:compat-hdrs",
+                "//emulator/plugin/wasapi",
+                "@qemu//:qemu-system-" + arch + ".if",
+            ],
+            "//conditions:default": [],
+        }) + [
+            "//emulator/crashreport:breadcrumb",
             "//emulator/crashreport:crash_reporter",
+            "//emulator/crashreport:crash_system",
             "//emulator/crashreport:debug",
             "//emulator/libs/logging:color_log_sink",
             "//emulator/libs/perfetto:init",
@@ -67,19 +79,6 @@ load("@rules_cc//cc:defs.bzl", "cc_binary")
             "//emulator/plugin/legacy/goldfish_pipe:impl_" + arch,
             "//emulator/plugin/legacy/goldfish_sync:impl_" + arch,
             "//emulator/plugin/vsock_goldfish:vsock_impl_" + arch,
-        ] + select({
-            "@platforms//os:windows": [
-                "@qemu//:qemu-system-" + arch + ".if",
-                "//emulator/crashreport:breadcrumb",
-                "//emulator/plugin/wasapi",
-            ],
-            "//conditions:default": [
-                "//emulator/crashreport:breadcrumb",
-            ],
-        }) + [
-            # crashreport dep must go after the windows compat dep.
-            # buildifier: leave-alone
-            "//emulator/crashreport:crash_system",
         ],
     )
     for arch in [
