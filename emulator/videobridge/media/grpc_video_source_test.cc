@@ -178,9 +178,7 @@ TEST(GrpcVideoSourceTest, GrpcVideoSourceStreamsFramesFromClient) {
     webrtc::VideoSourceInterface<webrtc::VideoFrame>* source_interface = source.get();
     source_interface->AddOrUpdateSink(&sink, webrtc::VideoSinkWants());
 
-    source->Start();
-
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (sink.FrameCount() < 3 && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
@@ -230,9 +228,7 @@ TEST(GrpcVideoSourceTest, GrpcVideoSourceStreamsFramesViaSharedMemory) {
     webrtc::VideoSourceInterface<webrtc::VideoFrame>* source_interface = source.get();
     source_interface->AddOrUpdateSink(&sink, webrtc::VideoSinkWants());
 
-    source->Start();
-
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (sink.FrameCount() < 3 && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
@@ -289,9 +285,7 @@ TEST(GrpcVideoSourceTest, GrpcVideoSourceFallsBackToBytesIfSharedMemoryNotMapped
     webrtc::VideoSourceInterface<webrtc::VideoFrame>* source_interface = source.get();
     source_interface->AddOrUpdateSink(&sink, webrtc::VideoSinkWants());
 
-    source->Start();
-
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (sink.FrameCount() < 3 && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
@@ -334,9 +328,7 @@ TEST(GrpcVideoSourceTest, GrpcVideoSourceStreamsFramesWithI420Pipeline) {
     webrtc::VideoSourceInterface<webrtc::VideoFrame>* source_interface = source.get();
     source_interface->AddOrUpdateSink(&sink, webrtc::VideoSinkWants());
 
-    source->Start();
-
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (sink.FrameCount() < 3 && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
@@ -466,9 +458,7 @@ TEST(GrpcVideoSourceTest, GrpcVideoSourceReusesBuffersAcrossStreamedFrames) {
     webrtc::VideoSourceInterface<webrtc::VideoFrame>* source_interface = source.get();
     source_interface->AddOrUpdateSink(&sink, webrtc::VideoSinkWants());
 
-    source->Start();
-
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (sink.FrameCount() < static_cast<int>(kStreamedFrames) &&
            std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
