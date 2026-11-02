@@ -74,6 +74,12 @@ class WebMEncoder {
         return frame_buffer_allocations_.load(std::memory_order_relaxed);
     }
 
+    // Returns the total capacity in bytes of the allocated YUV420P AVFrame
+    // plane buffers used for encoding.
+    size_t YuvFrameBufferBytes() const {
+        return yuv_frame_buffer_bytes_.load(std::memory_order_relaxed);
+    }
+
   private:
     bool FailInit(std::string_view reason, int av_err = 0) ABSL_LOCKS_EXCLUDED(queue_mutex_);
     void EncodeLoop() ABSL_LOCKS_EXCLUDED(queue_mutex_);
@@ -106,5 +112,6 @@ class WebMEncoder {
     int64_t pts_counter_ = 0;
     std::atomic<uint64_t> frames_encoded_{0};
     std::atomic<uint64_t> frame_buffer_allocations_{0};
+    std::atomic<size_t> yuv_frame_buffer_bytes_{0};
 };
 }  // namespace goldfish::display
