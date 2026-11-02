@@ -766,10 +766,135 @@ TEST_F(QemuVmOperationsTest, ListSnapshotsReportsCompatibility) {
     ASSERT_EQ(entries.size(), 3U);
     EXPECT_EQ(entries[0].name, "current");
     EXPECT_TRUE(entries[0].compatible);
+    EXPECT_FALSE(entries[0].loaded);
     EXPECT_EQ(entries[1].name, "stale");
     EXPECT_FALSE(entries[1].compatible);
+    EXPECT_FALSE(entries[1].loaded);
     EXPECT_EQ(entries[2].name, "no_metadata");
     EXPECT_FALSE(entries[2].compatible);
+    EXPECT_FALSE(entries[2].loaded);
+}
+
+TEST_F(QemuVmOperationsTest, ListSnapshotsTracksStartupAndRuntimeLoadedSnapshot) {
+    ::goldfish::avd::FakeAvdUniverse fake_avd;
+    mock_runstate_set(RUN_STATE_RUNNING);
+    mock_snapshot_op_ok_set(true);
+
+    std::array<QEMUSnapshotInfo, 4> qsi{};
+    std::snprintf(qsi[0].name, sizeof(qsi[0].name), "default_boot");
+    std::snprintf(qsi[1].name, sizeof(qsi[1].name), "snap_日本語");
+    std::snprintf(qsi[2].name, sizeof(qsi[2].name), "stale");
+    std::snprintf(qsi[3].name, sizeof(qsi[3].name), "no_metadata");
+    mock_snapshot_list_set(qsi.data(), static_cast<int>(qsi.size()));
+
+    MakeCompatibleSnapshot("default_boot");
+    MakeCompatibleSnapshot("snap_日本語");
+    ASSERT_OK(store_->Prepare("stale"));
+    {
+        std::ofstream ofs(store_->Dir("stale") / "version.txt");
+        ofs << 1;
+    }
+
+    auto list_by_name = [&]() {
+        absl::flat_hash_map<std::string, VmOperations::SnapshotEntry> by_name;
+        EXPECT_OK(vm_ops_->ListSnapshots([&](VmOperations::SnapshotEntry entry) {
+            std::string name = entry.name;
+            by_name.emplace(std::move(name), std::move(entry));
+        }));
+        return by_name;
+    };
+    auto fire_load_phase = [&](const char* name, QemuSnapshotPhase phase) {
+        QemuSnapshotProgress progress{};
+        progress.operation = QEMU_SNAPSHOT_OP_LOAD;
+        progress.phase = phase;
+        progress.name = name;
+        ASSERT_OK(qemu_loop_->PostAndWait([&] { mock_fire_snapshot_progress(&progress); }));
+    };
+
+    // Cold boot: no snapshot has been loaded yet.
+    auto entries = list_by_name();
+    ASSERT_EQ(entries.size(), 4U);
+    EXPECT_FALSE(entries["default_boot"].loaded);
+    EXPECT_FALSE(entries["snap_日本語"].loaded);
+    EXPECT_FALSE(entries["stale"].loaded);
+    EXPECT_FALSE(entries["no_metadata"].loaded);
+
+    // Startup -loadvm failure (cold-boot fallback) leaves all snapshots unloaded.
+    fire_load_phase("default_boot", QEMU_SNAPSHOT_PHASE_PREPARING);
+    fire_load_phase("default_boot", QEMU_SNAPSHOT_PHASE_FAILED);
+    entries = list_by_name();
+    EXPECT_FALSE(entries["default_boot"].loaded);
+
+    // Startup -loadvm success marks default_boot as loaded.
+    fire_load_phase("default_boot", QEMU_SNAPSHOT_PHASE_PREPARING);
+    fire_load_phase("default_boot", QEMU_SNAPSHOT_PHASE_TRANSFERRING);
+    fire_load_phase("default_boot", QEMU_SNAPSHOT_PHASE_COMPLETED);
+    entries = list_by_name();
+    EXPECT_TRUE(entries["default_boot"].loaded);
+    EXPECT_FALSE(entries["snap_日本語"].loaded);
+    EXPECT_FALSE(entries["stale"].loaded);
+    EXPECT_FALSE(entries["no_metadata"].loaded);
+
+    // An incompatible snapshot loaded outside VmOperations (e.g. HMP loadvm) is
+    // never reported as loaded, preserving the invariant loaded => compatible.
+    fire_load_phase("stale", QEMU_SNAPSHOT_PHASE_PREPARING);
+    fire_load_phase("stale", QEMU_SNAPSHOT_PHASE_COMPLETED);
+    entries = list_by_name();
+    EXPECT_FALSE(entries["default_boot"].loaded);
+    EXPECT_FALSE(entries["stale"].compatible);
+    EXPECT_FALSE(entries["stale"].loaded);
+
+    // Runtime LoadSnapshot moves loaded to snap_日本語 (Unicode name).
+    ASSERT_OK(vm_ops_->LoadSnapshot("snap_日本語", /*and_resume=*/true));
+    entries = list_by_name();
+    EXPECT_FALSE(entries["default_boot"].loaded);
+    EXPECT_TRUE(entries["snap_日本語"].loaded);
+
+    // Saving another snapshot (or overwriting the loaded one) preserves loaded.
+    ASSERT_OK(vm_ops_->SaveSnapshot("default_boot", /*overwrite=*/true));
+    ASSERT_OK(vm_ops_->SaveSnapshot("snap_日本語", /*overwrite=*/true));
+    entries = list_by_name();
+    EXPECT_FALSE(entries["default_boot"].loaded);
+    EXPECT_TRUE(entries["snap_日本語"].loaded);
+
+    // Pre-flight LoadSnapshot rejections keep the VM running and preserve loaded.
+    EXPECT_THAT(vm_ops_->LoadSnapshot("../invalid", /*and_resume=*/true),
+                StatusIs(absl::StatusCode::kInvalidArgument));
+    EXPECT_THAT(vm_ops_->LoadSnapshot("stale", /*and_resume=*/true),
+                StatusIs(absl::StatusCode::kFailedPrecondition));
+    mock_runstate_set(RUN_STATE_SAVE_VM);
+    EXPECT_THAT(vm_ops_->LoadSnapshot("default_boot", /*and_resume=*/true),
+                StatusIs(absl::StatusCode::kFailedPrecondition));
+    mock_runstate_set(RUN_STATE_RUNNING);
+    entries = list_by_name();
+    EXPECT_TRUE(entries["snap_日本語"].loaded);
+
+    // A LoadSnapshot that fails inside QEMU clears loaded.
+    mock_snapshot_op_ok_set(false);
+    EXPECT_THAT(vm_ops_->LoadSnapshot("default_boot", /*and_resume=*/true),
+                StatusIs(absl::StatusCode::kInternal));
+    entries = list_by_name();
+    EXPECT_FALSE(entries["default_boot"].loaded);
+    EXPECT_FALSE(entries["snap_日本語"].loaded);
+
+    // Deleting an unrelated snapshot preserves loaded; deleting the loaded
+    // snapshot clears it (even if re-saved with the same name without loading).
+    mock_snapshot_op_ok_set(true);
+    ASSERT_OK(vm_ops_->LoadSnapshot("default_boot", /*and_resume=*/true));
+    ASSERT_OK(vm_ops_->DeleteSnapshot("snap_日本語"));
+    entries = list_by_name();
+    EXPECT_TRUE(entries["default_boot"].loaded);
+
+    ASSERT_OK(vm_ops_->DeleteSnapshot("default_boot"));
+    ASSERT_OK(vm_ops_->SaveSnapshot("default_boot", /*overwrite=*/true));
+    entries = list_by_name();
+    EXPECT_FALSE(entries["default_boot"].loaded);
+
+    // Resetting the VM clears loaded.
+    ASSERT_OK(vm_ops_->LoadSnapshot("default_boot", /*and_resume=*/true));
+    ASSERT_TRUE(list_by_name()["default_boot"].loaded);
+    ASSERT_OK(vm_ops_->Reset());
+    EXPECT_FALSE(list_by_name()["default_boot"].loaded);
 }
 
 TEST_F(QemuVmOperationsTest, InvalidSnapshotNamesAreRejectedBeforeQemu) {

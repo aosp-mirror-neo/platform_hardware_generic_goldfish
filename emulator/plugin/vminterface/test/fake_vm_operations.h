@@ -29,6 +29,7 @@ class FakeVmOperations : public VmOperations {
             return absl::FailedPreconditionError("Cannot reset VM in current state");
         }
         ++reset_count;
+        ClearLoadedSnapshot();
         SetRunState(EmuRunState::Running);
         return absl::OkStatus();
     }
@@ -82,27 +83,36 @@ class FakeVmOperations : public VmOperations {
         if (!save_status.ok()) {
             return save_status;
         }
+        const auto existing = entries.find(name);
+        const bool was_loaded = existing != entries.end() && existing->second.loaded;
         entries[name] = SnapshotEntry{
             .name = name,
             .timestamp = absl::FromUnixSeconds(1700000000),
+            .compatible = true,
+            .loaded = was_loaded,
         };
         return absl::OkStatus();
     }
 
     absl::Status LoadSnapshot(std::string id_or_name, bool /*and_resume*/) override {
+        if (!load_status.ok()) {
+            return load_status;
+        }
         if (on_load) {
             on_load(id_or_name);
         }
         if (fail_load) {
+            ClearLoadedSnapshot();
             return absl::InternalError("Failed to read snapshot from disk");
         }
-        if (!load_status.ok()) {
-            return load_status;
-        }
-        if (!entries.contains(id_or_name)) {
+        const auto it = entries.find(id_or_name);
+        if (it == entries.end()) {
             return absl::NotFoundError("Snapshot does not exist");
         }
-        last_loaded_snapshot = std::move(id_or_name);
+        if (!it->second.compatible) {
+            return absl::FailedPreconditionError("Snapshot is incompatible");
+        }
+        SetLoadedSnapshot(std::move(id_or_name));
         return absl::OkStatus();
     }
 
@@ -110,10 +120,16 @@ class FakeVmOperations : public VmOperations {
         if (entries.erase(id_or_name) == 0) {
             return absl::NotFoundError("Snapshot does not exist");
         }
+        if (last_loaded_snapshot == id_or_name) {
+            last_loaded_snapshot.clear();
+        }
         return absl::OkStatus();
     }
 
     absl::Status ListSnapshots(SnapshotEntrySink sink) override {
+        if (!list_status.ok()) {
+            return list_status;
+        }
         for (const auto& [id, entry] : entries) {
             sink(entry);
         }
@@ -124,15 +140,39 @@ class FakeVmOperations : public VmOperations {
 
     void EmitSnapshotProgress(const SnapshotProgress& next_progress) {
         progress = next_progress;
+        if (next_progress.operation == SnapshotOperationType::Load) {
+            if (next_progress.phase == SnapshotPhase::Preparing ||
+                next_progress.phase == SnapshotPhase::Failed) {
+                ClearLoadedSnapshot();
+            } else if (next_progress.phase == SnapshotPhase::Completed &&
+                       !next_progress.snapshot_id.empty()) {
+                SetLoadedSnapshot(next_progress.snapshot_id);
+            }
+        }
         SnapshotEvents().FireEvent(next_progress);
+    }
+
+    void ClearLoadedSnapshot() {
+        last_loaded_snapshot.clear();
+        for (auto& [id, entry] : entries) {
+            entry.loaded = false;
+        }
+    }
+
+    void SetLoadedSnapshot(std::string snapshot_id) {
+        for (auto& [id, entry] : entries) {
+            entry.loaded = entry.compatible && (id == snapshot_id);
+        }
+        last_loaded_snapshot = std::move(snapshot_id);
     }
 
     bool fail_save = false;
     bool fail_load = false;
-    // Returned by SaveSnapshot / LoadSnapshot when not OK, e.g. to mimic the
-    // FailedPrecondition of a session started with -no-snapshot.
+    // Returned by SaveSnapshot / LoadSnapshot / ListSnapshots when not OK, e.g.
+    // to mimic the FailedPrecondition of a session started with -no-snapshot.
     absl::Status save_status = absl::OkStatus();
     absl::Status load_status = absl::OkStatus();
+    absl::Status list_status = absl::OkStatus();
     int reset_count = 0;
     int shutdown_count = 0;
     EmuRunState run_state = EmuRunState::Running;

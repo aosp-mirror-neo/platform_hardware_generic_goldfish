@@ -183,6 +183,13 @@ bool load_snapshot(const char* name, const char* vmstate, bool has_devices, strL
     if (s_snapshot_op_hook) {
         s_snapshot_op_hook(name, s_snapshot_op_hook_opaque);
     }
+    /* Like QEMU, report the outcome to the progress handlers before returning. */
+    QemuSnapshotProgress progress = {
+        .operation = QEMU_SNAPSHOT_OP_LOAD,
+        .phase = mock_snapshot_op_ok ? QEMU_SNAPSHOT_PHASE_COMPLETED : QEMU_SNAPSHOT_PHASE_FAILED,
+        .name = name,
+    };
+    mock_fire_snapshot_progress(&progress);
     return mock_snapshot_op_ok;
 }
 
