@@ -1761,4 +1761,31 @@ TEST(FakeQemuTest, AdvanceIsRaceFreeWithTimersRegisteredOnOtherThreads) {
 #endif
 }
 
+TEST_P(EventLoopTest, ShutdownOnQemuMainThreadBeforeFirstDrainCompletes) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    fake_qemu_set_bql_tracking(true);
+    bql_lock();
+    const absl::Status status = loop->ShutdownAndWait(absl::Milliseconds(200));
+    bql_unlock();
+
+    EXPECT_THAT(status, absl_testing::IsOk());
+    fake_qemu_advance_ms(1);
+}
+
+TEST_P(EventLoopTest, ShutdownTimersStopsTimersBeforeReturning) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    int fired = 0;
+    auto timer = loop->ScheduleDelayed([&fired] { ++fired; }, absl::Milliseconds(1));
+    fake_qemu_advance_ms(1);
+
+    loop->ShutdownTimers();
+    fake_qemu_advance_ms(5);
+
+    EXPECT_EQ(fired, 0) << "a timer fired after ShutdownTimers() returned on the loop thread";
+}
+
 }  // namespace goldfish::async
