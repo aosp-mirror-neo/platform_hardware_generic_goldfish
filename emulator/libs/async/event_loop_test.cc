@@ -1090,17 +1090,26 @@ TEST_P(EventLoopTest, TimerCreatedAfterLoopShutdown) {
     }
     f.wait();
 
+    absl::ScopedMockLog log(absl::MockLogDefault::kIgnoreUnexpected);
+    EXPECT_CALL(log, Log(absl::LogSeverity::kError, ::testing::_, ::testing::_)).Times(0);
+    log.StartCapturingLogs();
+
     auto timer = loop->CreateTimer([]() { return true; });
 
     timer->Schedule(absl::Milliseconds(100), absl::Milliseconds(100));
 
     timer.reset();
+    log.StopCapturingLogs();
 
     loop = nullptr;
 }
 
 TEST_P(EventLoopTest, TimerCreatedDuringLoopShutdown) {
     runInThread();
+
+    absl::ScopedMockLog log(absl::MockLogDefault::kIgnoreUnexpected);
+    EXPECT_CALL(log, Log(absl::LogSeverity::kError, ::testing::_, ::testing::_)).Times(0);
+    log.StartCapturingLogs();
 
     auto f = loop->Shutdown();
     auto timer = loop->CreateTimer([]() { return true; });
@@ -1113,8 +1122,69 @@ TEST_P(EventLoopTest, TimerCreatedDuringLoopShutdown) {
     timer->Schedule(absl::Milliseconds(100), absl::Milliseconds(100));
 
     timer.reset();
+    log.StopCapturingLogs();
 
     loop = nullptr;
+}
+
+TEST_P(EventLoopTest, TimerReturningFalseCanBeRescheduled) {
+    runInThread();
+    std::atomic<int> count = 0;
+    absl::Notification stopped_first_batch;
+    absl::Notification stopped_second_batch;
+
+    auto timer = loop->ScheduleRepeating(
+            [&]() {
+                const int c = ++count;
+                if (c == 2) {
+                    stopped_first_batch.Notify();
+                    return false;
+                }
+                if (c == 4) {
+                    stopped_second_batch.Notify();
+                    return false;
+                }
+                return true;
+            },
+            absl::Milliseconds(10), absl::Milliseconds(10));
+
+    runUntil(stopped_first_batch);
+    if (mLoopType == "qemu") {
+        fake_qemu_advance_ms(50);
+    } else {
+        std::this_thread::sleep_for(50ms);
+    }
+    ASSERT_EQ(count.load(), 2);
+
+    // Re-arm the disarmed ScopedTimer and verify it fires again.
+    timer->Schedule(absl::Milliseconds(10), absl::Milliseconds(10));
+    runUntil(stopped_second_batch);
+    EXPECT_EQ(count.load(), 4);
+}
+
+TEST_P(EventLoopTest, ScheduleDelayedTimerCanBeRearmedAfterFiring) {
+    runInThread();
+    std::atomic<int> count = 0;
+    absl::Notification first_fire;
+    absl::Notification second_fire;
+
+    auto timer = loop->ScheduleDelayed(
+            [&]() {
+                const int c = ++count;
+                if (c == 1) {
+                    first_fire.Notify();
+                } else if (c == 2) {
+                    second_fire.Notify();
+                }
+            },
+            absl::Milliseconds(10));
+
+    runUntil(first_fire);
+    ASSERT_EQ(count.load(), 1);
+
+    timer->Schedule(absl::Milliseconds(10));
+    runUntil(second_fire);
+    EXPECT_EQ(count.load(), 2);
 }
 TEST_P(EventLoopTest, LibuvEventStateChanges) {
     if (mLoopType == "qemu") {

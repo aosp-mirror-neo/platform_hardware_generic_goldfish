@@ -26,6 +26,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <queue>
 #include <thread>
@@ -83,10 +84,16 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
         struct Private {};
 
       public:
+        enum class Ownership : uint8_t {
+            kCallerScoped,  // Returned via ScopedTimer; disarms on false and stays reschedulable.
+            kLoopManaged,   // Internal PostDelayed one-shot; self-cancels after firing.
+        };
+
         static std::shared_ptr<QemuTimer> Create(QemuEventLoopImpl* loop, RepeatingTask task,
-                                                 FlowId flow_id = 0, bool pin_for_caller = true) {
-            auto timer = std::make_shared<QemuTimer>(loop, std::move(task), flow_id, Private());
-            if (pin_for_caller) {
+                                                 FlowId flow_id, Ownership ownership) {
+            auto timer = std::make_shared<QemuTimer>(loop, std::move(task), flow_id, ownership,
+                                                     Private());
+            if (ownership == Ownership::kCallerScoped) {
                 timer->caller_pin_ = timer;
             }
             if (!loop->TryRegisterTimer(timer)) {
@@ -95,8 +102,12 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
             return timer;
         }
 
-        QemuTimer(QemuEventLoopImpl* loop, EventLoop::RepeatingTask task, FlowId flow_id, Private)
-                : event_loop_(loop), task_(std::move(task)), flow_id_(flow_id) {
+        QemuTimer(QemuEventLoopImpl* loop, EventLoop::RepeatingTask task, FlowId flow_id,
+                  Ownership ownership, Private)
+                : event_loop_(loop)
+                , task_(std::move(task))
+                , flow_id_(flow_id)
+                , ownership_(ownership) {
             DCHECK(event_loop_);
         }
 
@@ -130,8 +141,10 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
         }
 
         void Schedule(absl::Duration new_delay, absl::Duration new_interval) override {
+            // Because Timer::Cancel() is invoked solely by ~ScopedTimer(), a live
+            // ScopedTimer is only marked cancelled_ when the loop is shutting down
+            // or has finished, where EventLoop::Timer::Schedule() is a no-op.
             if (cancelled_.load()) {
-                LOG(ERROR) << "Can't schedule a timer after it has been cancelled";
                 return;
             }
             const uint64_t seq = ++schedule_seq_;
@@ -187,7 +200,9 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
             }
 
             if (!task_()) {
-                DoCancel();
+                if (ownership_ == Ownership::kLoopManaged) {
+                    DoCancel();
+                }
             } else if (interval_ms_ && !cancelled_.load() &&
                        active_schedule_seq_ == schedule_seq_.load()) {
                 // The Qemu Timer API doesn't natively support repeating timers so we have to kick
@@ -229,6 +244,7 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
         // Schedule() has superseded it.
         uint64_t active_schedule_seq_ = 0;
 
+        const Ownership ownership_;
         std::atomic<bool> cancelled_{false};
 
         friend QemuEventLoopImpl;
@@ -507,13 +523,14 @@ absl::Status QemuEventLoopImpl::PostDelayed(Task task, absl::Duration delay, Flo
                 task();
                 return false;
             },
-            flow_id, /*pin_for_caller=*/false);
+            flow_id, QemuTimer::Ownership::kLoopManaged);
     timer->Schedule(delay, absl::ZeroDuration());
     return absl::OkStatus();
 }
 
 EventLoop::ScopedTimer QemuEventLoopImpl::CreateTimer(RepeatingTask task) {
-    auto timer = QemuTimer::Create(this, std::move(task), /*flow_id=*/0, /*pin_for_caller=*/true);
+    auto timer = QemuTimer::Create(this, std::move(task), /*flow_id=*/0,
+                                   QemuTimer::Ownership::kCallerScoped);
     return ScopedTimer(timer.get());
 }
 
