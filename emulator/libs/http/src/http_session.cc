@@ -54,20 +54,12 @@ class HttpSession::ResponseWriterImpl : public HttpResponseWriter {
             return;
         }
         status_ = status;
-        for (const auto& [k, v] : headers) {
-            if (absl::EqualsIgnoreCase(k, headers::kTransferEncoding) &&
-                absl::EqualsIgnoreCase(v, "chunked")) {
-                is_chunked_ = true;
-            }
+        bool is_chunked = false;
+        std::string response = internal::FormatStreamingHeaders(headers, status, &is_chunked);
+        if (is_chunked) {
+            is_chunked_ = true;
         }
         if (auto session = GetSession()) {
-            std::string response;
-            absl::StrAppend(&response, protocol::kHttp11, protocol::kSpace, status,
-                            protocol::kSpace, HttpStatusToReason(status), protocol::kCrlf);
-            for (const auto& [k, v] : headers) {
-                absl::StrAppend(&response, k, protocol::kColonSpace, v, protocol::kCrlf);
-            }
-            absl::StrAppend(&response, protocol::kCrlf);
             session->PostOrSend(std::move(response));
         }
     }

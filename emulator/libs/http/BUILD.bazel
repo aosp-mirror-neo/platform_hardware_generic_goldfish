@@ -77,6 +77,8 @@ cc_library(
     visibility = ["//visibility:private"],
     deps = [
         ":http_messages",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
         "@llhttp",
     ],
 )

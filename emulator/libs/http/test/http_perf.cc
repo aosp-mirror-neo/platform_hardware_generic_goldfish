@@ -606,6 +606,93 @@ void BmFormatWireResponseHeadLargeBody(benchmark::State& state) {
 }
 BENCHMARK(BmFormatWireResponseHeadLargeBody);
 
+ABSL_ATTRIBUTE_NOINLINE std::string LegacyFormatStreamingHeaders(
+        const absl::flat_hash_map<std::string, std::string>& headers, int status,
+        bool* is_chunked = nullptr) {
+    bool chunked = false;
+    for (const auto& [k, v] : headers) {
+        if (absl::EqualsIgnoreCase(k, headers::kTransferEncoding) &&
+            absl::EqualsIgnoreCase(v, "chunked")) {
+            chunked = true;
+        }
+    }
+    if (is_chunked != nullptr) {
+        *is_chunked = chunked;
+    }
+    std::string response;
+    absl::StrAppend(&response, protocol::kHttp11, protocol::kSpace, status, protocol::kSpace,
+                    HttpStatusToReason(status), protocol::kCrlf);
+    for (const auto& [k, v] : headers) {
+        absl::StrAppend(&response, k, protocol::kColonSpace, v, protocol::kCrlf);
+    }
+    absl::StrAppend(&response, protocol::kCrlf);
+    return response;
+}
+
+absl::flat_hash_map<std::string, std::string> BuildChunkedStreamHeaders() {
+    return {
+        {std::string(headers::kContentType), std::string(mime::kApplicationOctetStream)},
+        {std::string(headers::kTransferEncoding), "chunked"},
+    };
+}
+
+absl::flat_hash_map<std::string, std::string> BuildGrpcWebStreamHeaders() {
+    return {
+        {std::string(headers::kContentType), std::string(mime::kApplicationGrpcWebProto)},
+        {std::string(headers::kAccessControlExposeHeaders),
+         "grpc-status, grpc-message, grpc-status-details-bin"},
+        {std::string(headers::kCacheControl), "no-cache, no-store, max-age=0, must-revalidate"},
+        {std::string(headers::kTransferEncoding), "chunked"},
+        {std::string(headers::kAccessControlAllowOrigin), "http://localhost:8080"},
+        {std::string(headers::kAccessControlAllowCredentials), std::string(protocol::kTrue)},
+        {std::string(headers::kVary), "Origin"},
+    };
+}
+
+void BmFormatStreamingHeadersChunkedBaseline(benchmark::State& state) {
+    const auto headers = BuildChunkedStreamHeaders();
+    for (auto _ : state) {
+        bool is_chunked = false;
+        std::string wire = LegacyFormatStreamingHeaders(headers, 200, &is_chunked);
+        benchmark::DoNotOptimize(wire);
+        benchmark::DoNotOptimize(is_chunked);
+    }
+}
+BENCHMARK(BmFormatStreamingHeadersChunkedBaseline);
+
+void BmFormatStreamingHeadersChunked(benchmark::State& state) {
+    const auto headers = BuildChunkedStreamHeaders();
+    for (auto _ : state) {
+        bool is_chunked = false;
+        std::string wire = internal::FormatStreamingHeaders(headers, 200, &is_chunked);
+        benchmark::DoNotOptimize(wire);
+        benchmark::DoNotOptimize(is_chunked);
+    }
+}
+BENCHMARK(BmFormatStreamingHeadersChunked);
+
+void BmFormatStreamingHeadersGrpcWebCorsBaseline(benchmark::State& state) {
+    const auto headers = BuildGrpcWebStreamHeaders();
+    for (auto _ : state) {
+        bool is_chunked = false;
+        std::string wire = LegacyFormatStreamingHeaders(headers, 200, &is_chunked);
+        benchmark::DoNotOptimize(wire);
+        benchmark::DoNotOptimize(is_chunked);
+    }
+}
+BENCHMARK(BmFormatStreamingHeadersGrpcWebCorsBaseline);
+
+void BmFormatStreamingHeadersGrpcWebCors(benchmark::State& state) {
+    const auto headers = BuildGrpcWebStreamHeaders();
+    for (auto _ : state) {
+        bool is_chunked = false;
+        std::string wire = internal::FormatStreamingHeaders(headers, 200, &is_chunked);
+        benchmark::DoNotOptimize(wire);
+        benchmark::DoNotOptimize(is_chunked);
+    }
+}
+BENCHMARK(BmFormatStreamingHeadersGrpcWebCors);
+
 }  // namespace
 }  // namespace goldfish::http
 

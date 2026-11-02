@@ -732,4 +732,29 @@ TEST_F(HttpSessionTest, DispatchesAllSupportedHttpMethods) {
     }
 }
 
+TEST_F(HttpSessionTest, FormatStreamingHeadersDetectsCaseInsensitiveChunked) {
+    const absl::flat_hash_map<std::string, std::string> chunked_headers = {
+        {std::string(headers::kContentType), std::string(mime::kApplicationGrpcWebProto)},
+        {"TrAnSfEr-EnCoDiNg", "ChUnKeD"},
+    };
+    bool is_chunked = false;
+    const std::string wire = internal::FormatStreamingHeaders(chunked_headers, 200, &is_chunked);
+    EXPECT_TRUE(is_chunked);
+    EXPECT_TRUE(absl::StartsWith(wire, "HTTP/1.1 200 OK\r\n"));
+    EXPECT_TRUE(absl::StrContains(wire, "content-type: application/grpc-web+proto\r\n"));
+    EXPECT_TRUE(absl::StrContains(wire, "TrAnSfEr-EnCoDiNg: ChUnKeD\r\n"));
+    EXPECT_TRUE(absl::EndsWith(wire, "\r\n\r\n"));
+
+    const absl::flat_hash_map<std::string, std::string> raw_headers = {
+        {std::string(headers::kContentType), std::string(mime::kTextPlain)},
+        {"X-Device-Name", "Pixel_9_Pro_エミュレータ"},
+    };
+    bool raw_chunked = true;
+    const std::string raw_wire = internal::FormatStreamingHeaders(raw_headers, 201, &raw_chunked);
+    EXPECT_FALSE(raw_chunked);
+    EXPECT_TRUE(absl::StartsWith(raw_wire, "HTTP/1.1 201 Created\r\n"));
+    EXPECT_TRUE(absl::StrContains(raw_wire, "X-Device-Name: Pixel_9_Pro_エミュレータ\r\n"));
+    EXPECT_TRUE(absl::EndsWith(raw_wire, "\r\n\r\n"));
+}
+
 }  // namespace goldfish::http
