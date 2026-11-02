@@ -86,6 +86,20 @@ TEST_F(FakeAvdUniverseTest, ShutdownIsIdempotentAndRejectsLaterEvents) {
                 testing::Optional(StatusIs(absl::StatusCode::kUnavailable)));
 }
 
+TEST_F(FakeAvdUniverseTest, OnPreGrpcShutdownCompletesPendingInputUnavailable) {
+    const InputSessionId session = dispatcher_.OpenSession({});
+    std::optional<absl::Status> result;
+    // Stays pending: the input loop runs only when the test runs it.
+    dispatcher_.DispatchText(
+            session, "pending 测试_🚀_é",
+            [&result](IInputDispatcher::DispatchResult done) { result = std::move(done.status); });
+    ASSERT_FALSE(result.has_value());
+
+    universe_.OnPreGrpcShutdown();
+
+    EXPECT_THAT(result, testing::Optional(StatusIs(absl::StatusCode::kUnavailable)));
+}
+
 TEST(FakeAvdUniverseLifetimeTest, DispatcherHeldPastTheUniverseIsShutDown) {
     std::shared_ptr<IInputDispatcher> dispatcher;
     InputSessionId session = 0;

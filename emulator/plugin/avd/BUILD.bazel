@@ -80,6 +80,7 @@ cc_library(
         "//emulator/plugin/hal/unix_pipe",
         "//emulator/plugin/hal/vehicle",
         "//emulator/plugin/system:qemu_virtual_clock",
+        "//emulator/plugin/vminterface:vm_lock",
         "//emulator/plugin/vminterface:vm_ops",
         "//emulator/tools:aemu_version",
         "@abseil-cpp//absl/container:flat_hash_map",

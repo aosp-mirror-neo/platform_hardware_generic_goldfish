@@ -67,6 +67,7 @@ using ::goldfish::snapshot::FileSnapshotStore;
 // Arbitrary snapshot version for the store under test.
 constexpr int kSnapshotVersion = ::goldfish::snapshot::MakeSnapshotVersion(5);
 using ::testing::AllOf;
+using ::testing::AnyOf;
 using ::testing::ElementsAre;
 using ::testing::HasSubstr;
 using ::testing::IsEmpty;
@@ -1430,6 +1431,23 @@ TEST_F(QemuVmOperationsTest, DestructorUnregistersWatchdogOfSnapshotStillInFligh
     vm_ops_.reset();
 
     EXPECT_FALSE(hang_detector_.HasPredicate(kWatchdogName));
+}
+
+TEST_F(QemuVmOperationsTest, ShutdownIsIdempotentWhenQemuLoopHasAlreadyShutDown) {
+    mock_runstate_set(RUN_STATE_RUNNING);
+    ASSERT_OK(qemu_loop_->ShutdownAndWait());
+
+    // Once the QEMU loop has shut down during emulator exit, a concurrent Shutdown()
+    // RPC is idempotent and returns OK immediately, while other mutations fail fast:
+    // with UNAVAILABLE while the loop is still shutting down, and FAILED_PRECONDITION
+    // once it has finished. ShutdownAndWait() may return before the loop thread
+    // reports kFinished, so either code is possible here.
+    EXPECT_OK(vm_ops_->Shutdown());
+    EXPECT_EQ(mock_shutdown_cause_get(), SHUTDOWN_CAUSE_NONE);
+    const auto fails_fast =
+            StatusIs(AnyOf(absl::StatusCode::kUnavailable, absl::StatusCode::kFailedPrecondition));
+    EXPECT_THAT(vm_ops_->Pause(), fails_fast);
+    EXPECT_THAT(vm_ops_->Reset(), fails_fast);
 }
 
 TEST_F(QemuVmOperationsDeathTest, SnapshotProgressOnTheLoopThreadDies) {

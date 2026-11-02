@@ -309,7 +309,7 @@ class QemuVmOperations : public VmOperations {
     }
 
     absl::Status Shutdown() override {
-        return RunOnQemuLoop([this] {
+        const absl::Status status = RunOnQemuLoop([this] {
             if (GetRunState() == EmuRunState::Shutdown) {
                 return absl::OkStatus();
             }
@@ -317,6 +317,18 @@ class QemuVmOperations : public VmOperations {
             qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_UI);
             return absl::OkStatus();
         });
+        if (!status.ok()) {
+            switch (qemu_loop_->GetState()) {
+            case ::goldfish::async::LooperStatusEvent::State::kShuttingDown:
+            case ::goldfish::async::LooperStatusEvent::State::kFinished:
+                return absl::OkStatus();
+            case ::goldfish::async::LooperStatusEvent::State::kNotStarted:
+            case ::goldfish::async::LooperStatusEvent::State::kRunning:
+            case ::goldfish::async::LooperStatusEvent::State::kPaused:
+                break;
+            }
+        }
+        return status;
     }
 
     absl::Status Pause() override {

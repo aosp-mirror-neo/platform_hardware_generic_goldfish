@@ -46,7 +46,8 @@ environment, configures hardware, and starts all HAL services. **Location:**
   `GF_SHUTDOWN_FUNC` shuts down the global event loop after `qemu_cleanup()`.
 - **Input dispatcher:** `GetInputDispatcher()` returns the dispatcher built in `realize`, before
   QEMU has created any console. `avdend` (`UniverseBuildComplete()`) gives it the keyboard on
-  console 0, after the display devices exist. The main-loop exit hook shuts it down before it
+  console 0, after the display devices exist. The main-loop exit hook calls
+  `OnPreGrpcShutdown()`, which shuts down the `QemuEventLoop` and then the dispatcher, before it
   destroys the gRPC server. It is shared: WebRTC channels, which a static vector keeps alive past
   `qemu_cleanup()`, hold it, so the universe's destructor shuts it down again before destroying the
   loop, touch devices and keyboard it uses.

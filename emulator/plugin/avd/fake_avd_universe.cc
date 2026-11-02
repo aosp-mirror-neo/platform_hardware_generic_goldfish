@@ -101,6 +101,10 @@ std::shared_ptr<grpc::v2::IInputDispatcher> FakeAvdUniverse::GetInputDispatcher(
     return input_dispatcher_;
 }
 
+void FakeAvdUniverse::OnPreGrpcShutdown() {
+    input_dispatcher_->Shutdown();
+}
+
 absl::Status FakeAvdUniverse::OnSave(archive::IWriter&) const {
     return absl::UnimplementedError(__func__);
 }

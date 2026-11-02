@@ -59,6 +59,7 @@ struct AvdExtendedUniverse : public AvdUniverse {
 
     void WaitUntilEventLoopsIdle();
     void ShutdownQemuLoop();
+    void OnPreGrpcShutdown() override;
     async::EventLoop& GetQemuEventLoop() override;
     metrics::MetricsReporter& GetMetricsReporter() override;
     android::goldfish::VmOperations& GetVmOperations() override;
