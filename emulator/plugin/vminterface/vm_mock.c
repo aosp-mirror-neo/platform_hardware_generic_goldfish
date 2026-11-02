@@ -200,10 +200,24 @@ bool delete_snapshot(const char* name, bool has_devices, strList* devices, Error
 
 static const QEMUSnapshotInfo* s_mock_snapshot_entries = NULL;
 static int s_mock_snapshot_count = -1;
+static bool s_mock_vmstate_read_only = false;
 
 void mock_snapshot_list_set(const QEMUSnapshotInfo* entries, int count) {
     s_mock_snapshot_entries = entries;
     s_mock_snapshot_count = count;
+}
+
+void mock_vmstate_read_only_set(bool read_only) {
+    s_mock_vmstate_read_only = read_only;
+}
+
+BlockDriverState* bdrv_find_read_only_vmstate_bs(const char* vmstate_bs) {
+    (void)vmstate_bs;
+    if (!s_mock_vmstate_read_only) {
+        return NULL;
+    }
+    return (s_mock_snapshot_entries != NULL || s_mock_snapshot_count >= 0) ? (BlockDriverState*)0x1
+                                                                           : NULL;
 }
 
 BlockDriverState* bdrv_all_find_vmstate_bs(const char* vmstate_bs, bool has_devices,
@@ -212,6 +226,9 @@ BlockDriverState* bdrv_all_find_vmstate_bs(const char* vmstate_bs, bool has_devi
     (void)has_devices;
     (void)devices;
     *errp = NULL;
+    if (s_mock_vmstate_read_only) {
+        return NULL;
+    }
     return (s_mock_snapshot_entries != NULL || s_mock_snapshot_count >= 0) ? (BlockDriverState*)0x1
                                                                            : NULL;
 }

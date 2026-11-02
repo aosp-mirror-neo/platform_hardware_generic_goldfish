@@ -590,8 +590,11 @@ class QemuVmOperations : public VmOperations {
         RETURN_IF_ERROR(RunOnQemuLoop([this, &entries] {
             AssertOnQemuLoop();
             ::Error* errp = nullptr;
-            ::BlockDriverState* bs = ::bdrv_all_find_vmstate_bs(
-                    /*vmstate_bs=*/nullptr, /*has_devices=*/false, /*devices=*/nullptr, &errp);
+            ::BlockDriverState* bs = ::bdrv_find_read_only_vmstate_bs(/*vmstate_bs=*/nullptr);
+            if (!bs) {
+                bs = ::bdrv_all_find_vmstate_bs(
+                        /*vmstate_bs=*/nullptr, /*has_devices=*/false, /*devices=*/nullptr, &errp);
+            }
             if (!bs) {
                 return ToStatus(
                         absl::StatusCode::kFailedPrecondition,

@@ -129,6 +129,7 @@ class QemuVmOperationsTest : public ::testing::Test {
         mock_snapshot_op_hook_set(/*hook=*/nullptr, /*opaque=*/nullptr);
         snapshot_op_hook_ = nullptr;
         mock_snapshot_list_set(/*entries=*/nullptr, /*count=*/-1);
+        mock_vmstate_read_only_set(false);
         test_vm_lock_ = TestVmLock::GetInstance();
         test_vm_lock_->lock_count_ = 0;
         test_vm_lock_->unlock_count_ = 0;
@@ -190,6 +191,7 @@ class QemuVmOperationsTest : public ::testing::Test {
         mock_snapshot_op_hook_set(/*hook=*/nullptr, /*opaque=*/nullptr);
         snapshot_op_hook_ = nullptr;
         mock_snapshot_list_set(/*entries=*/nullptr, /*count=*/-1);
+        mock_vmstate_read_only_set(false);
     }
 
     absl::SimulatedClock clock_;
@@ -607,6 +609,17 @@ TEST_F(QemuVmOperationsTest, ListSnapshotsExecutesOnQemuLoopAndPropagatesErrors)
     // Valid snapshot list.
     mock_snapshot_list_set(/*entries=*/qsi.data(), /*count=*/static_cast<int>(qsi.size()));
     std::vector<VmOperations::SnapshotEntry> entries;
+    tasks = qemu_loop_->WaitUntilIdle();
+    ASSERT_OK(vm_ops_->ListSnapshots(
+            [&](VmOperations::SnapshotEntry entry) { entries.push_back(std::move(entry)); }));
+    EXPECT_EQ(qemu_loop_->WaitUntilIdle(), tasks + 1);
+    EXPECT_EQ(test_vm_lock_->lock_count_, 0);
+    ASSERT_EQ(entries.size(), 1U);
+    EXPECT_EQ(entries[0].name, "default_boot");
+
+    // Read-only VM state node -> found via bdrv_find_read_only_vmstate_bs.
+    mock_vmstate_read_only_set(true);
+    entries.clear();
     tasks = qemu_loop_->WaitUntilIdle();
     ASSERT_OK(vm_ops_->ListSnapshots(
             [&](VmOperations::SnapshotEntry entry) { entries.push_back(std::move(entry)); }));
