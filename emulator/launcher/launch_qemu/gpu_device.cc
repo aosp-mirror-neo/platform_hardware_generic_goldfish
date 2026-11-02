@@ -618,8 +618,9 @@ std::vector<std::string> GpuDevice::getQemuParameters(const EmulatorConfig& emul
     std::string systemui_renderer =
             opts.systemui_renderer ? opts.systemui_renderer : "skiavkthreaded";
 
-    // Enable virtual queue with skiavk variants
-    if (systemui_renderer.starts_with("skiavk") && ff.IsEnabled(S::VULKAN_VIRTUAL_QUEUE)) {
+    // Enable virtual queue for non-skiagl renderers, or when explicitly requested for skiagl.
+    if (ff.IsEnabled(S::VULKAN_VIRTUAL_QUEUE) &&
+        (!systemui_renderer.starts_with("skiagl") || ff.IsOverridden(S::VULKAN_VIRTUAL_QUEUE))) {
         renderer_features.push_back("VulkanVirtualQueue:enabled");
     }
 

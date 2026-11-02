@@ -893,6 +893,37 @@ TEST(GpuDeviceTest, RendererFeaturesRespectFeatureFlags) {
                               HasSubstr("VulkanRobustness:enabled"),
                               HasSubstr("VulkanProtectedMemoryEmulation:enabled"))));
     }
+
+    // With skiagl, VulkanVirtualQueue is disabled by default unless explicitly overridden on;
+    // with graphite, VulkanVirtualQueue is enabled with default feature flags.
+    {
+        char skiagl[] = "skiagl";
+        FakeEmulator skiagl_off_emu(AndroidOptions{.systemui_renderer = skiagl});
+        EXPECT_CALL(skiagl_off_emu.mock_avd(), Hw()).WillRepeatedly(ReturnRef(hw));
+        EXPECT_CALL(skiagl_off_emu.mock_avd(), GetContentPath())
+                .WillRepeatedly(Return(avd_content));
+
+        SnapshotDevice snapshot_dev;
+        EXPECT_OK(snapshot_dev.initialize(skiagl_off_emu.config()));
+        GpuDevice dev("gpu0", snapshot_dev);
+        EXPECT_OK(dev.initialize(skiagl_off_emu.config()));
+        EXPECT_THAT(dev.getQemuParameters(skiagl_off_emu.config()),
+                    ElementsAre(Eq("-device"), Not(HasSubstr("VulkanVirtualQueue:enabled"))));
+
+        FakeEmulator skiagl_on_emu(AndroidOptions{.systemui_renderer = skiagl});
+        skiagl_on_emu.feature_flags().SetEnabledOverride(S::VULKAN_VIRTUAL_QUEUE, true);
+        EXPECT_CALL(skiagl_on_emu.mock_avd(), Hw()).WillRepeatedly(ReturnRef(hw));
+        EXPECT_CALL(skiagl_on_emu.mock_avd(), GetContentPath()).WillRepeatedly(Return(avd_content));
+        EXPECT_THAT(dev.getQemuParameters(skiagl_on_emu.config()),
+                    ElementsAre(Eq("-device"), HasSubstr("VulkanVirtualQueue:enabled")));
+
+        char graphite[] = "graphite";
+        FakeEmulator graphite_emu(AndroidOptions{.systemui_renderer = graphite});
+        EXPECT_CALL(graphite_emu.mock_avd(), Hw()).WillRepeatedly(ReturnRef(hw));
+        EXPECT_CALL(graphite_emu.mock_avd(), GetContentPath()).WillRepeatedly(Return(avd_content));
+        EXPECT_THAT(dev.getQemuParameters(graphite_emu.config()),
+                    ElementsAre(Eq("-device"), HasSubstr("VulkanVirtualQueue:enabled")));
+    }
 }
 
 TEST(GpuDeviceTest, DisabledBelowApi37) {

@@ -71,13 +71,16 @@ TEST(BootProperties, Basic) {
             .Times(1)
             .WillRepeatedly(testing::Return(Avd::CpuArchitecture::kX86));
 
-    EXPECT_THAT(getBootProperties(emu.config(), "lavapipe"),
-                testing::IsSupersetOf(std::vector{
-                    std::pair{"androidboot.hardware", "ranchu"},
-                    std::pair{"androidboot.logcat", "*:V"},
-                    std::pair{"androidboot.debug.hwui.renderer", "skiavk"},
-                    std::pair{"androidboot.debug.renderengine.backend", "skiavkthreaded"},
-                }));
+    const auto props = getBootProperties(emu.config(), "lavapipe");
+    EXPECT_THAT(props, testing::IsSupersetOf(std::vector{
+                           std::pair{"androidboot.hardware", "ranchu"},
+                           std::pair{"androidboot.logcat", "*:V"},
+                           std::pair{"androidboot.debug.hwui.renderer", "skiavk"},
+                           std::pair{"androidboot.debug.renderengine.backend", "skiavkthreaded"},
+                       }));
+    EXPECT_THAT(props,
+                testing::Not(testing::Contains(testing::Pair(
+                        "androidboot.surface_flinger.renderengine_graphite_vulkan", testing::_))));
 }
 
 TEST(BootProperties, NoBootAnim) {
@@ -599,6 +602,48 @@ TEST(BootProperties, LegacyGraphicsPropertiesBelowApi37) {
     EXPECT_THAT(
             props,
             testing::Not(testing::Contains(testing::Pair("androidboot.hardwareegl", testing::_))));
+}
+
+TEST(BootProperties, SystemUiRendererGraphiteOnApi37Plus) {
+    base::TestSystem sys("");
+    char renderer[] = "graphite";
+    AndroidOptions opts{.systemui_renderer = renderer};
+    FakeEmulator emu(std::move(opts));
+
+    auto hw = HardwareConfig();
+    EXPECT_CALL(emu.mock_avd(), Hw()).WillRepeatedly(testing::ReturnRef(hw));
+    EXPECT_CALL(emu.mock_avd(), Name()).WillRepeatedly(testing::Return("mock_avd"));
+    EXPECT_CALL(emu.mock_avd(), Arch()).WillRepeatedly(testing::Return(Avd::CpuArchitecture::kX86));
+
+    const auto props = getBootProperties(emu.config(), "lavapipe");
+    EXPECT_THAT(props,
+                testing::IsSupersetOf(std::vector{
+                    std::pair{"androidboot.debug.hwui.renderer", "skiavk"},
+                    std::pair{"androidboot.debug.renderengine.backend", "skiavkthreaded"},
+                    std::pair{"androidboot.surface_flinger.renderengine_graphite_vulkan", "true"},
+                }));
+}
+
+TEST(BootProperties, SystemUiRendererGraphiteBelowApi37UsesPreviousDefaults) {
+    base::TestSystem sys("");
+    char renderer[] = "graphite";
+    AndroidOptions opts{.systemui_renderer = renderer};
+    FakeEmulator emu(std::move(opts));
+
+    auto hw = HardwareConfig();
+    EXPECT_CALL(emu.mock_avd(), Hw()).WillRepeatedly(testing::ReturnRef(hw));
+    EXPECT_CALL(emu.mock_avd(), Name()).WillRepeatedly(testing::Return("mock_avd"));
+    EXPECT_CALL(emu.mock_avd(), ApiLevel()).WillRepeatedly(testing::Return(36));
+    EXPECT_CALL(emu.mock_avd(), Arch()).WillRepeatedly(testing::Return(Avd::CpuArchitecture::kX86));
+
+    const auto props = getBootProperties(emu.config(), "lavapipe");
+    EXPECT_THAT(props, testing::IsSupersetOf(std::vector{
+                           std::pair{"androidboot.debug.hwui.renderer", "skiagl"},
+                           std::pair{"androidboot.debug.renderengine.backend", "skiaglthreaded"},
+                       }));
+    EXPECT_THAT(props,
+                testing::Not(testing::Contains(testing::Pair(
+                        "androidboot.surface_flinger.renderengine_graphite_vulkan", testing::_))));
 }
 
 TEST(BootPropertiesDeathTest, FailsBelowApi31) {
