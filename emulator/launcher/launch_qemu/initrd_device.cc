@@ -101,6 +101,8 @@ std::vector<std::pair<std::string, std::string>> getUserspaceBootProperties(
     std::string qemuOpenglesVersionProp = "androidboot.opengles.version";
     std::string qemuUirendererProp = "androidboot.debug.hwui.renderer";
     std::string qemuRenderengineProp = "androidboot.debug.renderengine.backend";
+    std::string qemuRenderengineGraphiteProp =
+            "androidboot.surface_flinger.renderengine_graphite_vulkan";
     std::string dalvikVmHeapsizeProp = "androidboot.dalvik.vm.heapsize";
     std::string qemuLegacyFakeCameraProp = "androidboot.qemu.legacy_fake_camera";
     std::string qemuCameraProtocolVerProp = "androidboot.qemu.camera_protocol_ver";
@@ -246,14 +248,30 @@ std::vector<std::pair<std::string, std::string>> getUserspaceBootProperties(
     // GLESDynamicVersion = on (i.e., is a reasonably good driver)
     params.push_back({qemuOpenglesVersionProp, absl::StrFormat("%d", bootPropOpenglesVersion)});
 
-    std::string systemui_renderer = opts.systemui_renderer
-                                            ? opts.systemui_renderer
-                                            : (is_legacy ? "skiaglthreaded" : "skiavkthreaded");
+    const std::string default_systemui_renderer = is_legacy ? "skiaglthreaded" : "skiavkthreaded";
+    std::string systemui_renderer =
+            opts.systemui_renderer ? opts.systemui_renderer : default_systemui_renderer;
+    bool enable_graphite = false;
+    if (systemui_renderer == "graphite") {
+        if (apiLevel >= 37) {
+            systemui_renderer = "skiavkthreaded";
+            enable_graphite = true;
+        } else {
+            LOG(WARNING) << absl::StrFormat(
+                    "Ignoring -systemui-renderer graphite: Graphite RenderEngine requires API "
+                    "level 37 or higher, got %d. Falling back to %s.",
+                    apiLevel, default_systemui_renderer);
+            systemui_renderer = default_systemui_renderer;
+        }
+    }
 
     // HWUI only recognizes "skiagl" and "skiavk"; "threaded" variants are for RenderEngine.
     params.push_back(
             {qemuUirendererProp, std::string(absl::StripSuffix(systemui_renderer, "threaded"))});
     params.push_back({qemuRenderengineProp, systemui_renderer});
+    if (enable_graphite) {
+        params.push_back({qemuRenderengineGraphiteProp, "true"});
+    }
 
     params.push_back({androidbootLogcatProp,
                       opts.logcat ? absl::StrReplaceAll(opts.logcat, {{" ", ","}}) : "*:V"});

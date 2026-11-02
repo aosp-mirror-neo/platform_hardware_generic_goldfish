@@ -344,7 +344,8 @@ OPT_FLAG(no_guest_angle, "Disable ANGLE as the guest system GLES driver.")
 OPT_FLAG(no_vulkan_composition, "Disable Vulkan host compositon.")
 
 OPT_PARAM(systemui_renderer, "<option list>",
-          "Set guest side renderer backend. Available options: skiagl, skiavk, skiavkthreaded")
+          "Set guest side renderer backend. Available options: skiagl, skiavk, skiavkthreaded, "
+          "graphite")
 
 OPT_FLAG(not_in_bazel, "Run as if not in bazel build environment.")
 

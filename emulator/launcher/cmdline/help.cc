@@ -1440,7 +1440,7 @@ static void help_no_vulkan_composition(stralloc_t* out) {
 
 static void help_systemui_renderer(stralloc_t* out) {
     PRINTF(" Set guest side renderer backend. Available options: skiagl, skiavk, "
-           "skiavkthreaded.\n");
+           "skiavkthreaded, graphite.\n");
 }
 
 static void help_not_in_bazel(stralloc_t* out) {
