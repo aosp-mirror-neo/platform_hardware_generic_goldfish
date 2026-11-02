@@ -1,0 +1,28 @@
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+
+# This is needed when compiling cc_proto_library on Windows.
+# Unfortunately cxxopts = ["-Wno-invalid-offsetof"] can't be used on cc_proto_library
+# and this is better than disabling that warning in the toolchain.
+package(
+    default_visibility = ["//emulator/launcher:__subpackages__"],
+    features = ["-warnings_as_errors"],
+)
+
+proto_library(
+    name = "emulator_features_proto",
+    srcs = ["emulator_features.proto"],
+    strip_import_prefix = "",
+)
+
+proto_library(
+    name = "emulator_feature_patterns_proto",
+    srcs = ["emulator_feature_patterns.proto"],
+    strip_import_prefix = "",
+    deps = [":emulator_features_proto"],
+)
+
+cc_proto_library(
+    name = "emulator_feature_patterns_cc_proto",
+    deps = [":emulator_feature_patterns_proto"],
+)

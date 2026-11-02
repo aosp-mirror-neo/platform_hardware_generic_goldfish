@@ -4,6 +4,7 @@ cc_library(
     name = "x86_cpuid",
     srcs = ["x86_cpuid.cc"],
     hdrs = ["x86_cpuid.h"],
+    tags = ["no-tidy"],
     deps = ["//emulator/libs/system"],
 )
 
@@ -31,6 +32,7 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+    tags = ["no-tidy"],
     visibility = ["//visibility:public"],
     deps = [":x86_cpuid"] + select({
         "@platforms//os:windows": [
@@ -41,12 +43,25 @@ cc_library(
 )
 
 cc_library(
+    name = "version",
+    srcs = ["version.cc"],
+    hdrs = ["include/android/cpu/version.h"],
+    includes = ["include"],
+    tags = ["no-tidy"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
     name = "cpu",
     srcs = [
         "apple_cpu_accelerator.h",
         "cpu_accelerator.cc",
         "cpu_accelerator_internal.h",
-        "version.cc",
         "x86_cpuid.cc",
         "x86_cpuid.h",
     ] + select({
@@ -66,8 +81,10 @@ cc_library(
             "//conditions:default": [],
         }),
     includes = ["include"],
+    tags = ["no-tidy"],
     visibility = ["//visibility:public"],
     deps = [
+        ":version",
         ":x86_cpuid",
         "//emulator/libs/base",
         "//emulator/libs/file",

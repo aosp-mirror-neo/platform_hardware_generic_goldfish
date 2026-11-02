@@ -25,16 +25,22 @@
 #include <utility>
 #include <vector>
 
+#include "absl/base/no_destructor.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
+#include "absl/strings/str_replace.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/strip.h"
+#include "google/protobuf/text_format.h"
 
+#include "android/cpu/version.h"
+#include "emulator_feature_patterns.pb.h"
 #include "goldfish/file/file.h"
 
 namespace android::goldfish {
@@ -237,31 +243,32 @@ std::string FeatureToString(EmulatorFeatureFlag feature) {
 }
 
 const absl::flat_hash_map<std::string, EmulatorFeatureFlag>& AllFeaturesByLowerName() {
-    static const auto* const kFeatures = [] {
-        auto* f = new absl::flat_hash_map<std::string, EmulatorFeatureFlag>();
-        for (int i = android_studio::EmulatorFeatureFlagState::EmulatorFeatureFlag_MIN;
-             i <= android_studio::EmulatorFeatureFlagState::EmulatorFeatureFlag_MAX; ++i) {
-            if (!android_studio::EmulatorFeatureFlagState::EmulatorFeatureFlag_IsValid(i)) {
-                continue;
-            }
-            const auto feature = static_cast<EmulatorFeatureFlag>(i);
-            if (feature ==
-                android_studio::EmulatorFeatureFlagState::EMULATOR_FEATURE_FLAG_UNSPECIFIED) {
-                continue;
-            }
-            (*f)[FeatureToString(feature)] = feature;
-            (*f)[NormalizeFeatureName(
-                    android_studio::EmulatorFeatureFlagState::EmulatorFeatureFlag_Name(feature))] =
-                    feature;
-        }
-        return f;
-    }();
+    static const absl::NoDestructor<absl::flat_hash_map<std::string, EmulatorFeatureFlag>>
+            kFeatures([] {
+                absl::flat_hash_map<std::string, EmulatorFeatureFlag> f;
+                for (int i = android_studio::EmulatorFeatureFlagState::EmulatorFeatureFlag_MIN;
+                     i <= android_studio::EmulatorFeatureFlagState::EmulatorFeatureFlag_MAX; ++i) {
+                    if (!android_studio::EmulatorFeatureFlagState::EmulatorFeatureFlag_IsValid(i)) {
+                        continue;
+                    }
+                    const auto feature = static_cast<EmulatorFeatureFlag>(i);
+                    if (feature == android_studio::EmulatorFeatureFlagState::
+                                           EMULATOR_FEATURE_FLAG_UNSPECIFIED) {
+                        continue;
+                    }
+                    f[FeatureToString(feature)] = feature;
+                    f[NormalizeFeatureName(
+                            android_studio::EmulatorFeatureFlagState::EmulatorFeatureFlag_Name(
+                                    feature))] = feature;
+                }
+                return f;
+            }());
     return *kFeatures;
 }
 
 const std::vector<EmulatorFeatureFlag>& ActiveFeatures() {
-    static const auto* const kActive = [] {
-        auto* v = new std::vector<EmulatorFeatureFlag>();
+    static const absl::NoDestructor<std::vector<EmulatorFeatureFlag>> kActive([] {
+        std::vector<EmulatorFeatureFlag> v;
         for (int i = android_studio::EmulatorFeatureFlagState::EmulatorFeatureFlag_MIN;
              i <= android_studio::EmulatorFeatureFlagState::EmulatorFeatureFlag_MAX; ++i) {
             if (!android_studio::EmulatorFeatureFlagState::EmulatorFeatureFlag_IsValid(i)) {
@@ -269,11 +276,11 @@ const std::vector<EmulatorFeatureFlag>& ActiveFeatures() {
             }
             const auto feature = static_cast<EmulatorFeatureFlag>(i);
             if (!IsIgnoredLegacy(feature)) {
-                v->push_back(feature);
+                v.push_back(feature);
             }
         }
         return v;
-    }();
+    }());
     return *kActive;
 }
 
@@ -296,9 +303,194 @@ FeatureStatus StringToFeatureStatus(std::string_view status_str) {
 }
 
 void SortFeatures(std::vector<EmulatorFeatureFlag>& features) {
-    std::sort(features.begin(), features.end(), [](EmulatorFeatureFlag a, EmulatorFeatureFlag b) {
-        return static_cast<int>(a) < static_cast<int>(b);
-    });
+    std::ranges::sort(features, {}, [](EmulatorFeatureFlag f) { return static_cast<int>(f); });
+}
+
+bool MatchHexIdOrExact(std::string_view host_val, std::string_view pattern_val) {
+    if (host_val == pattern_val) {
+        return true;
+    }
+    if (host_val.empty() || pattern_val.empty()) {
+        return false;
+    }
+    auto strip_hex_prefix = [](std::string_view s) {
+        if (absl::StartsWithIgnoreCase(s, "0x")) {
+            s.remove_prefix(2);
+        }
+        return s;
+    };
+    const std::string_view stripped_host = strip_hex_prefix(host_val);
+    if (absl::EqualsIgnoreCase(stripped_host, strip_hex_prefix(pattern_val))) {
+        return true;
+    }
+    return absl::StrContainsIgnoreCase(pattern_val, absl::StrCat("(0x", stripped_host, ")"));
+}
+
+std::string NormalizeGpuString(std::string_view s) {
+    const std::string lower = absl::AsciiStrToLower(s);
+    std::string stripped = absl::StrReplaceAll(
+            lower, {{"(r)", ""}, {"(tm)", ""}, {"\xc2\xae", ""}, {"\xe2\x84\xa2", ""}});
+    absl::RemoveExtraAsciiWhitespace(&stripped);
+    return stripped;
+}
+
+bool MatchGpuString(std::string_view host_val, std::string_view pattern_val) {
+    if (pattern_val.empty()) {
+        return host_val.empty();
+    }
+    if (host_val.empty()) {
+        return false;
+    }
+    const std::string norm_host = NormalizeGpuString(host_val);
+    const std::string norm_pattern = NormalizeGpuString(pattern_val);
+    if (norm_pattern.empty()) {
+        return absl::StrContainsIgnoreCase(host_val, pattern_val);
+    }
+    return absl::StrContains(norm_host, norm_pattern);
+}
+
+template <unsigned int kDefaultVal>
+android::base::Version VersionFromProto(const emulator_features::EmulatorVersion& ver) {
+    return android::base::Version(
+            ver.has_major() ? ver.major() : kDefaultVal,
+            (ver.has_major() && ver.has_minor()) ? ver.minor() : kDefaultVal,
+            (ver.has_major() && ver.has_minor() && ver.has_patch()) ? ver.patch() : kDefaultVal,
+            kDefaultVal);
+}
+
+bool FeatureActionAppliesToEmulatorVersion(const emulator_features::FeatureFlagAction& action,
+                                           const android::base::Version& current_version) {
+    // If invalid version, all min-version constrained features apply and
+    // all max-version constrained features do not apply.
+    if (!current_version.isValid()) {
+        return !action.has_max_version();
+    }
+    if (action.has_min_version() && current_version < VersionFromProto<0>(action.min_version())) {
+        return false;
+    }
+    if (action.has_max_version() &&
+        current_version > VersionFromProto<android::base::Version::kNone>(action.max_version())) {
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+std::optional<emulator_features::EmulatorFeaturePatterns> ParseFeaturePatternsFile(
+        const std::filesystem::path& filepath) {
+    const auto content = android::base::file::read_whole_file(filepath, /*binary=*/true);
+    if (!content.ok()) {
+        return std::nullopt;
+    }
+
+    emulator_features::EmulatorFeaturePatterns patterns;
+    if (patterns.ParseFromString(*content) && patterns.pattern_size() > 0) {
+        return patterns;
+    }
+    patterns.Clear();
+
+    if (google::protobuf::TextFormat::ParseFromString(*content, &patterns) &&
+        patterns.pattern_size() > 0) {
+        return patterns;
+    }
+    return std::nullopt;
+}
+
+namespace {
+
+std::optional<emulator_features::EmulatorFeaturePatterns> LoadPatternsWithFallback(
+        const std::filesystem::path& cached_path, const std::filesystem::path& default_path) {
+    if (android::base::file::is_file(cached_path)) {
+        if (auto patterns = ParseFeaturePatternsFile(cached_path)) {
+            VLOG(1) << "Loaded cached feature patterns from " << cached_path.string();
+            return patterns;
+        }
+        VLOG(1) << "Failed to parse cached feature patterns from " << cached_path.string()
+                << "; falling back to default patterns.";
+    }
+    if (android::base::file::is_file(default_path)) {
+        if (auto patterns = ParseFeaturePatternsFile(default_path)) {
+            VLOG(1) << "Loaded default feature patterns from " << default_path.string();
+            return patterns;
+        }
+        LOG(WARNING) << "Failed to parse default feature patterns from " << default_path.string();
+    }
+    return std::nullopt;
+}
+
+bool MatchesHostInfo(const HostInfo& host, const emulator_features::EmulatorHost& pattern) {
+    constexpr int64_t kSupportedOsBitCount = 64;
+    if (pattern.has_cpu_manufacturer() &&
+        !absl::EqualsIgnoreCase(host.cpu_manufacturer, pattern.cpu_manufacturer())) {
+        return false;
+    }
+    if (pattern.has_virt_support() && host.virt_support != pattern.virt_support()) {
+        return false;
+    }
+    if (pattern.has_running_in_vm() && host.running_in_vm != pattern.running_in_vm()) {
+        return false;
+    }
+    if (pattern.has_os_bit_count() && pattern.os_bit_count() != kSupportedOsBitCount) {
+        return false;
+    }
+    if (pattern.has_cpu_model_name() && host.cpu_model_name != pattern.cpu_model_name()) {
+        return false;
+    }
+    if (pattern.has_os_platform() &&
+        !absl::EqualsIgnoreCase(host.os_platform, pattern.os_platform())) {
+        return false;
+    }
+    return true;
+}
+
+bool MatchesGpuInfo(const HostGpuInfo& host_gpu,
+                    const emulator_features::EmulatorGpuInfo& pattern) {
+    if (pattern.has_make() && !MatchHexIdOrExact(host_gpu.make, pattern.make())) {
+        return false;
+    }
+    if (pattern.has_model() && !MatchGpuString(host_gpu.model, pattern.model())) {
+        return false;
+    }
+    if (pattern.has_device_id() && !MatchHexIdOrExact(host_gpu.device_id, pattern.device_id())) {
+        return false;
+    }
+    if (pattern.has_revision_id() &&
+        !MatchHexIdOrExact(host_gpu.revision_id, pattern.revision_id())) {
+        return false;
+    }
+    if (pattern.has_version() && host_gpu.version != pattern.version()) {
+        return false;
+    }
+    if (pattern.has_renderer() && !MatchGpuString(host_gpu.renderer, pattern.renderer())) {
+        return false;
+    }
+    return true;
+}
+
+bool MatchesHwConfig(const std::optional<HostInfo>& host_info,
+                     std::span<const HostGpuInfo> host_gpus,
+                     const emulator_features::EmulatorHostHWConfig& config) {
+    if (config.has_hostinfo()) {
+        if (!host_info.has_value() || !MatchesHostInfo(*host_info, config.hostinfo())) {
+            return false;
+        }
+    }
+    return std::ranges::all_of(
+            config.hostgpuinfo(), [&](const emulator_features::EmulatorGpuInfo& pattern_gpu) {
+                return std::ranges::any_of(host_gpus, [&](const HostGpuInfo& host_gpu) {
+                    return MatchesGpuInfo(host_gpu, pattern_gpu);
+                });
+            });
+}
+
+bool MatchFeaturePattern(const std::optional<HostInfo>& host_info,
+                         std::span<const HostGpuInfo> host_gpus,
+                         const emulator_features::EmulatorFeaturePattern& pattern) {
+    return std::ranges::any_of(pattern.hwconfig(),
+                               [&](const emulator_features::EmulatorHostHWConfig& config) {
+                                   return MatchesHwConfig(host_info, host_gpus, config);
+                               });
 }
 
 absl::StatusOr<FeatureFlagMap> ParseFeatureFile(const std::filesystem::path& filepath,
@@ -377,6 +569,7 @@ FeatureFlags FeatureFlags::CreateForTesting(
 
 absl::StatusOr<FeatureFlags> FeatureFlags::Create(const Options& options) {
     FeatureFlags flags;
+    flags.emulator_version_ = std::string(options.emulator_version);
 
     FeatureFlagMap host_ini_map;
     if (!options.host_ini_path.empty()) {
@@ -431,7 +624,7 @@ absl::StatusOr<FeatureFlags> FeatureFlags::Create(const Options& options) {
     }
 
     // 1. User INI override (~/.android/advancedFeatures.ini)
-    if (android::base::file::exists(options.user_ini_path)) {
+    if (android::base::file::is_file(options.user_ini_path)) {
         std::vector<std::string> unknown_user_features;
         auto user_ini = ParseFeatureFile(options.user_ini_path, &unknown_user_features);
         if (!user_ini.ok()) {
@@ -459,6 +652,13 @@ absl::StatusOr<FeatureFlags> FeatureFlags::Create(const Options& options) {
     // 4. Command-line override (-feature)
     for (const std::string& cli_arg : options.cli_feature_flags) {
         flags.ApplyOverrides(cli_arg, "-feature");
+    }
+
+    // 5. Server-side hardware feature patterns (cached or bundled fallback)
+    flags.patterns_ =
+            LoadPatternsWithFallback(options.cached_patterns_path, options.default_patterns_path);
+    if (flags.patterns_.has_value()) {
+        flags.ApplyFeaturePatterns();
     }
 
     return flags;
@@ -550,6 +750,60 @@ void FeatureFlags::ApplyOverrides(std::string_view overrides, std::string_view s
         }
         SetEnabledOverride(*feature, enable);
     }
+}
+
+void FeatureFlags::ApplyFeatureAction(std::string_view name, bool enable) {
+    const auto feature = StringToFeature(name);
+    if (!feature.has_value()) {
+        LOG(WARNING) << "Unknown feature action in server patterns: " << name;
+        return;
+    }
+    if (IsIgnoredLegacy(*feature)) {
+        VLOG(1) << "Ignoring legacy feature action in server patterns: " << name;
+        return;
+    }
+
+    // Conservatively:
+    // If the server wants to enable: enable if not overridden and guest didn't disable.
+    // If the server wants to disable: disable if user did not override.
+    const bool was_enabled = IsEnabled(*feature);
+    SetIfNotOverridden(*feature, enable);
+    if (IsEnabled(*feature) != was_enabled) {
+        VLOG(1) << "Server feature pattern " << (enable ? "enabled " : "disabled ") << name;
+    }
+}
+
+void FeatureFlags::ApplyFeaturePatterns() {
+    if (!patterns_.has_value()) {
+        return;
+    }
+    const android::base::Version current_version =
+            emulator_version_.empty() ? android::base::Version::invalid()
+                                      : android::base::Version(emulator_version_);
+    for (const auto& pattern : patterns_->pattern()) {
+        if (!MatchFeaturePattern(host_info_, host_gpus_, pattern)) {
+            continue;
+        }
+        for (const auto& action : pattern.featureaction()) {
+            if (!action.has_feature() || !action.has_enable()) {
+                continue;
+            }
+            if (!FeatureActionAppliesToEmulatorVersion(action, current_version)) {
+                continue;
+            }
+            ApplyFeatureAction(emulator_features::Feature_Name(action.feature()), action.enable());
+        }
+    }
+}
+
+void FeatureFlags::ApplyHostFeaturePatterns(const HostInfo& host_info) {
+    host_info_ = host_info;
+    ApplyFeaturePatterns();
+}
+
+void FeatureFlags::ApplyGpuFeaturePatterns(std::span<const HostGpuInfo> gpus) {
+    host_gpus_.assign(gpus.begin(), gpus.end());
+    ApplyFeaturePatterns();
 }
 
 template <typename Predicate>

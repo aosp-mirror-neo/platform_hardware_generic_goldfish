@@ -509,7 +509,10 @@ pkg_files(
 
 pkg_files(
     name = "advanced_features",
-    srcs = ["//emulator/launcher:advanced_features_ini"],
+    srcs = [
+        "//emulator/launcher:advanced_features_ini",
+        "//emulator/launcher:feature_patterns",
+    ],
     prefix = "lib",
 )
 
@@ -703,6 +706,7 @@ pkg_filegroup(
 pkg_filegroup(
     name = "emulator-dir-unstripped",
     srcs = [
+        ":advanced_features",
         ":data_virtualscene",
         ":emulator-access",
         ":emulator_notice_md",

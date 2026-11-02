@@ -137,6 +137,10 @@ absl::StatusOr<EmulatorPaths> ResolveEmulatorPaths(bool verbose) {
     ASSIGN_OR_RETURN(paths.advanced_features,
                      CheckExists(paths.launcher_directory / "lib" / "advancedFeatures.ini",
                                  "advanced features"));
+    ASSIGN_OR_RETURN(
+            paths.feature_patterns,
+            CheckExists(paths.launcher_directory / "lib" / "emu-original-feature-flags.protobuf",
+                        "feature patterns"));
 
 #if defined(__aarch64__) || defined(_M_ARM64) || defined(__arm64__)
     // Releases only ship the qemu-system binary matching the host architecture.
