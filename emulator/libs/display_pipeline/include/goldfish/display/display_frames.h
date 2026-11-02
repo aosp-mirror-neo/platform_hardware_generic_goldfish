@@ -187,7 +187,7 @@ class DisplayFrames;
  */
 struct FrameListenerDeleter {
     struct Empty {};
-    FrameListenerDeleter(Empty = {}) noexcept {}
+    explicit FrameListenerDeleter(Empty) noexcept {}
     explicit FrameListenerDeleter(std::weak_ptr<DisplayFrames> frames) noexcept
             : frames(std::move(frames)) {}
 

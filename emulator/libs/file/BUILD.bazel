@@ -15,7 +15,13 @@ cc_library(
         "include/goldfish/file/file_atomic.h",
         "include/goldfish/file/storage_capacity.h",
     ],
-    implementation_deps = [":posix_scoped_fd"],
+    implementation_deps = select({
+        "@platforms//os:windows": [],
+        "//conditions:default": [
+            ":posix_fd_io",
+            ":scoped_fd",
+        ],
+    }),
     includes = ["include"],
     linkopts = select({
         "@platforms//os:windows": ["-DEFAULTLIB:advapi32.lib"],
@@ -44,18 +50,31 @@ cc_library(
 )
 
 cc_library(
-    name = "posix_scoped_fd",
+    name = "scoped_fd",
+    hdrs = select({
+        "@platforms//os:windows": [],
+        "//conditions:default": ["include/goldfish/file/scoped_fd.h"],
+    }),
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//emulator/libs/base",
+        "//emulator/libs/system:eintr_wrapper",
+    ],
+)
+
+cc_library(
+    name = "posix_fd_io",
     srcs = select({
         "@platforms//os:windows": [],
-        "//conditions:default": ["posix_scoped_fd.cc"],
+        "//conditions:default": ["posix_fd_io.cc"],
     }),
     hdrs = select({
         "@platforms//os:windows": [],
-        "//conditions:default": ["posix_scoped_fd.h"],
+        "//conditions:default": ["posix_fd_io.h"],
     }),
     visibility = ["//visibility:private"],
     deps = [
-        "//emulator/libs/base",
         "//emulator/libs/system:eintr_wrapper",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/strings",
@@ -74,7 +93,6 @@ cc_library(
     hdrs = ["include/goldfish/file/file_lock.h"],
     implementation_deps = [
         ":file",
-        ":posix_scoped_fd",
         "//emulator/libs/system:eintr_wrapper",
         "@abseil-cpp//absl/base:no_destructor",
         "@abseil-cpp//absl/cleanup",
@@ -83,7 +101,10 @@ cc_library(
         "@abseil-cpp//absl/synchronization",
     ] + select({
         "@platforms//os:windows": ["//emulator/libs/windows:win32_utils"],
-        "//conditions:default": [],
+        "//conditions:default": [
+            ":posix_fd_io",
+            ":scoped_fd",
+        ],
     }),
     includes = ["include"],
     visibility = ["//visibility:public"],
@@ -132,7 +153,7 @@ cc_library(
             "//emulator/libs/windows:scoped_file_handle",
             "@aemu//windows:compat-hdrs",
         ],
-        "//conditions:default": [],
+        "//conditions:default": [":scoped_fd"],
     }),
 )
 
@@ -162,7 +183,10 @@ cc_test(
         "//emulator/libs/test:googletest_main",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:status_matchers",
-    ],
+    ] + select({
+        "@platforms//os:windows": [],
+        "//conditions:default": [":scoped_fd"],
+    }),
 )
 
 cc_test(
@@ -218,7 +242,8 @@ clang_tidy_test(
         ":file",
         ":file_lock",
         ":file_lock_test",
-        ":posix_scoped_fd",
+        ":posix_fd_io",
+        ":scoped_fd",
         ":shared_file_lock",
         ":shared_file_lock_test",
     ],

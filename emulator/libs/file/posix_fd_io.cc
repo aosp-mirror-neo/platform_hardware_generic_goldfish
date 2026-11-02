@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef _WIN32
-
-#include "emulator/libs/file/posix_scoped_fd.h"
+#include "emulator/libs/file/posix_fd_io.h"
 
 #include <unistd.h>
 
@@ -25,6 +23,7 @@
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+
 #include "android/base/eintr_wrapper.h"
 
 namespace android::base::file::internal {
@@ -35,8 +34,8 @@ absl::Status WriteAllToFd(int fd, std::string_view data, const std::filesystem::
         const ssize_t n = HANDLE_EINTR(::write(fd, data.data() + written, data.size() - written));
         if (n < 0) {
             const int err = errno;
-            return absl::ErrnoToStatus(
-                    err, absl::StrCat("Failed to write to '", path.string(), "'"));
+            return absl::ErrnoToStatus(err,
+                                       absl::StrCat("Failed to write to '", path.string(), "'"));
         }
         if (n == 0) {
             return absl::InternalError(
@@ -48,5 +47,3 @@ absl::Status WriteAllToFd(int fd, std::string_view data, const std::filesystem::
 }
 
 }  // namespace android::base::file::internal
-
-#endif  // !_WIN32

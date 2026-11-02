@@ -14,31 +14,17 @@
 
 #pragma once
 
-#ifndef _WIN32
-
-#include <unistd.h>
+#ifdef _WIN32
+#error "Only compile this file on POSIX platforms!"
+#endif
 
 #include <filesystem>
 #include <string_view>
 
 #include "absl/status/status.h"
-#include "android/base/eintr_wrapper.h"
-#include "goldfish/base/unique_handle.h"
 
 namespace android::base::file::internal {
-
-struct PosixFdDeleter {
-    void operator()(int fd) const noexcept {
-        if (fd >= 0) {
-            (void)IGNORE_EINTR(::close(fd));
-        }
-    }
-};
-
-using ScopedFd = ::goldfish::base::UniqueHandle<int, -1, PosixFdDeleter>;
 
 absl::Status WriteAllToFd(int fd, std::string_view data, const std::filesystem::path& path);
 
 }  // namespace android::base::file::internal
-
-#endif  // !_WIN32

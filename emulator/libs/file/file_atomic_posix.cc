@@ -24,9 +24,10 @@
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "android/base/eintr_wrapper.h"
-#include "emulator/libs/file/posix_scoped_fd.h"
+#include "emulator/libs/file/posix_fd_io.h"
 #include "goldfish/file/file.h"
 #include "goldfish/file/file_atomic.h"
+#include "goldfish/file/scoped_fd.h"
 
 #ifndef O_BINARY
 #ifdef _O_BINARY
@@ -66,7 +67,7 @@ absl::Status CreatePrivateFileExclusive(const fs::path& path, std::string_view c
                              path.parent_path().string(), "'"),
                 "Ensure the parent directory exists, is writable, and has sufficient disk space.");
     }
-    internal::ScopedFd fd(raw_fd);
+    ScopedFd fd(raw_fd);
 
     // Setup cleanup to remove the temporary file.
     // We use hard links so we can always remove it.

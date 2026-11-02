@@ -86,7 +86,6 @@ cc_library(
     deps = [
         ":version",
         ":x86_cpuid",
-        "//emulator/libs/base",
         "//emulator/libs/file",
         "//emulator/libs/system",
         "@abseil-cpp//absl/cleanup",
@@ -99,7 +98,9 @@ cc_library(
             "//emulator/libs/windows:scoped_reg_key",
             "//emulator/libs/windows:win32_utils",
         ],
-        "//conditions:default": [],
+        "//conditions:default": [
+            "//emulator/libs/file:scoped_fd",
+        ],
     }),
 )
 

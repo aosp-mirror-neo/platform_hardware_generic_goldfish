@@ -82,7 +82,6 @@ class ScopedFileLock {
 #ifdef _WIN32
     struct LockDeleter {
         struct Empty {};
-        LockDeleter() = default;
         explicit LockDeleter(Empty) {}
         LockDeleter(std::filesystem::path lock_dir, std::filesystem::path pid_file);
         void operator()(HANDLE handle) const noexcept;
@@ -94,7 +93,6 @@ class ScopedFileLock {
 #else
     struct LockDeleter {
         struct Empty {};
-        LockDeleter() = default;
         explicit LockDeleter(Empty) {}
         LockDeleter(std::filesystem::path lock_path, uint64_t owned_dev, uint64_t owned_ino);
         void operator()(bool) const noexcept;
