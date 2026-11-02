@@ -1788,4 +1788,23 @@ TEST_P(EventLoopTest, ShutdownTimersStopsTimersBeforeReturning) {
     EXPECT_EQ(fired, 0) << "a timer fired after ShutdownTimers() returned on the loop thread";
 }
 
+TEST_P(EventLoopTest, SubMillisecondRepeatingTimerKeepsRepeating) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    int fired = 0;
+    auto timer = loop->ScheduleRepeating(
+            [&fired] {
+                ++fired;
+                return true;
+            },
+            absl::Microseconds(500), absl::Microseconds(500));
+
+    fake_qemu_advance_ms(20);
+    timer.reset();
+
+    EXPECT_GT(fired, 1) << "a timer repeating every 500us fired " << fired
+                        << " time(s) in 20ms of QEMU time";
+}
+
 }  // namespace goldfish::async

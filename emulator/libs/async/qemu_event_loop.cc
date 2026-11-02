@@ -24,6 +24,7 @@
 
 #include "goldfish/async/qemu_event_loop.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -147,12 +148,17 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
             if (cancelled_.load()) {
                 return;
             }
+            const auto to_qemu_ms = [](absl::Duration d) -> int64_t {
+                if (d <= absl::ZeroDuration()) {
+                    return 0;
+                }
+                return std::max<int64_t>(1, absl::ToInt64Milliseconds(d));
+            };
             const uint64_t seq = ++schedule_seq_;
             event_loop_
                     ->PostImmediately(
-                            [self = shared_from_this(), seq,
-                             new_delay_ms = absl::ToInt64Milliseconds(new_delay),
-                             new_interval_ms = absl::ToInt64Milliseconds(new_interval)] {
+                            [self = shared_from_this(), seq, new_delay_ms = to_qemu_ms(new_delay),
+                             new_interval_ms = to_qemu_ms(new_interval)] {
                                 if (self->cancelled_.load() ||
                                     !self->event_loop_->LockActiveTimer(self.get())) {
                                     return;
