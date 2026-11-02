@@ -64,14 +64,12 @@ namespace {
 #ifdef _WIN32
 using NativeSocket = SOCKET;
 struct SocketDeleter {
-    static SOCKET Empty() { return INVALID_SOCKET; }
     void operator()(NativeSocket s) { ::closesocket(s); }
 };
 inline constexpr NativeSocket kInvalidNativeSocket = static_cast<NativeSocket>(INVALID_SOCKET);
 #else
 using NativeSocket = int;
 struct SocketDeleter {
-    static int Empty() { return -1; }
     void operator()(NativeSocket s) { ::close(s); }
 };
 inline constexpr NativeSocket kInvalidNativeSocket = static_cast<NativeSocket>(-1);

@@ -68,9 +68,6 @@ class ScopedSharedFileLock {
     using LockHandle = android::base::ScopedFileHandle;
 #else
     struct FdDeleter {
-        struct Empty {};
-        FdDeleter() = default;
-        explicit FdDeleter(Empty) {}
         void operator()(int fd) const noexcept;
     };
     using LockHandle = ::goldfish::base::UniqueHandle<int, -1, FdDeleter>;

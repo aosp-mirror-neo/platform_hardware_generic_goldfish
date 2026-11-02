@@ -27,9 +27,6 @@ namespace android::base {
 
 namespace internal {
 struct WinHandleDeleter {
-    struct Empty {};
-    WinHandleDeleter() = default;
-    explicit WinHandleDeleter(Empty) {}
     void operator()(HANDLE handle) const {
         if (handle != INVALID_HANDLE_VALUE && handle != nullptr) {
             ::CloseHandle(handle);
