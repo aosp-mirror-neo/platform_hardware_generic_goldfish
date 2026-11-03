@@ -121,8 +121,7 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
                 DoCancel();
                 return;
             }
-            if (event_loop_->GetState() == LooperStatusEvent::State::kNotStarted ||
-                !event_loop_->HasStartedDraining()) {
+            if (event_loop_->GetState() == LooperStatusEvent::State::kNotStarted) {
                 DoCancel();
                 return;
             }
@@ -296,7 +295,6 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
     std::future<absl::Status> Shutdown() override;
 
     bool IsOnLoopThread() const override;
-    bool HasStartedDraining() const { return qemu_thread_id_.load() != std::thread::id{}; }
 
     ScopedTimer CreateTimer(RepeatingTask task) override;
 
@@ -312,7 +310,6 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
     absl::Status PostDelayed(Task task, absl::Duration delay, FlowId flow_id) override;
 
     size_t DrainQueue() {
-        qemu_thread_id_ = std::this_thread::get_id();
         std::queue<QueuedTask> local_queue;
         {
             const absl::MutexLock lock(queue_mutex_);
@@ -419,7 +416,7 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
     const QEMUBHPtr drainer_bh_;
     QemuSnapshotProgressEntry* snapshot_progress_entry_{nullptr};
     std::promise<absl::Status> shutdown_complete_promise_;
-    std::atomic<std::thread::id> qemu_thread_id_{std::thread::id{}};
+    const std::thread::id qemu_thread_id_{std::this_thread::get_id()};
     size_t tasks_processed_ ABSL_GUARDED_BY(queue_mutex_) = 0;
     std::queue<QueuedTask> task_queue_ ABSL_GUARDED_BY(queue_mutex_);
     // A map of raw pointers to their corresponding weak pointers for safe shutdown.
@@ -449,7 +446,7 @@ void QemuEventLoopImpl::ShutdownTimers() {
 }
 
 size_t QemuEventLoopImpl::WaitUntilIdle() {
-    if (IsOnLoopThread() || (!HasStartedDraining() && bql_locked())) {
+    if (IsOnLoopThread()) {
         return DrainQueue();
     } else {
         const absl::MutexLock lock(queue_mutex_);
@@ -468,7 +465,7 @@ std::future<absl::Status> QemuEventLoopImpl::Shutdown() {
         shutdown_complete_promise_.set_value(absl::OkStatus());
     };
 
-    const bool on_loop_thread = IsOnLoopThread() || (!HasStartedDraining() && bql_locked());
+    const bool on_loop_thread = IsOnLoopThread();
     {
         const absl::MutexLock lock(queue_mutex_);
         if (is_shutting_down_.exchange(true)) {

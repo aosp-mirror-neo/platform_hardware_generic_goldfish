@@ -316,8 +316,8 @@ TEST_P(EventLoopTest, IsOnLoopThreadIsCorrect) {
     if (mLoopType == "libuv") {
         EXPECT_FALSE(loop->IsOnLoopThread());
         runInThread();
-    } else {  // qemu now has a separate thread runner.
-        EXPECT_FALSE(loop->IsOnLoopThread());
+    } else {
+        EXPECT_TRUE(loop->IsOnLoopThread());
     }
 
     (void)loop->Post([&]() { on_loop_thread_promise.set_value(loop->IsOnLoopThread()); });
@@ -1805,6 +1805,15 @@ TEST_P(EventLoopTest, SubMillisecondRepeatingTimerKeepsRepeating) {
 
     EXPECT_GT(fired, 1) << "a timer repeating every 500us fired " << fired
                         << " time(s) in 20ms of QEMU time";
+}
+
+TEST_P(EventLoopTest, IsOnLoopThreadIsTrueOnQemuMainThreadBeforeFirstDrain) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    EXPECT_TRUE(loop->IsOnLoopThread())
+            << "QemuEventLoop does not recognize the QEMU main thread until the first "
+               "bottom half drains";
 }
 
 }  // namespace goldfish::async
