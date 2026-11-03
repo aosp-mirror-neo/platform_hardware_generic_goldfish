@@ -178,15 +178,15 @@ void AppendAsciiEvents(std::vector<InputEvent>& out, unsigned short character,
     }
 }
 
-bool IsFilteredMultiTouchEvent(uint16_t type, uint16_t code) {
-    if (type == EV_ABS && code >= ABS_MT_SLOT && code <= ABS_MT_TOOL_Y) {
-        return true;
-    }
-    if (type == EV_KEY &&
-        (code == BTN_TOUCH || (code >= BTN_TOOL_PEN && code <= BTN_TOOL_QUADTAP))) {
-        return true;
-    }
-    return false;
+bool IsSupportedHeadsetSwitch(uint16_t type, uint16_t code) {
+    return type == EV_SW && (code == SW_HEADPHONE_INSERT || code == SW_MICROPHONE_INSERT);
+}
+
+const AndroidEvent& AndroidEventOf(const ::android::emulation::control::InputEvent& event) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    return event.android_event();
+#pragma clang diagnostic pop
 }
 
 std::optional<InputEvent> TranslateSinglePenEvent(
@@ -551,7 +551,15 @@ absl::Status V1InputTranslator::DispatchAndroidEvent(const AndroidEvent& event) 
         return absl::OkStatus();
     }
 
-    if (IsFilteredMultiTouchEvent(type, code)) {
+    if (!IsSupportedHeadsetSwitch(type, code)) {
+        // The event's code and value are not logged: a raw key code may be part of a password.
+        LOG_FIRST_N(WARNING, 1)
+                << "Dropping deprecated v1 InputEvent.android_event (type=" << event.type()
+                << "): only EV_SW SW_HEADPHONE_INSERT and SW_MICROPHONE_INSERT are supported. "
+                   "Send TouchEvent, MouseEvent, or KeyboardEvent, or use "
+                   "android.emulation.v2.InputService (or AudioService.UpdateAudioState for the "
+                   "wired headset jack). Later unsupported AndroidEvents are dropped without "
+                   "logging.";
         return absl::OkStatus();
     }
 
@@ -585,7 +593,7 @@ std::vector<InputEvent> V1InputTranslator::TranslateInputEvent(
         VLOG(1) << "Dropping unsupported v1 WheelEvent";
         return {};
     case ::android::emulation::control::InputEvent::kAndroidEvent:
-        if (absl::Status status = DispatchAndroidEvent(event.android_event()); !status.ok()) {
+        if (absl::Status status = DispatchAndroidEvent(AndroidEventOf(event)); !status.ok()) {
             VLOG(1) << "Failed to dispatch AndroidEvent: " << status;
         }
         return {};

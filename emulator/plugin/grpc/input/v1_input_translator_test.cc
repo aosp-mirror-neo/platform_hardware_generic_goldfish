@@ -544,13 +544,13 @@ TEST_F(V1InputTranslatorTest, FoldableHingeRoutesInactiveDisplayZeroToCoverDispl
     EXPECT_THAT(out[0].pointer().pointers(0).x(), FloatNear(0.5F, 1e-5F));
     EXPECT_THAT(out[0].pointer().pointers(0).y(), FloatNear(0.5F, 1e-5F));
 
-    // Raw AndroidEvent on display=0 while folded flushes to cover display 1.
-    AndroidEvent key_ev;
-    key_ev.set_display(0);
-    key_ev.set_type(EV_KEY);
-    key_ev.set_code(KEY_POWER);
-    key_ev.set_value(1);
-    EXPECT_THAT(hinge_translator.DispatchAndroidEvent(key_ev), IsOk());
+    // Headset switch AndroidEvent on display=0 while folded flushes to cover display 1.
+    AndroidEvent sw_ev;
+    sw_ev.set_display(0);
+    sw_ev.set_type(EV_SW);
+    sw_ev.set_code(SW_HEADPHONE_INSERT);
+    sw_ev.set_value(1);
+    EXPECT_THAT(hinge_translator.DispatchAndroidEvent(sw_ev), IsOk());
 
     AndroidEvent syn_ev;
     syn_ev.set_display(0);
@@ -561,8 +561,9 @@ TEST_F(V1InputTranslatorTest, FoldableHingeRoutesInactiveDisplayZeroToCoverDispl
 
     EXPECT_THAT(Display(0)->evdev_reports, IsEmpty());
     ASSERT_EQ(Display(1)->evdev_reports.size(), 1U);
-    EXPECT_THAT(Display(1)->evdev_reports[0], ElementsAre(FakeEvDevEvent{EV_KEY, KEY_POWER, 1},
-                                                          FakeEvDevEvent{EV_SYN, SYN_REPORT, 0}));
+    EXPECT_THAT(Display(1)->evdev_reports[0],
+                ElementsAre(FakeEvDevEvent{EV_SW, SW_HEADPHONE_INSERT, 1},
+                            FakeEvDevEvent{EV_SYN, SYN_REPORT, 0}));
 }
 
 TEST_F(V1InputTranslatorTest, RealClientQuirksLowPressureArbitraryTouchIdsAndMouseLeave) {
@@ -948,7 +949,7 @@ TEST_F(V1InputTranslatorTest, TranslateInputEventDropsWheelAndUnknownEvents) {
     EXPECT_THAT(translator_.TranslateInputEvent(empty_env), IsEmpty());
 }
 
-TEST_F(V1InputTranslatorTest, DispatchAndroidEventBuffersUntilSynReportAndFiltersMtSlotState) {
+TEST_F(V1InputTranslatorTest, DispatchAndroidEventForwardsHeadsetSwitchesAndDropsOtherEvents) {
     auto make_android = [](int32_t display, int32_t type, int32_t code, int32_t value) {
         AndroidEvent ev;
         ev.set_display(display);
@@ -958,32 +959,35 @@ TEST_F(V1InputTranslatorTest, DispatchAndroidEventBuffersUntilSynReportAndFilter
         return ev;
     };
 
-    // Filtered MT slot state events + non-MT key event before SYN_REPORT.
+    // Non-headset events (MT slot state, keys, relative axes, lid switch) are dropped.
     EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_ABS, ABS_MT_SLOT, 1)), IsOk());
     EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_ABS, ABS_MT_TRACKING_ID, 42)),
                 IsOk());
     EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_ABS, ABS_MT_POSITION_X, 100)),
                 IsOk());
     EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_KEY, BTN_TOUCH, 1)), IsOk());
-    EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_KEY, BTN_TOOL_FINGER, 1)),
-                IsOk());
     EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_KEY, KEY_POWER, 1)), IsOk());
+    EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_REL, REL_X, 5)), IsOk());
+    EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_SW, SW_LID, 1)), IsOk());
+    EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_SYN, SYN_REPORT, 0)), IsOk());
     EXPECT_THAT(Display(0)->evdev_reports, IsEmpty());
 
-    // SYN_REPORT flushes only the non-MT event.
+    // Headset and microphone EV_SW events are buffered until SYN_REPORT.
+    EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_SW, SW_HEADPHONE_INSERT, 1)),
+                IsOk());
+    EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_SW, SW_MICROPHONE_INSERT, 1)),
+                IsOk());
+    EXPECT_THAT(Display(0)->evdev_reports, IsEmpty());
+
     EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_SYN, SYN_REPORT, 0)), IsOk());
     EXPECT_THAT(Display(0)->evdev_reports,
-                ElementsAre(ElementsAre(FakeEvDevEvent{EV_KEY, KEY_POWER, 1},
+                ElementsAre(ElementsAre(FakeEvDevEvent{EV_SW, SW_HEADPHONE_INSERT, 1},
+                                        FakeEvDevEvent{EV_SW, SW_MICROPHONE_INSERT, 1},
                                         FakeEvDevEvent{EV_SYN, SYN_REPORT, 0})));
 
-    // An all-MT batch followed by SYN_REPORT does not call SendEvDevReport.
-    Display(0)->evdev_reports.clear();
-    EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_ABS, ABS_MT_SLOT, 0)), IsOk());
-    EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_SYN, SYN_REPORT, 0)), IsOk());
-    EXPECT_THAT(Display(0)->evdev_reports, IsEmpty());
-
     // Negative display ID returns InvalidArgument on flush.
-    EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(-1, EV_KEY, KEY_POWER, 1)), IsOk());
+    EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(-1, EV_SW, SW_HEADPHONE_INSERT, 1)),
+                IsOk());
     EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(-1, EV_SYN, SYN_REPORT, 0)),
                 StatusIs(absl::StatusCode::kInvalidArgument));
 }
@@ -1000,16 +1004,18 @@ TEST_F(V1InputTranslatorTest, DispatchAndroidEventPerDisplayBufferingAndBufferCa
     };
 
     for (size_t i = 0; i < V1InputTranslator::kMaxBufferedAndroidEvents + 50; ++i) {
-        EXPECT_THAT(translator_.DispatchAndroidEvent(
-                            make_android(0, EV_REL, REL_X, static_cast<int32_t>(i))),
+        EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_SW, SW_HEADPHONE_INSERT,
+                                                                  static_cast<int32_t>(i & 1U))),
                     IsOk());
     }
-    EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(1, EV_KEY, KEY_VOLUMEUP, 1)), IsOk());
+    EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(1, EV_SW, SW_MICROPHONE_INSERT, 1)),
+                IsOk());
 
     EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(1, EV_SYN, SYN_REPORT, 0)), IsOk());
     ASSERT_EQ(Display(1)->evdev_reports.size(), 1U);
-    EXPECT_THAT(Display(1)->evdev_reports[0], ElementsAre(FakeEvDevEvent{EV_KEY, KEY_VOLUMEUP, 1},
-                                                          FakeEvDevEvent{EV_SYN, SYN_REPORT, 0}));
+    EXPECT_THAT(Display(1)->evdev_reports[0],
+                ElementsAre(FakeEvDevEvent{EV_SW, SW_MICROPHONE_INSERT, 1},
+                            FakeEvDevEvent{EV_SYN, SYN_REPORT, 0}));
     EXPECT_THAT(Display(0)->evdev_reports, IsEmpty());
 
     EXPECT_THAT(translator_.DispatchAndroidEvent(make_android(0, EV_SYN, SYN_REPORT, 0)), IsOk());
@@ -1045,10 +1051,12 @@ TEST_F(V1InputTranslatorTest, TranslateInputEventDispatchesAllEnvelopeVariants) 
     wheel_env.mutable_wheel_event()->set_dy(-60);
     EXPECT_THAT(translator_.TranslateInputEvent(wheel_env), IsEmpty());
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     ::android::emulation::control::InputEvent android_env;
     android_env.mutable_android_event()->set_display(0);
-    android_env.mutable_android_event()->set_type(EV_KEY);
-    android_env.mutable_android_event()->set_code(KEY_POWER);
+    android_env.mutable_android_event()->set_type(EV_SW);
+    android_env.mutable_android_event()->set_code(SW_HEADPHONE_INSERT);
     android_env.mutable_android_event()->set_value(1);
     EXPECT_THAT(translator_.TranslateInputEvent(android_env), IsEmpty());
 
@@ -1056,6 +1064,7 @@ TEST_F(V1InputTranslatorTest, TranslateInputEventDispatchesAllEnvelopeVariants) 
     android_env.mutable_android_event()->set_code(SYN_REPORT);
     android_env.mutable_android_event()->set_value(0);
     EXPECT_THAT(translator_.TranslateInputEvent(android_env), IsEmpty());
+#pragma clang diagnostic pop
     EXPECT_EQ(Display(0)->evdev_reports.size(), 1U);
 }
 
