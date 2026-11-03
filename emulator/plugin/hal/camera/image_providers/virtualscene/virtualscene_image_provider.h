@@ -49,13 +49,13 @@ struct VirtualsceneImageProvider {
     };
 
     struct CaptureStreamBuffers {
-        // If dstBuffer is empty, the framebuffer has the exact same format and size,
-        // so we can read from the VER framebuffer directly.
-        mutable std::vector<uint8_t> dstBuffer;
         CameraImageProviderRect size = {};
         CropRegion srcCropRegion = {};
         uint32_t bufferSizeBytes = 0;
         int32_t id = -1;  // CameraImageProviderStreamConfig::id
+        // If false, the framebuffer has the exact same format and size,
+        // so we can read from the VER framebuffer directly.
+        bool requiresScaling = false;
     };
 
     VirtualsceneImageProvider() = default;
@@ -66,6 +66,7 @@ struct VirtualsceneImageProvider {
     int capture(const CameraImageProviderCaptureOpts&, const CameraImageProviderStreamCaptureSink,
                 void* sinkOpaque, const CameraImageProviderStreamCaptureInfo* sci, unsigned scin);
     void stop();
+    size_t getScaledFramebufferSizeBytes() const;
 
     static void* create(const CameraImageProviderInfo&);
 
@@ -94,6 +95,7 @@ struct VirtualsceneImageProvider {
   private:
     struct CaptureSession {
         std::vector<CaptureStreamBuffers> captureStreamBuffers;
+        std::vector<uint8_t> scaledFramebuffer;
         std::vector<uint8_t> yuvConversionBuffer;
         std::vector<uint8_t> rotatedFramebuffer;
         glm::mat4 projection = glm::mat4(1.0f);
@@ -107,7 +109,8 @@ struct VirtualsceneImageProvider {
 
     bool captureImpl(const CaptureSession&, CameraImageProviderStreamCaptureSink, void* sinkOpaque,
                      const CameraImageProviderStreamCaptureInfo* sci, unsigned scin,
-                     uint8_t* yuvConversionBuffer, uint8_t* rotatedFramebuffer);
+                     uint8_t* scaledFramebuffer, uint8_t* yuvConversionBuffer,
+                     uint8_t* rotatedFramebuffer);
 
     VerSceneHandle mScene = VER_INVALID_HANDLE;
     const sensors::PhysicalModel* mPhysicalModel = nullptr;

@@ -1,4 +1,5 @@
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("//emulator/tools:cc_binary_with_manifest.bzl", "cc_binary_with_manifest")
 
 cc_library(
     name = "virtualscene",
@@ -45,5 +46,18 @@ cc_test(
         "//emulator/libs/system:bazel_info",
         "//emulator/libs/system:test-headers",
         "//emulator/libs/test:googletest_main",
+    ],
+)
+
+cc_binary_with_manifest(
+    name = "virtualscene_image_provider_perf",
+    testonly = True,
+    srcs = ["virtualscene_image_provider_perf.cc"],
+    tags = ["benchmark"],
+    deps = [
+        ":virtualscene",
+        "//emulator/libs/imaging",
+        "@google_benchmark//:benchmark",
+        "@google_benchmark//:benchmark_main",
     ],
 )
