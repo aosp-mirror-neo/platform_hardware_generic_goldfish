@@ -102,7 +102,7 @@ class BaseEventStreamWriter : public WithSimpleQueueWriter<Reactor, max_queue_si
         DCHECK(listener);
     }
 
-    virtual ~BaseEventStreamWriter() { Unsubscribe(); }
+    ~BaseEventStreamWriter() override { Unsubscribe(); }
 
     /**
      * @brief Overrides `SimpleServerWriter::OnDone()` to delete the writer instance when the client
@@ -208,7 +208,7 @@ class GenericEventStreamWriter
         this->Subscribe();
     }
 
-    virtual ~GenericEventStreamWriter() = default;
+    ~GenericEventStreamWriter() override = default;
 
     /**
      * @brief Invoked when an event arrives from the underlying event source. Enqueues the event for
@@ -424,7 +424,7 @@ class StateStreamWriter
         this->Subscribe();
     }
 
-    virtual ~StateStreamWriter() { this->Unsubscribe(); }
+    ~StateStreamWriter() override { this->Unsubscribe(); }
 
     void EventArrived(typename EventParam<Event>::type event) override {
         if (!filter_fn_ || filter_fn_(event)) {
