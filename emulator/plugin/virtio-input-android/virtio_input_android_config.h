@@ -34,6 +34,9 @@ const unsigned short* virtio_input_android_ev_key_codes(size_t* count);
 /** Returns the `EV_ABS` codes advertised by `virtio-input-android`. */
 const unsigned short* virtio_input_android_ev_abs_codes(size_t* count);
 
+/** Returns the `EV_SW` bitmap byte advertised by `virtio-input-android`. */
+uint8_t virtio_input_android_ev_sw_bitmap(void);
+
 /**
  * Looks up the `[min, max]` range configured for `axis` (`ABS_*`) in
  * `virtio_input_android_configs()`, converting little-endian config fields to
