@@ -23,6 +23,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "absl/log/check.h"
 #include "absl/log/log.h"
@@ -47,6 +49,7 @@
 #include "goldfish/network/dns_resolver.h"
 #include "goldfish/network/endpoint.h"
 #include "goldfish/vsock/connect.h"
+#include "vsock_port_fwd_internal.h"
 
 // clang-format off
 // IWYU pragma: begin_keep
@@ -88,33 +91,14 @@ using goldfish::devices::cable::SocketPtr;
 using goldfish::network::Endpoint;
 using goldfish::network::EndpointFormatter;
 
-// Sorts endpoints to prefer IPv4 over IPv6.
-static bool isIpv4(const Endpoint& a) {
-    return std::holds_alternative<goldfish::network::Ipv4Endpoint>(a);
-}
-
-std::optional<Endpoint> ResolvePreferredEndpoint(const std::string& address, Error** errp) {
-    auto endpoints = goldfish::network::ResolveEndpoints(address);
+std::optional<std::vector<Endpoint>> ResolveForwarderEndpointsOrSetError(const std::string& address,
+                                                                         Error** errp) {
+    auto endpoints = goldfish::vsock::ResolveForwarderEndpoints(address);
     if (!endpoints.ok()) {
-        error_setg(errp, "Failed to resolve vsock port forwarder address '%s': %s",
-                   address.c_str(), std::string(endpoints.status().message()).c_str());
+        error_setg(errp, "%s", std::string(endpoints.status().message()).c_str());
         return std::nullopt;
     }
-    if (endpoints->empty()) {
-        error_setg(errp, "No network endpoints found for vsock port forwarder address '%s'",
-                   address.c_str());
-        return std::nullopt;
-    }
-
-    auto preferred = std::find_if(endpoints->begin(), endpoints->end(), isIpv4);
-    if (preferred == endpoints->end()) {
-        preferred = endpoints->begin();
-        LOG(WARNING) << "Vsock port forwarder address '" << address
-                     << "' does not resolve to an IPv4 endpoint (resolved: ["
-                     << absl::StrJoin(*endpoints, ", ", EndpointFormatter())
-                     << "]); falling back to IPv6 endpoint " << ToString(*preferred);
-    }
-    return *preferred;
+    return *std::move(endpoints);
 }
 
 void SetPortProperty(Visitor* v, const char* name, int* port, Error** errp) {
@@ -232,22 +216,25 @@ class VSockProxyImpl {
 
   public:
     static absl::StatusOr<std::unique_ptr<VSockProxyImpl>> Create(
-            const Endpoint& hostEndpoint, VSockFwdDev* device,
+            std::vector<Endpoint> hostEndpoints, VSockFwdDev* device,
             goldfish::avd::AvdUniverse& universe) {
-        auto proxy = std::make_unique<VSockProxyImpl>(Private(), hostEndpoint, device, universe);
+        auto proxy = std::make_unique<VSockProxyImpl>(Private(), std::move(hostEndpoints), device,
+                                                      universe);
         if (absl::Status status = proxy->startServer(); !status.ok()) {
             return status;
         }
         return proxy;
     }
 
-    VSockProxyImpl(Private, const Endpoint& hostEndpoint, VSockFwdDev* device,
+    VSockProxyImpl(Private, std::vector<Endpoint> hostEndpoints, VSockFwdDev* device,
                    goldfish::avd::AvdUniverse& universe)
-            : mHostEndpoint(hostEndpoint)
+            : mHostEndpoints(std::move(hostEndpoints))
             , mDevice(device)
             , mQemuLoop(universe.GetQemuEventLoop())
             , mClientLoop(goldfish::avd::globalEventLoop())
             , mGuestStatus(universe.GetGuestStatus()) {}
+
+    const Endpoint& boundEndpoint() const { return mBoundEndpoint; }
 
     void close() {
         mConnectionAwaiter.reset();
@@ -268,12 +255,13 @@ class VSockProxyImpl {
   private:
     absl::Status startServer() {
         absl::Status status = mClientLoop->PostAndWait([this]() -> absl::Status {
-            VLOG(1) << "Starting server on " << ToString(mHostEndpoint);
+            VLOG(1) << "Starting server on ["
+                    << absl::StrJoin(mHostEndpoints, ", ", EndpointFormatter()) << "]";
             auto incoming_socket_connection =
                     [this, alive = std::weak_ptr<void>(mAlive)](
                             std::shared_ptr<goldfish::async::AsyncSocket> hostSocket) {
                         if (!mGuestConnected.load(std::memory_order_acquire)) {
-                            VLOG(1) << "Rejecting connection on " << ToString(mHostEndpoint)
+                            VLOG(1) << "Rejecting connection on " << ToString(mBoundEndpoint)
                                     << ": guest port " << mDevice->guest_port << " is not ready";
                             return false;
                         }
@@ -300,16 +288,14 @@ class VSockProxyImpl {
                         return true;
                     };
 
-            VLOG(1) << "Trying to bind to " << ToString(mHostEndpoint);
-            mSocketServer = mSocketFactory.CreateServer(mClientLoop, mHostEndpoint,
-                                                        incoming_socket_connection);
-            if (!mSocketServer) {
-                return absl::UnavailableError(absl::StrFormat(
-                        "The VSockProxy that forwards the guest port: %d to the host: %s "
-                        "could not be created",
-                        mDevice->guest_port, ToString(mHostEndpoint)));
+            auto bound_server = goldfish::vsock::BindForwarderServer(
+                    mSocketFactory, mClientLoop, mHostEndpoints, mDevice->guest_port,
+                    incoming_socket_connection);
+            if (!bound_server.ok()) {
+                return bound_server.status();
             }
-            VLOG(1) << "Successfully bound to " << ToString(mHostEndpoint);
+            mSocketServer = std::move(bound_server->server);
+            mBoundEndpoint = bound_server->endpoint;
             return absl::OkStatus();
         });
         if (!status.ok()) {
@@ -367,7 +353,8 @@ class VSockProxyImpl {
     }
 
     /// The vsock device definition
-    const Endpoint mHostEndpoint;
+    const std::vector<Endpoint> mHostEndpoints;
+    Endpoint mBoundEndpoint;
     VSockFwdDev* mDevice;
     EventLoop& mQemuLoop;    // The main QEMU event loop
     EventLoop* mClientLoop;  // Client-side event loop for sockets
@@ -394,20 +381,22 @@ static void vsock_fwd_realize(DeviceState* dev, Error** errp) {
     const char* host = vsock_fwd_device->address ? vsock_fwd_device->address : "localhost";
     auto serverAddress = absl::StrFormat("%s:%d", host, vsock_fwd_device->host_port);
 
-    auto preferred = ResolvePreferredEndpoint(serverAddress, errp);
-    if (!preferred) {
+    auto endpoints = ResolveForwarderEndpointsOrSetError(serverAddress, errp);
+    if (!endpoints) {
         return;
     }
 
-    auto proxy = VSockProxyImpl::Create(*preferred, vsock_fwd_device, goldfish::avd::GetAvd());
+    auto proxy = VSockProxyImpl::Create(*std::move(endpoints), vsock_fwd_device,
+                                        goldfish::avd::GetAvd());
     if (!proxy.ok()) {
         error_setg(errp, "%s", std::string(proxy.status().message()).c_str());
         return;
     }
+    const Endpoint boundEndpoint = (*proxy)->boundEndpoint();
     vsock_fwd_device->forwarder_impl = proxy->release();
     add_deletable_object(OBJECT(dev));
-    VLOG(VLOG_DBG) << "Realizing vsock forwarder: (address:host <-> guest) " << ToString(*preferred)
-                   << "<->" << vsock_fwd_device->guest_port;
+    VLOG(VLOG_DBG) << "Realizing vsock forwarder: (address:host <-> guest) "
+                   << ToString(boundEndpoint) << "<->" << vsock_fwd_device->guest_port;
 }
 
 static void vsock_fwd_unrealize(DeviceState* dev) {
@@ -435,14 +424,14 @@ static void vsock_fwd_set_guest_port(Object* obj, Visitor* v, const char* name, 
 }
 
 static void vsock_fwd_set_address(Object* obj, const char* value, Error** errp) {
-    auto preferred = ResolvePreferredEndpoint(value, errp);
-    if (!preferred) {
+    auto endpoints = ResolveForwarderEndpointsOrSetError(value, errp);
+    if (!endpoints) {
         return;
     }
     VSockFwdDev* vsock_fwd_device = VSOCK_FWD_DEV(obj);
 
     g_free(vsock_fwd_device->address);
-    vsock_fwd_device->address = g_strdup(ToString(*preferred).c_str());
+    vsock_fwd_device->address = g_strdup(value);
 }
 
 static void vsock_fwd_class_init(ObjectClass* oc, const void* data) {
