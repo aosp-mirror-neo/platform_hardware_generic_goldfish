@@ -535,6 +535,165 @@ TEST(SimpleAsyncGrpcTest, UniqueEventStreamWriterFiltersIncomingEvents) {
     writer->OnDone();
 }
 
+TEST(SimpleAsyncGrpcTest, UniqueStateStreamWriterDeduplicatesPopulatedSnapshots) {
+    android::base::eventing::CallbackEventSource<int> source;
+    std::string current_text = "snapshot_v1";
+    int populate_calls = 0;
+
+    auto* writer = new UniqueStateStreamWriter<ClipData, int,
+                                               android::base::eventing::CallbackEventSource<int>, 1,
+                                               2, FakeWriteReactor<ClipData>>(
+            &source,
+            [&](ClipData* msg) {
+                populate_calls++;
+                msg->Clear();
+                msg->set_text(current_text);
+            },
+            [](int display_id) { return display_id < 0 || display_id == 1; });
+
+    // Initial snapshot emitted on construction; completing the write recycles the message buffer.
+    EXPECT_EQ(populate_calls, 1);
+    ASSERT_EQ(writer->written_messages.size(), 1U);
+    EXPECT_EQ(writer->written_messages[0].text(), "snapshot_v1");
+    writer->OnWriteDone(true);
+    EXPECT_EQ(writer->RecycleQueueSize(), 1U);
+
+    // Filtered-out event (display_id == 2) does not call populate_fn or write.
+    source.FireEvent(2);
+    EXPECT_EQ(populate_calls, 1);
+    EXPECT_EQ(writer->written_messages.size(), 1U);
+    EXPECT_EQ(writer->RecycleQueueSize(), 1U);
+
+    // Accepted event where populated state is unchanged suppresses duplicate write and returns
+    // the acquired message back to the recycle pool.
+    source.FireEvent(1);
+    EXPECT_EQ(populate_calls, 2);
+    EXPECT_EQ(writer->written_messages.size(), 1U);
+    EXPECT_EQ(writer->RecycleQueueSize(), 1U);
+
+    // Accepted event where populated state changed (including Unicode payload) emits new snapshot.
+    current_text = "snapshot_v2_测试_🚀_é";
+    source.FireEvent(1);
+    EXPECT_EQ(populate_calls, 3);
+    ASSERT_EQ(writer->written_messages.size(), 2U);
+    EXPECT_EQ(writer->written_messages[1].text(), "snapshot_v2_测试_🚀_é");
+    writer->OnWriteDone(true);
+
+    writer->OnDone();
+}
+
+TEST(SimpleAsyncGrpcTest, UniqueStateStreamWriterConcurrentUpdatesPreserveUniquenessAndConverge) {
+    for (int iter = 0; iter < 50; ++iter) {
+        android::base::eventing::CallbackEventSource<int> source;
+        absl::Mutex state_mutex;
+        std::string current_text = "v0";
+
+        auto* writer = new UniqueStateStreamWriter<
+                ClipData, int, android::base::eventing::CallbackEventSource<int>,
+                /*max_queue_size=*/0, /*recycle_size=*/2, FakeWriteReactor<ClipData>>(
+                &source, [&](ClipData* msg) {
+                    const absl::MutexLock state_lock(state_mutex);
+                    msg->Clear();
+                    msg->set_text(current_text);
+                });
+
+        std::atomic<bool> start_signal{false};
+        std::vector<std::thread> producers;
+        for (int t = 0; t < 4; ++t) {
+            const std::string thread_value = (t % 2 == 0) ? "state_a" : "state_b";
+            producers.emplace_back([&, thread_value]() {
+                while (!start_signal.load(std::memory_order_acquire)) {
+                }
+                for (int i = 0; i < 40; ++i) {
+                    {
+                        const absl::MutexLock state_lock(state_mutex);
+                        current_text = thread_value;
+                    }
+                    source.FireEvent(1);
+                }
+            });
+        }
+
+        start_signal.store(true, std::memory_order_release);
+        for (auto& p : producers) {
+            p.join();
+        }
+
+        // Settle on "state_b" and fire one final quiescent notification.
+        {
+            const absl::MutexLock state_lock(state_mutex);
+            current_text = "state_b";
+        }
+        source.FireEvent(1);
+
+        while (writer->QueueSize() > 0) {
+            writer->OnWriteDone(true);
+        }
+
+        ASSERT_FALSE(writer->written_messages.empty());
+        EXPECT_EQ(writer->written_messages.back().text(), "state_b");
+        for (size_t i = 1; i < writer->written_messages.size(); ++i) {
+            EXPECT_NE(writer->written_messages[i - 1].text(), writer->written_messages[i].text())
+                    << "Consecutive duplicate emitted at index " << i;
+        }
+
+        writer->OnDone();
+    }
+}
+
+TEST(SimpleAsyncGrpcTest, UniqueStateStreamWriterConcurrentEventsAndCancel) {
+    for (int iter = 0; iter < 50; ++iter) {
+        android::base::eventing::CallbackEventSource<int> source;
+        std::atomic<int> revision{0};
+
+        auto* writer = new UniqueStateStreamWriter<
+                ClipData, int, android::base::eventing::CallbackEventSource<int>,
+                /*max_queue_size=*/2, /*recycle_size=*/2, FakeWriteReactor<ClipData>>(
+                &source, [&](ClipData* msg) {
+                    msg->Clear();
+                    msg->set_text("rev_" +
+                                  std::to_string(revision.load(std::memory_order_relaxed)));
+                });
+
+        std::atomic<bool> start_signal{false};
+        std::vector<std::thread> producers;
+        for (int t = 0; t < 4; ++t) {
+            producers.emplace_back([&, t]() {
+                while (!start_signal.load(std::memory_order_acquire)) {
+                }
+                for (int i = 0; i < 40; ++i) {
+                    revision.store(t * 100 + i, std::memory_order_relaxed);
+                    source.FireEvent(i);
+                }
+            });
+        }
+
+        std::thread canceller([&]() {
+            while (!start_signal.load(std::memory_order_acquire)) {
+            }
+            writer->OnCancel();
+        });
+
+        start_signal.store(true, std::memory_order_release);
+        for (auto& p : producers) {
+            p.join();
+        }
+        canceller.join();
+
+        if (writer->start_write_called) {
+            writer->OnWriteDone(true);
+        }
+
+        EXPECT_TRUE(writer->IsCancelled());
+        EXPECT_TRUE(writer->IsFinished());
+        EXPECT_FALSE(writer->start_write_after_finish);
+        EXPECT_EQ(writer->finish_called_count, 1);
+
+        writer->OnDone();
+        EXPECT_EQ(source.CallbackCount(), 0);
+    }
+}
+
 TEST(SimpleAsyncGrpcTest, GenericEventStreamWriterRaiiDestructionUnsubscribes) {
     android::base::eventing::CallbackEventSource<ClipData> source;
     EXPECT_EQ(source.CallbackCount(), 0);

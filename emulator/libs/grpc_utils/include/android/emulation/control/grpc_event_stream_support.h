@@ -16,6 +16,7 @@
 
 #include <functional>
 #include <mutex>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -370,12 +371,16 @@ class UniqueEventStreamWriter final
  *
  * @tparam T The gRPC Protobuf message type to write to the stream.
  * @tparam Event The underlying event type produced by the CallbackEventSource.
+ * @tparam Source The event source type (defaults to `CallbackEventSource<Event>`).
  * @tparam max_queue_size The maximum number of items to keep in the write queue (0 = unbounded).
  * @tparam recycle_size The maximum number of items to keep in the recycle pool (0 = disabled).
+ * @tparam Reactor The underlying gRPC write reactor type.
+ * @tparam deduplicate When true, suppresses consecutive identical `T` snapshots via
+ *                     `MessageDifferencer::Equals` (zero storage/runtime overhead when false).
  */
 template <class T, class Event, class Source = CallbackEventSource<Event>,
           size_t max_queue_size = 0, size_t recycle_size = 0,
-          class Reactor = ::grpc::ServerWriteReactor<T>>
+          class Reactor = ::grpc::ServerWriteReactor<T>, bool deduplicate = false>
 class StateStreamWriter
         : public BaseEventStreamWriter<T, Event, Source, max_queue_size, recycle_size, Reactor> {
   public:
@@ -433,16 +438,58 @@ class StateStreamWriter
     }
 
   private:
+    struct EmptyDeduplicationState {};
+    struct DeduplicationState {
+        absl::Mutex dedup_mutex;
+        // Invariant: has_last_state ==> last_state equals the most recent T passed to Write().
+        bool has_last_state ABSL_GUARDED_BY(dedup_mutex) = false;
+        T last_state ABSL_GUARDED_BY(dedup_mutex);
+    };
+    using DeduplicationStorage =
+            std::conditional_t<deduplicate, DeduplicationState, EmptyDeduplicationState>;
+
     void WriteState() {
         DCHECK(populate_fn_);
         T current_state = this->AcquireMessage();
         populate_fn_(&current_state);
-        this->Write(std::move(current_state));
+        if constexpr (deduplicate) {
+            const absl::MutexLock dedup_lock(dedup_.dedup_mutex);
+            if (dedup_.has_last_state && google::protobuf::util::MessageDifferencer::Equals(
+                                                 current_state, dedup_.last_state)) {
+                this->RecycleMessage(std::move(current_state));
+                return;
+            }
+            dedup_.last_state = current_state;
+            dedup_.has_last_state = true;
+            this->Write(std::move(current_state));
+        } else {
+            this->Write(std::move(current_state));
+        }
     }
 
     PopulateStateFn populate_fn_;
     FilterPredicate filter_fn_;
+    [[no_unique_address]] DeduplicationStorage dedup_;
 };
+
+/**
+ * Server state stream writer that sends an immediate initial snapshot upon connection
+ * and streams subsequent updates only when the populated Protobuf message differs from
+ * the previously transmitted snapshot (`MessageDifferencer::Equals`).
+ *
+ * Prefer `UniqueStateStreamWriter` for compact control-plane state snapshots (such as
+ * display topology or system status) where multiple internal notifications may fire for
+ * the same logical state, and `StateStreamWriter` for large payload streams (such as
+ * `ImageFrame` screenshots). When `recycle_size > 0`, `populate_fn` must clear or
+ * overwrite all fields so stale data from recycled messages does not affect equality
+ * comparison; suppressed duplicate messages are automatically returned to the recycle pool.
+ */
+template <class T, class Event, class Source = CallbackEventSource<Event>,
+          size_t max_queue_size = 0, size_t recycle_size = 0,
+          class Reactor = ::grpc::ServerWriteReactor<T>>
+using UniqueStateStreamWriter =
+        StateStreamWriter<T, Event, Source, max_queue_size, recycle_size, Reactor,
+                          /*deduplicate=*/true>;
 
 }  // namespace control
 }  // namespace emulation
