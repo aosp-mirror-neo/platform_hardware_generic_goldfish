@@ -184,5 +184,37 @@ TEST(WebMEncoderTest, EncodesToUnicodeOutputPath) {
     android::base::file::rm(output_path).IgnoreError();
 }
 
+TEST(WebMEncoderTest, SizesYuvFrameBufferToDownscaledCodecResolution) {
+    constexpr int kWidth = 1280;
+    constexpr int kHeight = 720;
+    constexpr size_t kUnscaledYuv420Bytes = static_cast<size_t>(kWidth) * kHeight * 3 / 2;
+    constexpr size_t kScaledYuv420Bytes = static_cast<size_t>(kWidth / 2) * (kHeight / 2) * 3 / 2;
+
+    const std::filesystem::path output_path =
+            GetTempOutputPath("webm_encoder_yuv_frame_size_test.webm");
+    android::base::file::rm(output_path).IgnoreError();
+
+    WebMEncoder encoder(output_path.string(), kWidth, kHeight, kDefaultFps, kDefaultBitrate);
+    EXPECT_EQ(encoder.YuvFrameBufferBytes(), 0U);
+    ASSERT_TRUE(encoder.Init());
+
+    const size_t allocated_yuv_bytes = encoder.YuvFrameBufferBytes();
+    EXPECT_GE(allocated_yuv_bytes, kScaledYuv420Bytes);
+    EXPECT_LT(allocated_yuv_bytes * 2, kUnscaledYuv420Bytes);
+
+    const std::vector<uint8_t> frame = MakeSyntheticRgbFrame(kWidth, kHeight, 23U);
+    encoder.AddFrame(frame.data());
+    ASSERT_TRUE(WaitForEncodedFrames(encoder, 1U));
+    EXPECT_EQ(encoder.YuvFrameBufferBytes(), allocated_yuv_bytes);
+
+    encoder.Finish();
+    ASSERT_TRUE(android::base::file::exists(output_path));
+    const auto file_size = android::base::file::file_size(output_path);
+    ASSERT_TRUE(file_size.ok()) << file_size.status();
+    EXPECT_GT(file_size->Bytes(), 0U);
+
+    android::base::file::rm(output_path).IgnoreError();
+}
+
 }  // namespace
 }  // namespace goldfish::display

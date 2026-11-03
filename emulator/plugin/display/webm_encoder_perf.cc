@@ -70,8 +70,36 @@ void BmWebMEncoderAddFrame(benchmark::State& state) {
     state.counters["buffered_bytes"] = static_cast<double>(encoder.BufferedBytes());
     state.counters["unbounded_60f_bytes"] =
             static_cast<double>(kReferenceFrameBatch * rgb_frame.size());
+    state.counters["yuv_frame_bytes"] = static_cast<double>(encoder.YuvFrameBufferBytes());
+    state.counters["unscaled_yuv_bytes"] =
+            static_cast<double>(static_cast<size_t>(width) * height * 3 / 2);
 
     encoder.Finish();
+    android::base::file::rm(output_path).IgnoreError();
+}
+
+void BmWebMEncoderInitYuvFrame(benchmark::State& state) {
+    const int width = static_cast<int>(state.range(0));
+    const int height = static_cast<int>(state.range(1));
+    const std::filesystem::path output_path = GetBenchmarkOutputPath(width, height);
+    android::base::file::rm(output_path).IgnoreError();
+
+    size_t yuv_frame_bytes = 0;
+    for (auto _ : state) {
+        WebMEncoder encoder(output_path.string(), width, height, kDefaultFps, kDefaultBitrate);
+        if (!encoder.Init()) {
+            state.SkipWithError("Failed to initialize WebMEncoder");
+            return;
+        }
+        yuv_frame_bytes = encoder.YuvFrameBufferBytes();
+        benchmark::DoNotOptimize(yuv_frame_bytes);
+        encoder.Finish();
+    }
+
+    state.counters["yuv_frame_bytes"] = static_cast<double>(yuv_frame_bytes);
+    state.counters["unscaled_yuv_bytes"] =
+            static_cast<double>(static_cast<size_t>(width) * height * 3 / 2);
+
     android::base::file::rm(output_path).IgnoreError();
 }
 
@@ -81,6 +109,13 @@ BENCHMARK(BmWebMEncoderAddFrame)
         ->Args({1260, 2400})
         ->Args({2160, 3840})
         ->Unit(benchmark::kMicrosecond);
+
+BENCHMARK(BmWebMEncoderInitYuvFrame)
+        ->Args({1080, 1920})
+        ->Args({1080, 2400})
+        ->Args({1260, 2400})
+        ->Args({2160, 3840})
+        ->Unit(benchmark::kMillisecond);
 
 }  // namespace
 }  // namespace goldfish::display
