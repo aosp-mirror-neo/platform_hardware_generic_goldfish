@@ -92,7 +92,7 @@ using InputActiveEventSource =
 
 struct InputActiveListenerDeleter {
     struct Empty {};
-    explicit InputActiveListenerDeleter(Empty = {}) noexcept {}
+    explicit InputActiveListenerDeleter(Empty) noexcept {}
     explicit InputActiveListenerDeleter(std::weak_ptr<InputActiveEventSource> source) noexcept
             : source(std::move(source)) {}
 

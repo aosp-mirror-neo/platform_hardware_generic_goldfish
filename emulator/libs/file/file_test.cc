@@ -2,12 +2,17 @@
 
 #include <gtest/gtest.h>
 
+#include <cerrno>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <utility>
 
 #ifndef _WIN32
+#include <fcntl.h>
 #include <unistd.h>
+
+#include "goldfish/file/scoped_fd.h"
 #endif
 
 #include "absl/status/status_matchers.h"
@@ -259,5 +264,39 @@ TEST(File, readSymlink) {
     EXPECT_THAT(file::read_symlink(link_path), absl_testing::IsOkAndHolds(target_file));
 #endif
 }
+
+#ifndef _WIN32
+TEST(File, scopedFdClosesAndMovesHandle) {
+    file::ScopedFd empty;
+    EXPECT_FALSE(empty.ok());
+    EXPECT_EQ(empty.get(), -1);
+
+    int pipe_fds[2] = {-1, -1};
+    ASSERT_EQ(::pipe(pipe_fds), 0);
+    const int read_raw = pipe_fds[0];
+    const int write_raw = pipe_fds[1];
+
+    {
+        file::ScopedFd read_fd(read_raw);
+        file::ScopedFd write_fd(write_raw);
+        EXPECT_TRUE(read_fd.ok());
+        EXPECT_EQ(read_fd.get(), read_raw);
+        ASSERT_GE(::fcntl(read_raw, F_GETFD), 0);
+        ASSERT_GE(::fcntl(write_raw, F_GETFD), 0);
+
+        file::ScopedFd moved = std::move(read_fd);
+        EXPECT_FALSE(read_fd.ok());
+        EXPECT_EQ(moved.get(), read_raw);
+        EXPECT_GE(::fcntl(read_raw, F_GETFD), 0);
+    }
+
+    errno = 0;
+    EXPECT_EQ(::fcntl(read_raw, F_GETFD), -1);
+    EXPECT_EQ(errno, EBADF);
+    errno = 0;
+    EXPECT_EQ(::fcntl(write_raw, F_GETFD), -1);
+    EXPECT_EQ(errno, EBADF);
+}
+#endif
 
 }  // namespace android::base

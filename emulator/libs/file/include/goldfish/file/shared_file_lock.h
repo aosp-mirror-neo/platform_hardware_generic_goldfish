@@ -24,7 +24,7 @@
 #ifdef _WIN32
 #include "android/base/scoped_file_handle.h"
 #else
-#include "goldfish/base/unique_handle.h"
+#include "goldfish/file/scoped_fd.h"
 #endif
 
 namespace android::base::file {
@@ -67,10 +67,7 @@ class ScopedSharedFileLock {
 #ifdef _WIN32
     using LockHandle = android::base::ScopedFileHandle;
 #else
-    struct FdDeleter {
-        void operator()(int fd) const noexcept;
-    };
-    using LockHandle = ::goldfish::base::UniqueHandle<int, -1, FdDeleter>;
+    using LockHandle = ScopedFd;
 #endif
 
     ScopedSharedFileLock(std::filesystem::path lock_path,

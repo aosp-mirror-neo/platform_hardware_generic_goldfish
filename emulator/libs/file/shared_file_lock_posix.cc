@@ -32,12 +32,6 @@
 
 namespace android::base::file {
 
-void ScopedSharedFileLock::FdDeleter::operator()(int fd) const noexcept {
-    if (fd >= 0) {
-        (void)IGNORE_EINTR(::close(fd));
-    }
-}
-
 absl::StatusOr<ScopedSharedFileLock> ScopedSharedFileLock::Acquire(
         const std::filesystem::path& lock_path,
         LockShareMode mode,

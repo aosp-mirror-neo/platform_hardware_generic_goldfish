@@ -66,7 +66,7 @@ using ActiveChangedEventSource =
 
 struct ActiveChangedListenerDeleter {
     struct Empty {};
-    explicit ActiveChangedListenerDeleter(Empty = {}) noexcept {}
+    explicit ActiveChangedListenerDeleter(Empty) noexcept {}
     explicit ActiveChangedListenerDeleter(std::weak_ptr<ActiveChangedEventSource> source) noexcept
             : source(std::move(source)) {}
 

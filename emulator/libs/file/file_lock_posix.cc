@@ -45,14 +45,14 @@
 #include "absl/time/time.h"
 #include "android/base/eintr_wrapper.h"
 #include "emulator/libs/file/file_lock_internal.h"
-#include "emulator/libs/file/posix_scoped_fd.h"
+#include "emulator/libs/file/posix_fd_io.h"
 #include "goldfish/file/file.h"
+#include "goldfish/file/scoped_fd.h"
 
 namespace android::base::file {
 namespace {
 
 using internal::ParsePidString;
-using internal::ScopedFd;
 using internal::WriteAllToFd;
 
 constexpr absl::Duration kUnparsablePidStaleAge = absl::Seconds(60);

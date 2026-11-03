@@ -45,7 +45,6 @@
 
 #include "android/base/system.h"
 #include "cpu_accelerator_internal.h"
-#include "goldfish/base/unique_handle.h"
 #include "goldfish/file/file.h"
 #include "x86_cpuid.h"
 
@@ -54,6 +53,8 @@
 #include "android/base/win32_unicode_string.h"
 #include "android/base/win32_utils.h"
 #include "windows_installer.h"
+#else
+#include "goldfish/file/scoped_fd.h"
 #endif
 
 #ifdef __APPLE__
@@ -287,13 +288,8 @@ AndroidCpuAcceleration ProbeKVM(std::string* status) {
         return ANDROID_CPU_ACCELERATION_DEV_PERMISSION;
     }
 
-    struct FdDeleter {
-        void operator()(int fd) const { ::close(fd); }
-    };
-    using ScopedFd = goldfish::base::UniqueHandle<int, -1, FdDeleter>;
-
     // Open the file.
-    ScopedFd fd(TEMP_FAILURE_RETRY(open(kvm_device, O_RDWR)));
+    base::file::ScopedFd fd(TEMP_FAILURE_RETRY(open(kvm_device, O_RDWR)));
     if (!fd.ok()) {
         absl::StrAppendFormat(status, "Could not open %s : %s", kvm_device, strerror(errno));
         return ANDROID_CPU_ACCELERATION_DEV_OPEN_FAILED;

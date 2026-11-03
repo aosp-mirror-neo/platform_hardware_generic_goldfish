@@ -10,6 +10,7 @@
 | `File` | `:file` | `include/goldfish/file/file.h` | Helpers for file and path operations (`mkdir`, `rm`, `exists`, `read_symlink`, `touch`, `free_space`, `kDiskPressureLimit`). |
 | `AtomicFile` | `:file` | `include/goldfish/file/file_atomic.h` | Atomic write replacement using temporary files. |
 | `StorageCapacity` | `:file` | `include/goldfish/file/storage_capacity.h` | Type-safe handling of byte sizes (MiB, GiB, TiB) with literals (e.g. `512_MiB`). |
+| `ScopedFd` | `:scoped_fd` | `include/goldfish/file/scoped_fd.h` | POSIX RAII file descriptor wrapper (`UniqueHandle<int, -1, FdDeleter>`) with `EINTR`-safe close. |
 | `ScopedFileLock` | `:file_lock` | `include/goldfish/file/file_lock.h` | Exclusive, PID-advertising cross-process lock (`<target>.lock` / `<target>.lock\pid`) compatible with Android Studio and legacy QEMU2, with stale-PID recovery. |
 | `ScopedSharedFileLock` | `:shared_file_lock` | `include/goldfish/file/shared_file_lock.h` | Cross-process 1-Writer XOR N-Readers lock (`flock` / Win32 share modes, non-inheritable handles) compatible with `multiinstance.lock`. |
 
