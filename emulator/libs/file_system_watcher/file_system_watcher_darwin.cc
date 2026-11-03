@@ -45,9 +45,6 @@ struct FSEventFlagsWrapper {
 };
 
 struct CFTypeDeleter {
-    struct Empty {};
-    CFTypeDeleter() = default;
-    explicit CFTypeDeleter(Empty) {}
     void operator()(CFTypeRef ref) const {
         if (ref) CFRelease(ref);
     }

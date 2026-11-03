@@ -68,9 +68,6 @@ namespace goldfish::wasapi {
 
 template <typename T>
 struct CoTaskMemDeleter {
-    struct Empty {};
-    CoTaskMemDeleter() = default;
-    explicit CoTaskMemDeleter(Empty /*empty*/) {}
     void operator()(T* ptr) const noexcept {
         if (ptr != nullptr) {
             ::CoTaskMemFree(ptr);
@@ -82,9 +79,6 @@ template <typename T>
 using ScopedCoTaskMem = goldfish::base::UniqueHandle<T*, nullptr, CoTaskMemDeleter<T>>;
 
 struct AvrtHandleDeleter {
-    struct Empty {};
-    AvrtHandleDeleter() = default;
-    explicit AvrtHandleDeleter(Empty /*empty*/) {}
     void operator()(HANDLE handle) const noexcept {
         if (handle != nullptr) {
             ::AvRevertMmThreadCharacteristics(handle);

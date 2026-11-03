@@ -28,9 +28,6 @@
 namespace android::base::file::internal {
 
 struct PosixFdDeleter {
-    struct Empty {};
-    PosixFdDeleter() = default;
-    explicit PosixFdDeleter(Empty) {}
     void operator()(int fd) const noexcept {
         if (fd >= 0) {
             (void)IGNORE_EINTR(::close(fd));

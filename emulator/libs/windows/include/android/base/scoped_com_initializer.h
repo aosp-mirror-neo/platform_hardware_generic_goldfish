@@ -32,9 +32,6 @@ namespace android::base {
 
 namespace internal {
 struct ComInitializerDeleter {
-    struct Empty {};
-    ComInitializerDeleter() = default;
-    explicit ComInitializerDeleter(Empty) {}
     void operator()(HRESULT hr) const noexcept {
         if (SUCCEEDED(hr)) {
             ::CoUninitialize();

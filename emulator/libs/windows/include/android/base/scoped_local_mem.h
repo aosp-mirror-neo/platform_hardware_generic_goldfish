@@ -24,9 +24,6 @@
 namespace android::base {
 
 struct LocalDeleter {
-    struct Empty {};
-    LocalDeleter() = default;
-    LocalDeleter(Empty) {}
     void operator()(void* ptr) const {
         if (ptr) {
             ::LocalFree(ptr);
