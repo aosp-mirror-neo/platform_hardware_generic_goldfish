@@ -157,6 +157,14 @@ std::vector<QemuKeyEvent> ascii_to_qcode(unsigned short unicode, bool down) {
     return {};
 }
 
+bool IsTypeableCodePoint(int32_t code_point) {
+    // Text typing skips code points above ASCII, even those the key map reaches through an Alt
+    // chord.
+    constexpr int32_t kMaxAsciiCodePoint = 0x7F;
+    return code_point >= 0 && code_point <= kMaxAsciiCodePoint &&
+           !ascii_to_qcode(static_cast<unsigned short>(code_point), /*down=*/true).empty();
+}
+
 void QemuKeyEvent::send(QKbdState* kbd) const {
     VLOG(1) << "Sending QKeyCode: " << code << " " << (down ? "down" : "up");
     qkbd_state_key_event(kbd, code, down);

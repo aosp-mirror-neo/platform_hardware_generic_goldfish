@@ -24,12 +24,15 @@
 #include "absl/strings/string_view.h"
 
 #include "android/emulation/control/keyboard/key_code_resolver.h"
+#include "android/emulation/control/keyboard/key_conversion.h"
 #include "android/status/status_macros.h"
+#include "goldfish/parsing/utf8_iterator.h"
 
 namespace goldfish::grpc::v2 {
 
 namespace {
 
+using ::android::emulation::control::keyboard::IsTypeableCodePoint;
 using ::android::emulation::control::keyboard::ResolveEvdevKeyCode;
 using ::android::emulation::v2::AxisEvent;
 using ::android::emulation::v2::AxisType;
@@ -38,11 +41,34 @@ using ::android::emulation::v2::InputEvent;
 using ::android::emulation::v2::KeyEvent;
 using ::android::emulation::v2::PointerAction;
 using ::android::emulation::v2::PointerEvent;
+using ::android::emulation::v2::TextEvent;
 using ::android::emulation::v2::ToolType;
 using ::goldfish::display::IMultiDisplay;
+using ::goldfish::parsing::Utf8Iterator;
 
 constexpr int32_t kSupportedButtonMask =
         static_cast<int32_t>(ButtonMask::BUTTON_MASK_STYLUS_PRIMARY);
+
+absl::Status ValidateTextEvent(const TextEvent& text) {
+    Utf8Iterator next_code_point(text.text());
+    // Every character before the first rejected one is ASCII, so `index` counts bytes, code
+    // points, and UTF-16 code units alike. Malformed UTF-8 decodes to U+FFFD.
+    int index = 0;
+    for (int32_t code_point = next_code_point(); code_point >= 0;
+         code_point = next_code_point(), ++index) {
+        if (!IsTypeableCodePoint(code_point)) {
+            // Windows text ends lines with "\r\n", and only the '\n' types Enter.
+            const absl::string_view line_ending_hint =
+                    code_point == '\r' ? " Convert '\\r\\n' line endings to '\\n'." : "";
+            return absl::InvalidArgumentError(absl::StrFormat(
+                    "Invalid TextEvent.text character U+%04X at index %d: TextEvent types US "
+                    "English key presses, so only printable ASCII (U+0020 to U+007E), '\\n', and "
+                    "'\\t' are supported. Remove or replace the character before sending.%s",
+                    code_point, index, line_ending_hint));
+        }
+    }
+    return absl::OkStatus();
+}
 
 absl::Status ValidateKeyIdentifier(const KeyEvent& key) {
     if (ResolveEvdevKeyCode(key) != 0) {
@@ -196,7 +222,7 @@ absl::Status V2InputValidator::Validate(const InputEvent& event) const {
                     "on this device. Enable hw.keyboard in the device hardware configuration or "
                     "check that CapabilitiesService reports INPUT_FEATURE_KEYBOARD.");
         }
-        return absl::OkStatus();
+        return ValidateTextEvent(event.text());
     case InputEvent::EVENT_NOT_SET:
         break;
     }

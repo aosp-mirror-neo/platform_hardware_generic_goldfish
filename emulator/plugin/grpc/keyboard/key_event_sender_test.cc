@@ -165,5 +165,14 @@ TEST_F(KeyEventSenderTest, EmitUtf8StringHandlesMalformedAndTrailingSequencesWit
                             QemuKeyEvent{Q_KEY_CODE_Z, true}, QemuKeyEvent{Q_KEY_CODE_Z, false}));
 }
 
+// V2InputValidator accepts the code points for which IsTypeableCodePoint() is true, so text typing
+// must type each of them and nothing else.
+TEST_F(KeyEventSenderTest, EmitUtf8StringTypesExactlyTheTypeableAsciiCodePoints) {
+    for (int code_point = 0; code_point <= 0x7F; ++code_point) {
+        const std::string text(1, static_cast<char>(code_point));
+        EXPECT_EQ(!CollectUtf8Events(text).empty(), IsTypeableCodePoint(code_point)) << code_point;
+    }
+}
+
 }  // namespace
 }  // namespace android::emulation::control::keyboard

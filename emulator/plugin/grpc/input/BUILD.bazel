@@ -194,11 +194,13 @@ cc_library(
     hdrs = ["v2_input_validator.h"],
     deps = [
         ":slot_registry",
+        "//emulator/libs/parsing:utf8_iterator",
         "//emulator/libs/status_macros",
         "//emulator/plugin/display",
         "//emulator/plugin/display:abstract_multi_display",
         "//emulator/plugin/display:base",
         "//emulator/plugin/grpc/keyboard:key_code_resolver",
+        "//emulator/plugin/grpc/keyboard:keyconversion",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",

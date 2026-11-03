@@ -423,19 +423,19 @@ TEST(InProcessRtcServiceTest, InputSenderV2DispatchesToAHumanSessionClosedWithTh
 
     sender->SendV2Event(v2_event);
     ::android::emulation::v2::InputEvent text_event;
-    text_event.mutable_text()->set_text("测试_🚀_é");
+    text_event.mutable_text()->set_text("hello 123");
     sender->SendV2Event(text_event);
     EXPECT_THAT(dispatcher->calls,
-                ::testing::ElementsAre("pointer 7 display 0", "text 7 测试_🚀_é"));
+                ::testing::ElementsAre("pointer 7 display 0", "text 7 hello 123"));
 
     // DataChannel close (Stop) releases the session immediately, before sender destruction.
     sender->Stop();
     EXPECT_THAT(dispatcher->calls,
-                ::testing::ElementsAre("pointer 7 display 0", "text 7 测试_🚀_é", "close 7"));
+                ::testing::ElementsAre("pointer 7 display 0", "text 7 hello 123", "close 7"));
 
     sender.reset();
     EXPECT_THAT(dispatcher->calls,
-                ::testing::ElementsAre("pointer 7 display 0", "text 7 测试_🚀_é", "close 7"));
+                ::testing::ElementsAre("pointer 7 display 0", "text 7 hello 123", "close 7"));
 }
 
 TEST(InProcessRtcServiceTest, InputSenderV2DropsInvalidEventsBeforeDispatch) {
@@ -469,6 +469,10 @@ TEST(InProcessRtcServiceTest, InputSenderV2DropsInvalidEventsBeforeDispatch) {
             ::android::emulation::v2::KeyAction::KEY_ACTION_PRESS);
     invalid_key_event.mutable_key()->set_dom_code("a");
     sender->SendV2Event(invalid_key_event);
+
+    ::android::emulation::v2::InputEvent non_ascii_text_event;
+    non_ascii_text_event.mutable_text()->set_text("测试_🚀_é");
+    sender->SendV2Event(non_ascii_text_event);
 
     EXPECT_THAT(dispatcher->calls, ::testing::IsEmpty());
 }

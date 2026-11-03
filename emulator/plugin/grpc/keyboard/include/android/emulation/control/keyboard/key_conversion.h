@@ -181,6 +181,18 @@ QKeyCode keycode_to_qcode(uint32_t from, KeyCodeType source);
 std::vector<QemuKeyEvent> ascii_to_qcode(unsigned short ascii, bool down);
 
 /**
+ * @brief Returns whether text typing produces key presses for `code_point`.
+ *
+ * `EmitUtf8String()` types only the ASCII code points that `ascii_to_qcode()`
+ * maps to keys: printable ASCII, '\n' (Enter), and '\t' (Tab). Validate text
+ * with this predicate so that validation matches typing.
+ *
+ * @param code_point A Unicode code point.
+ * @return True if `code_point` is typed as US English key presses.
+ */
+bool IsTypeableCodePoint(int32_t code_point);
+
+/**
  * @brief Converts a DOM Code to an evdev keycode.
  *
  * @param key The DOM Code to convert.
