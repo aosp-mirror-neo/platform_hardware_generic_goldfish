@@ -300,12 +300,10 @@ void HttpSession::CommitCurrentHeader() {
     if (current_header_field_.empty()) {
         return;
     }
-    auto it = current_request_.headers_.find(current_header_field_);
-    if (it != current_request_.headers_.end()) {
+    auto [it, inserted] = current_request_.headers_.try_emplace(std::move(current_header_field_),
+                                                                std::move(current_header_value_));
+    if (!inserted) {
         it->second.append(", ").append(current_header_value_);
-    } else {
-        current_request_.headers_.emplace(std::move(current_header_field_),
-                                          std::move(current_header_value_));
     }
     current_header_field_.clear();
     current_header_value_.clear();

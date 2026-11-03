@@ -791,6 +791,72 @@ void BmHttpSessionReset(benchmark::State& state) {
 }
 BENCHMARK(BmHttpSessionReset);
 
+// ---------------------------------------------------------------------------
+// 8. HttpSession CommitCurrentHeader (single-lookup try_emplace vs find+emplace)
+// ---------------------------------------------------------------------------
+
+constexpr std::array<std::pair<std::string_view, std::string_view>, 8> kSampleRequestHeaders = {{
+    {"Host", "127.0.0.1:8554"},
+    {"User-Agent", "grpc-web-javascript/0.1"},
+    {"Accept", "application/grpc-web-text+proto"},
+    {"Content-Type", "application/grpc-web-text+proto"},
+    {"Content-Length", "128"},
+    {"Origin", "http://localhost:3000"},
+    {"X-Grpc-Web", "1"},
+    {"X-Android-Emulator-Session", "emulator-5554"},
+}};
+
+inline void CommitHeaderBaseline(HttpRequest::HeaderMap& headers, std::string& field,
+                                 std::string& value) {
+    auto it = headers.find(field);
+    if (it != headers.end()) {
+        it->second.append(", ").append(value);
+    } else {
+        headers.emplace(std::move(field), std::move(value));
+    }
+}
+
+void BmCommitHeadersBaseline(benchmark::State& state) {
+    HttpRequest::HeaderMap headers;
+    headers.reserve(kSampleRequestHeaders.size());
+    std::string field;
+    std::string value;
+    for (auto _ : state) {
+        headers.clear();
+        for (const auto& [name, val] : kSampleRequestHeaders) {
+            field.assign(name.data(), name.size());
+            value.assign(val.data(), val.size());
+            CommitHeaderBaseline(headers, field, value);
+            field.clear();
+            value.clear();
+        }
+        benchmark::DoNotOptimize(headers);
+    }
+}
+BENCHMARK(BmCommitHeadersBaseline);
+
+void BmCommitHeaders(benchmark::State& state) {
+    HttpRequest::HeaderMap headers;
+    headers.reserve(kSampleRequestHeaders.size());
+    std::string field;
+    std::string value;
+    for (auto _ : state) {
+        headers.clear();
+        for (const auto& [name, val] : kSampleRequestHeaders) {
+            field.assign(name.data(), name.size());
+            value.assign(val.data(), val.size());
+            auto [it, inserted] = headers.try_emplace(std::move(field), std::move(value));
+            if (!inserted) {
+                it->second.append(", ").append(value);
+            }
+            field.clear();
+            value.clear();
+        }
+        benchmark::DoNotOptimize(headers);
+    }
+}
+BENCHMARK(BmCommitHeaders);
+
 }  // namespace
 }  // namespace goldfish::http
 
