@@ -94,9 +94,10 @@ class EventLoop : public CallbackEventSource<LooperStatusEvent> {
      */
     using Task = absl::AnyInvocable<void()>;
     /**
-     * @brief A repeating task that returns whether it should be rescheduled.
+     * @brief A repeating task that returns whether it should keep repeating.
      *
-     * The task is executed repeatedly until it returns false, or until it is cancelled.
+     * Returning false disarms the timer (stopping further intervals) while
+     * keeping a caller-owned ScopedTimer valid for subsequent Schedule() calls.
      */
     using RepeatingTask = absl::AnyInvocable<bool()>;
 
@@ -123,28 +124,38 @@ class EventLoop : public CallbackEventSource<LooperStatusEvent> {
         /**
          * @brief (Re)Schedules a timer with a new delay and interval.
          *
-         * This method updates both the delay for the next execution and the
-         * subsequent interval for the timer. This does nothing if the timer has
-         * already been cancelled. Likewise if the event loop has shutdown.
+         * Calling Schedule() on an already-armed timer replaces its pending
+         * deadline and interval rather than queuing an additional expiration
+         * (use EventLoop::Post(task, delay) to queue independent delayed tasks).
+         * Does nothing if the event loop is shutting down or has finished.
          *
-         * @param new_delay The new delay before the next execution.
-         * @param new_interval The new interval for subsequent executions. When
-         * set to absl::ZeroDuration(), the timer will not repeat.
+         * @param new_delay The delay before the next execution.
+         * @param new_interval The interval for subsequent executions. When set
+         * to absl::ZeroDuration(), the timer executes once and disarms.
          */
         virtual void Schedule(absl::Duration new_delay, absl::Duration new_interval) = 0;
 
         /**
-         * @brief (Re)Schedules a timer with a new delay.
+         * @brief (Re)Schedules a one-shot timer with a new delay.
          *
-         * This method updates the delay for the next execution. This does
-         * nothing if the timer has already been cancelled. Likewise if the
-         * event loop has shutdown.
+         * Calling Schedule() on an already-armed timer replaces its pending
+         * deadline (use EventLoop::Post(task, delay) to queue independent
+         * delayed tasks). Does nothing if the event loop is shutting down or
+         * has finished.
          *
-         * @param new_delay The new delay before the next execution.
+         * @param new_delay The delay before the next execution.
          */
         void Schedule(absl::Duration new_delay) { Schedule(new_delay, absl::ZeroDuration()); }
     };
 
+    /**
+     * @brief Custom std::unique_ptr deleter for ScopedTimer.
+     *
+     * Invoking this deleter triggers logical cancellation (Timer::Cancel())
+     * rather than `delete`. Actual object lifetime and memory deallocation are
+     * managed by the timer implementation's internal std::shared_ptr pins
+     * (caller_pin_ and loop registration pin).
+     */
     struct TimerDeleter {
         void operator()(Timer* t) const { t->Cancel(); }
     };
@@ -372,8 +383,14 @@ class EventLoop : public CallbackEventSource<LooperStatusEvent> {
     }
 
     /**
-     * @brief Schedules a cancellable task to be executed once after a delay.
-     * @param task The task to execute. Must return true to reschedule, or false to stop.
+     * @brief Creates an unarmed cancellable timer bound to this event loop.
+     *
+     * Call Schedule() on the returned handle to arm or re-arm the timer. If
+     * `task` returns false, the timer disarms and can be armed again with a
+     * subsequent Schedule() call until the ScopedTimer is destroyed or reset.
+     *
+     * @param task The task to execute. Must return true to continue repeating,
+     * or false to disarm.
      * @return A ScopedTimer handle for scheduling and cancellation.
      */
     virtual ScopedTimer CreateTimer(RepeatingTask task) = 0;

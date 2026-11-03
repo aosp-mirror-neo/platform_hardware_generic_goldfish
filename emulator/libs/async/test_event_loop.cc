@@ -14,6 +14,8 @@
 #include "goldfish/async/testing/test_event_loop.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <future>
@@ -75,6 +77,7 @@ class TestEventLoopImpl : public TestEventLoop {
         // handle to the timer that is handed to the developer
         // we track the liveness and cancellation state here.
         std::weak_ptr<TestTimer> handle;
+        uint64_t schedule_seq = 0;
         FlowId flow_id = 0;
 
         bool operator>(const ScheduledTask& other) const {
@@ -84,10 +87,15 @@ class TestEventLoopImpl : public TestEventLoop {
 
     class TestTimer : public Timer, public std::enable_shared_from_this<TestTimer> {
       public:
+        enum class Ownership : uint8_t {
+            kCallerScoped,
+            kLoopManaged,
+        };
+
         static std::shared_ptr<TestTimer> Create(TestEventLoopImpl* loop, RepeatingTask task,
-                                                 FlowId flow_id, bool pin_for_caller) {
-            auto timer = std::make_shared<TestTimer>(loop, std::move(task), flow_id);
-            if (pin_for_caller) {
+                                                 FlowId flow_id, Ownership ownership) {
+            auto timer = std::make_shared<TestTimer>(loop, std::move(task), flow_id, ownership);
+            if (ownership == Ownership::kCallerScoped) {
                 timer->caller_pin_ = timer;
             } else {
                 timer->loop_pin_ = timer;
@@ -95,10 +103,11 @@ class TestEventLoopImpl : public TestEventLoop {
             return timer;
         }
 
-        TestTimer(TestEventLoopImpl* loop, RepeatingTask task, FlowId flow_id = 0)
+        TestTimer(TestEventLoopImpl* loop, RepeatingTask task, FlowId flow_id, Ownership ownership)
                 : loop_(loop)
                 , pending_task_(std::make_shared<RepeatingTask>(std::move(task)))
-                , flow_id_(flow_id) {}
+                , flow_id_(flow_id)
+                , ownership_(ownership) {}
         ~TestTimer() override = default;
         void Cancel() override {
             auto caller_pin = std::move(caller_pin_);
@@ -109,6 +118,9 @@ class TestEventLoopImpl : public TestEventLoop {
             loop_pin_.reset();
         }
         bool IsCancelled() const { return cancelled_; }
+        Ownership GetOwnership() const { return ownership_; }
+        uint64_t NextScheduleSeq() { return ++schedule_seq_; }
+        uint64_t GetScheduleSeq() const { return schedule_seq_.load(); }
         std::shared_ptr<RepeatingTask> task() { return pending_task_; }  // NOLINT
         FlowId GetFlowId() const { return flow_id_; }
         void Schedule(absl::Duration new_delay, absl::Duration new_interval) override {
@@ -121,10 +133,12 @@ class TestEventLoopImpl : public TestEventLoop {
       private:
         std::shared_ptr<TestTimer> caller_pin_;
         std::shared_ptr<TestTimer> loop_pin_;
-        std::atomic_bool cancelled_{false};
         TestEventLoopImpl* loop_;
         std::shared_ptr<RepeatingTask> pending_task_;
+        std::atomic<uint64_t> schedule_seq_{0};
         ::goldfish::async::FlowId flow_id_;
+        const Ownership ownership_;
+        std::atomic_bool cancelled_{false};
     };
 
     enum class Command : uint8_t { kNone, kRunOne, kRunMany, kAdvanceTime };
@@ -250,7 +264,7 @@ absl::Status TestEventLoopImpl::PostDelayed(Task task, absl::Duration delay, Flo
                 task();
                 return false;
             },
-            flow_id, /*pin_for_caller=*/false);
+            flow_id, TestTimer::Ownership::kLoopManaged);
     timer->Schedule(delay, absl::ZeroDuration());
     return absl::OkStatus();
 }
@@ -261,13 +275,14 @@ size_t TestEventLoopImpl::TaskCount() const {
 }
 
 EventLoop::ScopedTimer TestEventLoopImpl::CreateTimer(RepeatingTask task) {
-    auto timer = TestTimer::Create(this, std::move(task), 0, /*pin_for_caller=*/true);
+    auto timer = TestTimer::Create(this, std::move(task), 0, TestTimer::Ownership::kCallerScoped);
     return ScopedTimer(timer.get());
 }
 
 void TestEventLoopImpl::Reschedule(std::shared_ptr<TestTimer> timer, absl::Duration new_delay,
                                    absl::Duration new_interval) {
     absl::MutexLock lock(&mutex_);
+    const uint64_t seq = timer->NextScheduleSeq();
     auto it = std::ranges::find_if(scheduled_tasks_, [&](const ScheduledTask& task) {
         auto handle = task.handle.lock();
         return handle && handle.get() == timer.get();
@@ -276,10 +291,11 @@ void TestEventLoopImpl::Reschedule(std::shared_ptr<TestTimer> timer, absl::Durat
     if (it != scheduled_tasks_.end()) {
         it->execution_time = now_ + new_delay;
         it->interval = new_interval;
+        it->schedule_seq = seq;
         std::ranges::make_heap(scheduled_tasks_, std::greater<>{});
     } else {
         scheduled_tasks_.push_back(
-                {now_ + new_delay, new_interval, timer->task(), timer, timer->GetFlowId()});
+                {now_ + new_delay, new_interval, timer->task(), timer, seq, timer->GetFlowId()});
         std::ranges::push_heap(scheduled_tasks_, std::greater<>{});
     }
 }
@@ -397,9 +413,10 @@ void TestEventLoopImpl::AdvanceClockUnlocked(absl::Duration duration)
 
     for (auto& task : tasks_to_run) {
         auto handle = task.handle.lock();
-        if (!handle || handle->IsCancelled()) {
+        if (!handle || handle->IsCancelled() || task.schedule_seq != handle->GetScheduleSeq()) {
             continue;
         }
+        const uint64_t seq_before = handle->GetScheduleSeq();
 
         // Run the task without a lock.
         mutex_.Unlock();
@@ -409,10 +426,14 @@ void TestEventLoopImpl::AdvanceClockUnlocked(absl::Duration duration)
         const bool keep_repeating = (*task.task)();
         mutex_.Lock();
 
-        // Reschedule task if needed.
+        // Reschedule task if needed, unless the callback cancelled or explicitly
+        // rescheduled the timer itself.
         if (!keep_repeating) {
-            handle->MarkCancelled();
-        } else if (task.interval > absl::ZeroDuration()) {
+            if (handle->GetOwnership() == TestTimer::Ownership::kLoopManaged) {
+                handle->MarkCancelled();
+            }
+        } else if (task.interval > absl::ZeroDuration() && !handle->IsCancelled() &&
+                   handle->GetScheduleSeq() == seq_before) {
             task.execution_time += task.interval;
             scheduled_tasks_.push_back(std::move(task));
             std::ranges::push_heap(scheduled_tasks_, std::greater<>{});

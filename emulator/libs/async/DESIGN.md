@@ -217,12 +217,13 @@ Because `ScopedTimer` holds a raw `Timer*` while the event loop also references 
 1. **Caller handle lifetime (`ScopedTimer`)**: Starts when `CreateTimer()` returns `ScopedTimer(timer.get())` and ends when `TimerDeleter` invokes `t->Cancel()`.
 2. **Event-loop registration lifetime**: Starts when the timer is registered with the backend loop (`uv_timer_init`, `timer_init_ms`, etc.) and ends when the backend finishes closing the handle (such as libuv's asynchronous `uv_close` callback `UnpinItselfOnClose`, or `ShutdownTimersInternal()` during loop teardown).
 
-Every timer implementation (`LibuvTimer`, `QemuTimer`, `TestEventLoop::ImmediateTimer`, `VCpuTimer`) maintains two distinct `std::shared_ptr` pins to itself:
+Every timer implementation (`LibuvTimer`, `QemuTimer`, `TestEventLoopImpl::TestTimer`, `VCpuTimer`) maintains two distinct `std::shared_ptr` pins to itself:
 
-- **`caller_pin_`** (`mCallerPin` in `VCpuTimer`): Acquired in `Create(..., /*pin_for_caller=*/true)` and moved into a local at the start of `Cancel()` (`auto caller_pin = std::move(caller_pin_);`).
+- **`caller_pin_`** (`mCallerPin` in `VCpuTimer`): Acquired in `Create(..., Ownership::kCallerScoped)` and moved into a local at the start of `Cancel()` (`auto caller_pin = std::move(caller_pin_);`).
   - If the event loop shuts down and unregisters all active timers while a service object still holds a `ScopedTimer` member, `caller_pin_` keeps the `Timer` alive until the service's destructor runs `~ScopedTimer() -> TimerDeleter -> t->Cancel()`.
-  - Fire-and-forget timers created by `PostDelayed` pass `pin_for_caller = false` (`caller_pin_ == nullptr`) because no `ScopedTimer` is returned to the caller.
-- **Loop registration pin** (`uv_pin_` in `LibuvTimer`, `pinned_` in `QemuTimer` and `ImmediateTimer`, `mPendingPin` in `VCpuTimer`): Held while the backend handle is registered or closing, and released only when the backend is guaranteed never to touch the timer again:
+  - When a `kCallerScoped` timer's callback returns `false`, the timer disarms (stops further intervals) without closing its backend handle, so the owner can re-arm it later via `Schedule()`.
+  - Fire-and-forget timers created by `PostDelayed` pass `Ownership::kLoopManaged` (`caller_pin_ == nullptr`) and self-cancel as soon as they fire.
+- **Loop registration pin** (`uv_pin_` in `LibuvTimer`, `pinned_` in `QemuTimer`, `loop_pin_` in `TestTimer`, `mPendingPin` in `VCpuTimer`): Held while the backend handle is registered or closing, and released only when the backend is guaranteed never to touch the timer again:
   - In **`LibuvTimer`**, `uv_pin_` is acquired in `InitOnLoop()` (`uv_timer_init`) and released in `UnpinItselfOnClose()` after `uv_close(&uv_timer_handle_, UnpinItselfOnClose)` completes on the loop thread.
   - In **`QemuTimer`**, `pinned_` is acquired under `active_timers_mutex_` upon registration in `active_timers_` and released when `UnregisterTimer()` or `ShutdownTimersInternal()` removes it and any in-flight callback has completed.
 
@@ -266,9 +267,17 @@ When `CreateTimer()`, `ScheduleDelayed()`, or `ScheduleRepeating()` returns a `S
   - Off the loop thread while `LifecycleState::kRunning`, `LibuvTimer::Create()` executes `InitOnLoop()` synchronously via `PostAndWait()`.
   - While `LifecycleState::kFinished` or shutting down, `LibuvTimer::Create()` marks the timer `cancelled_ = true` and returns immediately without touching `uv_loop_t`.
 
-### 4.5 Non-Blocking `Schedule()` & Sequence Fencing
+### 4.5 Non-Blocking `Schedule()`, Deadline Replacement & Sequence Fencing
 
-`Timer::Schedule(new_delay, new_interval)` is asynchronous and non-blocking, posting the `uv_timer_start` or `timer_mod` update to the loop thread. To prevent a stale queued `Schedule()` task or a racing expiration from firing after a newer `Schedule()` call:
+`Timer::Schedule(new_delay, new_interval)` is asynchronous and non-blocking, posting the `uv_timer_start` or `timer_mod` update to the loop thread.
+
+Calling `Schedule()` on an already-armed `ScopedTimer` **replaces** its pending deadline and interval rather than queueing an additional expiration:
+
+- **Trailing-edge debouncing / idle timeouts**: Calling `Schedule(timeout)` on every incoming event pushes the deadline out until activity stops.
+- **Leading-edge coalescing**: Calling `Schedule(window)` only when transitioning from idle to dirty (`!pending_.has_value()`) bounds latency under steady load without starving flushes (see §7.3).
+- **Independent delayed events**: Callers that need every delayed callback to fire independently rather than replacing a single timer's deadline use `EventLoop::Post(task, delay)`.
+
+To prevent a stale queued `Schedule()` task or a racing expiration from firing after a newer `Schedule()` call:
 
 1. Each call to `Schedule()` atomically increments `const uint64_t seq = ++schedule_seq_;` and posts a task capturing `seq` to the loop thread.
 2. When the task runs on the loop thread, if `seq != schedule_seq_.load()`, a newer `Schedule()` call has superseded it and the stale update returns early.
@@ -378,15 +387,22 @@ class FrameCoalescer {
   public:
     explicit FrameCoalescer(goldfish::async::EventLoop* loop)
         : loop_(loop),
-          flush_timer_(loop_->CreateTimer([this]() { OnFlushTimer(); })) {}
+          flush_timer_(loop_->CreateTimer([this]() {
+              OnFlushTimer();
+              return false;
+          })) {}
 
     ~FrameCoalescer() = default;  // ~flush_timer_ runs first, cancelling before ~mutex_
 
     void OnNewFrame(Frame frame) {
         absl::MutexLock lock(&mutex_);
+        const bool arm_timer = !pending_frame_.has_value();
         pending_frame_ = std::move(frame);
-        // Non-blocking: safe to call while holding mutex_
-        flush_timer_->Schedule(absl::Milliseconds(16));
+        if (arm_timer) {
+            // Leading-edge coalesce: arm once per batch so steady traffic does not
+            // push the deadline out indefinitely. Non-blocking under mutex_.
+            flush_timer_->Schedule(absl::Milliseconds(16));
+        }
     }
 
   private:
@@ -434,17 +450,24 @@ void StreamInputReader::OnCancel() {
 ### 7.5 Deterministic Unit Testing with `TestEventLoop`
 
 ```cpp
-goldfish::async::testing::TestEventLoop loop;
+auto loop = goldfish::async::testing::TestEventLoop::Create();
 int count = 0;
 
-auto timer = loop.ScheduleRepeating([&]() { ++count; }, absl::Milliseconds(10));
+auto timer = loop->ScheduleRepeating(
+    [&]() {
+        ++count;
+        return true;
+    },
+    absl::Milliseconds(10), absl::Milliseconds(10));
 
-// Advancing the simulated clock runs all timer expirations up to T=35ms:
-loop.AdvanceClock(absl::Milliseconds(35));
+// Advancing the simulated clock runs each scheduled interval deterministically:
+loop->AdvanceClock(absl::Milliseconds(10));
+loop->AdvanceClock(absl::Milliseconds(10));
+loop->AdvanceClock(absl::Milliseconds(10));
 EXPECT_EQ(count, 3);
 
 // Resetting ScopedTimer cancels further expirations:
 timer.reset();
-loop.AdvanceClock(absl::Milliseconds(50));
+loop->AdvanceClock(absl::Milliseconds(10));
 EXPECT_EQ(count, 3);
 ```

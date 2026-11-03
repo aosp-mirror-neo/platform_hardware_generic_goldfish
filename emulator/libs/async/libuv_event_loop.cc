@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <future>
 #include <memory>
@@ -201,14 +202,20 @@ class LibuvTimer : public EventLoop::Timer, public std::enable_shared_from_this<
     struct Private {};
 
   public:
+    enum class Ownership : uint8_t {
+        kCallerScoped,  // Returned via ScopedTimer; disarms on false and stays reschedulable.
+        kLoopManaged,   // Internal PostDelayed one-shot; self-cancels after firing.
+    };
+
     // Factory function to ensure proper std::shared_ptr creation.
     // this sets up the mUvTimer with a self reference so it can be
     // placed in a queue.
     static std::shared_ptr<LibuvTimer> Create(LibuvEventLoopImpl* loop,
-                                              EventLoop::RepeatingTask task, FlowId flow_id = 0,
-                                              bool pin_for_caller = true) {
-        auto timer = std::make_shared<LibuvTimer>(loop, std::move(task), flow_id, Private());
-        if (pin_for_caller) {
+                                              EventLoop::RepeatingTask task, FlowId flow_id,
+                                              Ownership ownership) {
+        auto timer =
+                std::make_shared<LibuvTimer>(loop, std::move(task), flow_id, ownership, Private());
+        if (ownership == Ownership::kCallerScoped) {
             timer->caller_pin_ = timer;
         }
         {
@@ -253,8 +260,12 @@ class LibuvTimer : public EventLoop::Timer, public std::enable_shared_from_this<
         that->uv_pin_.reset();  // potentially calls ~LibuvTimer
     }
 
-    LibuvTimer(LibuvEventLoopImpl* loop, EventLoop::RepeatingTask task, FlowId flow_id, Private)
-            : event_loop_(loop), task_(std::move(task)), flow_id_(flow_id) {
+    LibuvTimer(LibuvEventLoopImpl* loop, EventLoop::RepeatingTask task, FlowId flow_id,
+               Ownership ownership, Private)
+            : event_loop_(loop)
+            , task_(std::move(task))
+            , flow_id_(flow_id)
+            , ownership_(ownership) {
         DCHECK(event_loop_);
     }
 
@@ -281,8 +292,10 @@ class LibuvTimer : public EventLoop::Timer, public std::enable_shared_from_this<
     }
 
     void Schedule(absl::Duration new_delay, absl::Duration new_interval) override {
+        // Because Timer::Cancel() is invoked solely by ~ScopedTimer(), a live
+        // ScopedTimer is only marked cancelled_ when the loop is shutting down
+        // or has finished, where EventLoop::Timer::Schedule() is a no-op.
         if (cancelled_.load()) {
-            LOG(ERROR) << "Can't schedule a timer after it has been cancelled";
             return;
         }
         const uint64_t seq = ++schedule_seq_;
@@ -291,7 +304,6 @@ class LibuvTimer : public EventLoop::Timer, public std::enable_shared_from_this<
                                               new_interval_ms =
                                                       absl::ToInt64Milliseconds(new_interval)] {
             if (self->cancelled_.load() || !self->uv_pin_ || self->closing_) {
-                LOG(ERROR) << "Can't schedule a timer after it has been cancelled";
                 return;
             }
             if (seq != self->schedule_seq_.load()) {
@@ -348,7 +360,11 @@ class LibuvTimer : public EventLoop::Timer, public std::enable_shared_from_this<
         }
 
         if (!task_()) {
-            DoCancel(false);
+            if (ownership_ == Ownership::kLoopManaged) {
+                DoCancel(false);
+            } else {
+                uv_timer_stop(&uv_timer_handle_);
+            }
         }
     }
 
@@ -376,6 +392,7 @@ class LibuvTimer : public EventLoop::Timer, public std::enable_shared_from_this<
     // Schedule() has superseded it.
     uint64_t active_schedule_seq_ = 0;
 
+    const Ownership ownership_;
     bool closing_ = false;
     std::atomic<bool> cancelled_{false};
 
@@ -457,7 +474,8 @@ void LibuvEventLoopImpl::ShutdownTimersInternal() {
 }
 
 EventLoop::ScopedTimer LibuvEventLoopImpl::CreateTimer(RepeatingTask task) {
-    auto timer = LibuvTimer::Create(this, std::move(task), /*flow_id=*/0, /*pin_for_caller=*/true);
+    auto timer = LibuvTimer::Create(this, std::move(task), /*flow_id=*/0,
+                                    LibuvTimer::Ownership::kCallerScoped);
     return ScopedTimer(timer.get());
 }
 
@@ -476,7 +494,7 @@ absl::Status LibuvEventLoopImpl::PostDelayed(Task task, absl::Duration delay, Fl
                     task();
                     return false;
                 },
-                flow_id, /*pin_for_caller=*/false);
+                flow_id, LibuvTimer::Ownership::kLoopManaged);
         timer->Schedule(delay, absl::ZeroDuration());
     });
     return absl::OkStatus();
