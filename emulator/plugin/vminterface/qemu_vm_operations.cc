@@ -304,6 +304,8 @@ class QemuVmOperations : public VmOperations {
         return RunOnQemuLoop([this] {
             RETURN_IF_ERROR(CheckCanExecuteAction("reset"));
             qemu_system_reset_request(SHUTDOWN_CAUSE_SUBSYSTEM_RESET);
+            absl::MutexLock lock(&progress_mutex_);
+            loaded_snapshot_.clear();
             return absl::OkStatus();
         });
     }
@@ -533,6 +535,10 @@ class QemuVmOperations : public VmOperations {
             ::goldfish::metrics::ReportGenericSnapshotLoad(avd.GetMetricsReporter(), id_or_name, ok,
                                                            absl::Now() - start);
             if (!ok) {
+                {
+                    absl::MutexLock lock(&progress_mutex_);
+                    loaded_snapshot_.clear();
+                }
                 // do_vm_stop(RUN_STATE_RESTORE_VM) only transitions from live states
                 // (Running/Suspended); non-live states (e.g., Paused) remain unchanged.
                 if (::runstate_get() == ::RUN_STATE_RESTORE_VM) {
@@ -578,6 +584,12 @@ class QemuVmOperations : public VmOperations {
                         /*remediation=*/
                         "Verify that the snapshot exists and the disk image is writable.");
             }
+            {
+                absl::MutexLock lock(&progress_mutex_);
+                if (loaded_snapshot_ == id_or_name) {
+                    loaded_snapshot_.clear();
+                }
+            }
 
             return absl::OkStatus();
         }));
@@ -587,7 +599,8 @@ class QemuVmOperations : public VmOperations {
 
     absl::Status ListSnapshots(const SnapshotEntrySink sink) override {
         std::vector<SnapshotEntry> entries;
-        RETURN_IF_ERROR(RunOnQemuLoop([this, &entries] {
+        std::string loaded_snapshot;
+        RETURN_IF_ERROR(RunOnQemuLoop([this, &entries, &loaded_snapshot] {
             AssertOnQemuLoop();
             ::Error* errp = nullptr;
             ::BlockDriverState* bs = ::bdrv_find_read_only_vmstate_bs(/*vmstate_bs=*/nullptr);
@@ -624,12 +637,17 @@ class QemuVmOperations : public VmOperations {
             }
 
             ::g_free(qsi);
+            {
+                absl::MutexLock lock(&progress_mutex_);
+                loaded_snapshot = loaded_snapshot_;
+            }
             return absl::OkStatus();
         }));
 
         // Compatibility is read from the file system, off the QEMU main thread.
         for (SnapshotEntry& se : entries) {
             se.compatible = snapshot_store_->IsCompatible(se.name);
+            se.loaded = se.compatible && (se.name == loaded_snapshot);
             sink(std::move(se));
         }
         return absl::OkStatus();
@@ -727,6 +745,7 @@ class QemuVmOperations : public VmOperations {
         {
             absl::MutexLock lock(&self->progress_mutex_);
             self->cached_progress_ = progress;
+            self->UpdateLoadedSnapshotLocked(progress);
             self->snapshot_watchdog_saw_qemu_progress_ = true;
             if (progress.phase == SnapshotPhase::Preparing) {
                 self->last_forwarded_transfer_time_ = absl::InfinitePast();
@@ -814,6 +833,18 @@ class QemuVmOperations : public VmOperations {
                 FormatSnapshotStallMessage(current, kSnapshotStallTimeout));
     }
 
+    void UpdateLoadedSnapshotLocked(const SnapshotProgress& progress)
+            ABSL_EXCLUSIVE_LOCKS_REQUIRED(progress_mutex_) {
+        if (progress.operation != SnapshotOperationType::Load) {
+            return;
+        }
+        if (progress.phase == SnapshotPhase::Preparing || progress.phase == SnapshotPhase::Failed) {
+            loaded_snapshot_.clear();
+        } else if (progress.phase == SnapshotPhase::Completed && !progress.snapshot_id.empty()) {
+            loaded_snapshot_ = progress.snapshot_id;
+        }
+    }
+
     // Records the snapshot version of every save QEMU completes: the runtime saves
     // of SaveSnapshot() and the exit-time save of the launcher's -savevm, which
     // does not go through VmOperations. Runs on the QEMU main thread with the BQL
@@ -871,10 +902,11 @@ class QemuVmOperations : public VmOperations {
     ::goldfish::async::EventLoop::ScopedTimer transfer_flush_timer_;
     VMChangeStateEntry* change_state_entry_{nullptr};
     QemuSnapshotProgressEntry* snapshot_progress_entry_{nullptr};
-    // Leaf mutex protecting cached_progress_, transfer-throttle, and watchdog state for BQL-free
-    // reads.
+    // Leaf mutex protecting cached_progress_, loaded_snapshot_, transfer-throttle, and watchdog
+    // state for BQL-free reads.
     mutable absl::Mutex progress_mutex_;
     SnapshotProgress cached_progress_ ABSL_GUARDED_BY(progress_mutex_);
+    std::string loaded_snapshot_ ABSL_GUARDED_BY(progress_mutex_);
     SnapshotProgress snapshot_watchdog_initial_progress_ ABSL_GUARDED_BY(progress_mutex_);
     SnapshotProgress snapshot_watchdog_last_progress_ ABSL_GUARDED_BY(progress_mutex_);
     bool snapshot_watchdog_saw_qemu_progress_ ABSL_GUARDED_BY(progress_mutex_){false};

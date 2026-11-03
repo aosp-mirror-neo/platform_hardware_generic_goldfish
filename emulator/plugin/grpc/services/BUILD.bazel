@@ -169,6 +169,25 @@ cc_library(
     deps = [
         "//emulator/libs/grpc_utils:absl_translate",
         "//emulator/plugin/vminterface",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time",
+        "@aemu//protos/services/snapshot:snapshot_service_cc_grpc",
+        "@grpc//:grpc++",
+    ],
+)
+
+cc_test(
+    name = "snapshot_service_impl_test",
+    size = "small",
+    srcs = ["snapshot_service_impl_test.cc"],
+    deps = [
+        ":snapshot_service",
+        "//emulator/libs/async:async_testing",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/vminterface",
+        "//emulator/plugin/vminterface:test_vminterface",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time",
         "@aemu//protos/services/snapshot:snapshot_service_cc_grpc",
         "@grpc//:grpc++",
     ],
@@ -375,6 +394,8 @@ clang_tidy_test(
         ":screen_recording_perf",
         ":service_forwarder_impl_test",
         ":service_forwarder",
+        ":snapshot_service",
+        ":snapshot_service_impl_test",
     ],
     tidy_config_file = "//:clang_tidy_config",
 )
