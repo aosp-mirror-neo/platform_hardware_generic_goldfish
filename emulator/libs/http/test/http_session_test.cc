@@ -20,6 +20,7 @@
 #include "absl/synchronization/notification.h"
 
 #include "goldfish/async/testing/fake_async_socket.h"
+#include "goldfish/async/testing/test_event_loop.h"
 #include "goldfish/http/http_headers.h"
 #include "goldfish/http/http_router.h"
 #include "goldfish/network/endpoint.h"
@@ -755,6 +756,71 @@ TEST_F(HttpSessionTest, FormatStreamingHeadersDetectsCaseInsensitiveChunked) {
     EXPECT_TRUE(absl::StartsWith(raw_wire, "HTTP/1.1 201 Created\r\n"));
     EXPECT_TRUE(absl::StrContains(raw_wire, "X-Device-Name: Pixel_9_Pro_エミュレータ\r\n"));
     EXPECT_TRUE(absl::EndsWith(raw_wire, "\r\n\r\n"));
+}
+
+TEST_F(HttpSessionTest, ResetClearsStateOnLoopAndOffLoopThread) {
+    std::vector<AccessLogEntry> logged_entries;
+    router_->AddRoute(HttpMethod::kGet, "/first", [](const HttpRequest& req) {
+        EXPECT_EQ(req.GetHeader("X-First-Header"), "first-val");
+        return HttpResponse::String("first", 200, "text/plain");
+    });
+    router_->AddRoute(HttpMethod::kGet, "/second", [](const HttpRequest& req) {
+        // Verify no headers or body leaked from the previous request after Reset().
+        EXPECT_FALSE(req.HasHeader("X-First-Header"));
+        EXPECT_TRUE(req.Body().empty());
+        return HttpResponse::String("second", 200, "text/plain");
+    });
+
+    auto loop = async::testing::TestEventLoop::Create("HttpSessionResetLoop");
+    auto session = HttpSession::Create(fake_socket_, loop.get(), router_.get(),
+                                       /*max_payload_size=*/64 * 1024 * 1024,
+                                       /*not_found_handler=*/nullptr,
+                                       /*access_logger=*/[&](const AccessLogEntry& entry) {
+                                           logged_entries.push_back(entry);
+                                       });
+
+    // 1. Process first Keep-Alive request and invoke Reset() directly on the
+    // loop thread (IsOnLoopThread() == true), verifying no extra task is queued.
+    ASSERT_TRUE(loop->Post([&]() {
+                        EXPECT_TRUE(
+                                session->OnDataReceived("GET /first HTTP/1.1\r\n"
+                                                        "Host: localhost\r\n"
+                                                        "X-First-Header: first-val\r\n\r\n"));
+                        session->Reset();
+                    }).ok());
+    loop->RunAll();
+    EXPECT_EQ(loop->TaskCount(), 0u);
+    std::string first_sent = GetSentData();
+    EXPECT_TRUE(absl::StartsWith(first_sent, "HTTP/1.1 200 OK\r\n"));
+    EXPECT_TRUE(absl::EndsWith(first_sent, "\r\n\r\nfirst"));
+
+    // 2. Calling Reset() from the test thread (IsOnLoopThread() == false) must
+    // post ResetDirect() onto the EventLoop rather than mutating state off-loop.
+    session->Reset();
+    EXPECT_EQ(loop->TaskCount(), 1u);
+    loop->RunAll();
+    EXPECT_EQ(loop->TaskCount(), 0u);
+
+    // 3. Verify a subsequent Keep-Alive request parses cleanly and records a
+    // valid non-negative duration in AccessLogger.
+    ASSERT_TRUE(loop->Post([&]() {
+                        EXPECT_TRUE(session->OnDataReceived(
+                                "GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+                    }).ok());
+    loop->RunAll();
+
+    std::string second_sent = GetSentData();
+    EXPECT_TRUE(absl::StartsWith(second_sent, "HTTP/1.1 200 OK\r\n"));
+    EXPECT_TRUE(absl::EndsWith(second_sent, "\r\n\r\nsecond"));
+    ASSERT_EQ(logged_entries.size(), 2u);
+    EXPECT_EQ(logged_entries[0].method, HttpMethod::kGet);
+    EXPECT_EQ(logged_entries[0].path, "/first");
+    EXPECT_EQ(logged_entries[0].status_code, 200);
+    EXPECT_GE(logged_entries[0].duration, absl::ZeroDuration());
+    EXPECT_EQ(logged_entries[1].method, HttpMethod::kGet);
+    EXPECT_EQ(logged_entries[1].path, "/second");
+    EXPECT_EQ(logged_entries[1].status_code, 200);
+    EXPECT_GE(logged_entries[1].duration, absl::ZeroDuration());
 }
 
 }  // namespace goldfish::http

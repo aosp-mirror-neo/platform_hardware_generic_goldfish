@@ -253,29 +253,42 @@ void HttpSession::SetOnDetachedCallback(OnDetachedCallback on_detached) {
 }
 
 void HttpSession::Reset() {
-    PostOrRun([self = shared_from_this()]() {
-        {
-            const absl::MutexLock lock(&self->close_cb_mutex_);
-            self->on_client_closed_ = nullptr;
+    if (loop_ != nullptr && !loop_->IsOnLoopThread()) {
+        if (loop_->GetState() == async::LooperStatusEvent::State::kRunning) {
+            loop_->Post([self = shared_from_this()]() { self->ResetDirect(); }).IgnoreError();
         }
-        self->current_request_.path_.clear();
-        self->current_request_.headers_.clear();
-        self->current_request_.body_.clear();
-        self->current_request_.keep_alive_ = true;
-        self->current_header_field_.clear();
-        self->current_header_value_.clear();
-        self->current_headers_bytes_ = 0;
-        self->header_state_ = HeaderState::kNone;
-        self->payload_too_large_ = false;
-        self->error_occurred_ = false;
-        self->request_start_time_ = absl::Now();
-    });
+        return;
+    }
+    ResetDirect();
+}
+
+void HttpSession::ResetDirect() {
+    {
+        const absl::MutexLock lock(&close_cb_mutex_);
+        on_client_closed_ = nullptr;
+    }
+    current_request_.path_.clear();
+    if (!current_request_.headers_.empty()) {
+        current_request_.headers_.clear();
+    }
+    current_request_.body_.clear();
+    current_request_.keep_alive_ = true;
+    current_header_field_.clear();
+    current_header_value_.clear();
+    current_headers_bytes_ = 0;
+    header_state_ = HeaderState::kNone;
+    payload_too_large_ = false;
+    error_occurred_ = false;
+    // request_start_time_ is only read by EmitAccessLog() when access_logger_ is configured.
+    if (access_logger_) {
+        request_start_time_ = absl::Now();
+    }
 }
 
 void HttpSession::FinishStreaming() {
     is_streaming_active_ = false;
     llhttp_resume(&parser_);
-    Reset();
+    ResetDirect();
     if (!pipelined_buffer_.empty()) {
         std::string next_data = std::move(pipelined_buffer_);
         pipelined_buffer_.clear();
@@ -381,7 +394,7 @@ void HttpSession::SendUnaryResponse(const HttpResponse& resp) {
     PostOrSend(resp.FormatWireResponse(current_request_.KeepAlive(), is_head));
     EmitAccessLog(resp.StatusCode(), resp.Body().size());
     if (current_request_.KeepAlive()) {
-        Reset();
+        ResetDirect();
     } else {
         PostClose();
     }
@@ -437,7 +450,7 @@ void HttpSession::DispatchRequest() {
 
 int HttpSession::OnMessageBegin(llhttp_t* parser) {
     auto* self = static_cast<HttpSession*>(parser->data);
-    self->Reset();
+    self->ResetDirect();
     return 0;
 }
 

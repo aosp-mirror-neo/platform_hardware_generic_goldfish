@@ -31,12 +31,16 @@
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/mutex.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "benchmark/benchmark.h"
 
 #include "goldfish/http/http_headers.h"
 #include "goldfish/http/http_request.h"
 #include "goldfish/http/http_response.h"
 #include "goldfish/http/http_router.h"
+#include "goldfish/http/http_session.h"
 #include "http_session_internal.h"
 
 namespace goldfish::http {
@@ -692,6 +696,100 @@ void BmFormatStreamingHeadersGrpcWebCors(benchmark::State& state) {
     }
 }
 BENCHMARK(BmFormatStreamingHeadersGrpcWebCors);
+
+// Baseline reproduction of the previous HttpSession::Reset() implementation:
+// unconditionally constructed a shared_from_this() closure for PostOrRun(),
+// called absl::flat_hash_map::clear() even when headers_ was already empty
+// (which walks control bytes when capacity > 1), and read absl::Now() even
+// when no AccessLogger was configured.
+struct LegacyHttpSessionResetState
+        : public std::enable_shared_from_this<LegacyHttpSessionResetState> {
+    absl::Mutex close_cb_mutex;
+    std::function<void()> on_client_closed;
+    std::string request_path;
+    HttpRequest::HeaderMap request_headers;
+    std::string request_body;
+    bool request_keep_alive = true;
+    std::string current_header_field;
+    std::string current_header_value;
+    size_t current_headers_bytes = 0;
+    int header_state = 0;
+    bool payload_too_large = false;
+    bool error_occurred = false;
+    AccessLogger access_logger;
+    absl::Time request_start_time = absl::InfinitePast();
+
+    LegacyHttpSessionResetState() {
+        // Simulate a Keep-Alive session that has already parsed a typical
+        // request so request_headers has an allocated backing table, matching
+        // BmHttpSessionReset's steady-state Keep-Alive session.
+        request_headers.emplace("host", "127.0.0.1:8554");
+        request_headers.emplace("user-agent", "grpc-web-javascript/0.1");
+        request_headers.emplace("accept", "application/grpc-web+proto");
+        request_headers.emplace("x-grpc-web", "1");
+        request_headers.clear();
+    }
+
+    template <typename F>
+    static void PostOrRunLoop(bool on_loop_thread, F&& fn) {
+        if (!on_loop_thread) {
+            return;
+        }
+        fn();
+    }
+
+    ABSL_ATTRIBUTE_NOINLINE void ResetBaseline() {
+        PostOrRunLoop(/*on_loop_thread=*/true, [self = shared_from_this()]() {
+            {
+                const absl::MutexLock lock(&self->close_cb_mutex);
+                self->on_client_closed = nullptr;
+            }
+            self->request_path.clear();
+            self->request_headers.clear();
+            self->request_body.clear();
+            self->request_keep_alive = true;
+            self->current_header_field.clear();
+            self->current_header_value.clear();
+            self->current_headers_bytes = 0;
+            self->header_state = 0;
+            self->payload_too_large = false;
+            self->error_occurred = false;
+            self->request_start_time = absl::Now();
+        });
+    }
+};
+
+void BmHttpSessionResetBaseline(benchmark::State& state) {
+    auto session_state = std::make_shared<LegacyHttpSessionResetState>();
+    for (auto _ : state) {
+        session_state->ResetBaseline();
+        benchmark::DoNotOptimize(session_state.get());
+    }
+}
+BENCHMARK(BmHttpSessionResetBaseline);
+
+void BmHttpSessionReset(benchmark::State& state) {
+    HttpRouter router;
+    router.AddRoute(HttpMethod::kGet, "/healthz", [](const HttpRequest&) {
+        return HttpResponse::String("ok", 200, "text/plain");
+    });
+    auto session = HttpSession::Create(/*socket=*/nullptr, /*loop=*/nullptr, &router);
+    // Warm up the session with one Keep-Alive request so current_request_.headers_
+    // has an allocated backing table, matching a steady-state Keep-Alive connection.
+    constexpr std::string_view kWarmupRequest =
+            "GET /healthz HTTP/1.1\r\n"
+            "Host: 127.0.0.1:8554\r\n"
+            "User-Agent: grpc-web-javascript/0.1\r\n"
+            "Accept: application/grpc-web+proto\r\n"
+            "X-Grpc-Web: 1\r\n\r\n";
+    session->OnDataReceived(kWarmupRequest);
+
+    for (auto _ : state) {
+        session->Reset();
+        benchmark::DoNotOptimize(session.get());
+    }
+}
+BENCHMARK(BmHttpSessionReset);
 
 }  // namespace
 }  // namespace goldfish::http

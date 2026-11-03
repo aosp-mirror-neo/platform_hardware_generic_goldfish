@@ -167,6 +167,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     void PostClose();
     void SendRawBytes(std::string payload);
     void CloseSocketDirect();
+    void ResetDirect();
     void FinishStreaming();
     std::shared_ptr<async::AsyncSocket> GetSocket();
     std::shared_ptr<async::AsyncSocket> TakeSocket();
@@ -192,7 +193,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     const HttpRouter* router_;
     const size_t max_payload_size_;
     HttpHandler not_found_handler_;
-    AccessLogger access_logger_;
+    const AccessLogger access_logger_;
     network::Endpoint remote_endpoint_;
 
     absl::Mutex detached_mutex_;
