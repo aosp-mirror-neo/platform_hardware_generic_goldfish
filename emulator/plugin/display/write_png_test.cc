@@ -22,26 +22,16 @@
 #include <span>
 #include <vector>
 
-#if defined(__unix__) || defined(__APPLE__)
-#include <ctime>
-#endif
-
-#include "absl/time/clock.h"
 #include "absl/time/time.h"
+
+#include "image_writer_test_utils.h"
 #include "png.h"
 
 namespace goldfish::display {
 namespace {
 
-absl::Duration CurrentThreadCpuTime() {
-#if defined(__unix__) || defined(__APPLE__)
-    struct timespec ts{};
-    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0) {
-        return absl::Seconds(ts.tv_sec) + absl::Nanoseconds(ts.tv_nsec);
-    }
-#endif
-    return absl::Now() - absl::UnixEpoch();
-}
+using test_utils::CurrentThreadCpuTime;
+using test_utils::MakeSyntheticScreenshot;
 
 struct PngReadState {
     std::span<const uint8_t> data;
@@ -132,33 +122,6 @@ bool WritePngWithDefaultAdaptiveFilters(unsigned int n_channels, unsigned int wi
     png_write_end(p, nullptr);
     png_destroy_write_struct(&p, &pi);
     return true;
-}
-
-std::vector<uint8_t> MakeSyntheticScreenshot(unsigned int width, unsigned int height,
-                                             unsigned int channels) {
-    std::vector<uint8_t> frame(static_cast<size_t>(width) * height * channels);
-    for (unsigned int y = 0; y < height; ++y) {
-        uint8_t* row = frame.data() + (static_cast<size_t>(y) * width * channels);
-        const unsigned int band = y / 64U;
-        for (unsigned int x = 0; x < width; ++x) {
-            uint8_t* px = row + (static_cast<size_t>(x) * channels);
-            // Simulate a typical Android UI frame: status/nav bars, card surfaces,
-            // and periodic text/icon glyph regions.
-            if ((x % 128U) < 96U && (y % 64U) < 48U) {
-                px[0] = static_cast<uint8_t>((240U - (band * 7U)) & 0xFFU);
-                px[1] = static_cast<uint8_t>((244U - (band * 5U)) & 0xFFU);
-                px[2] = static_cast<uint8_t>((248U - (band * 3U)) & 0xFFU);
-            } else {
-                px[0] = static_cast<uint8_t>((x * 3U + y * 5U) & 0xFFU);
-                px[1] = static_cast<uint8_t>((x * 7U ^ y * 11U) & 0xFFU);
-                px[2] = static_cast<uint8_t>((x + y * 13U) & 0xFFU);
-            }
-            if (channels == 4) {
-                px[3] = 0xFFU;
-            }
-        }
-    }
-    return frame;
 }
 
 TEST(WritePngTest, RejectsInvalidArguments) {

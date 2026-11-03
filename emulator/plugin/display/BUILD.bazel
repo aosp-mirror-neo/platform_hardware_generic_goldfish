@@ -13,15 +13,60 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "image_writer_test_utils",
+    testonly = True,
+    hdrs = ["image_writer_test_utils.h"],
+    deps = [
+        "@abseil-cpp//absl/time",
+    ],
+)
+
 cc_test(
     name = "write_png_test",
     size = "small",
     srcs = ["write_png_test.cc"],
     deps = [
+        ":image_writer_test_utils",
         ":write_png",
         "//emulator/libs/test:googletest_main",
         "@abseil-cpp//absl/time",
         "@libpng//:png",
+    ],
+)
+
+# Windows release builds link with /GUARD:CF (enabling CF_LONGJUMP_TABLE_PRESENT in PE
+# LoadConfig). Compiling setjmp call sites with /guard:cf emits .gljmp$y entries so
+# longjmp from libjpeg error_exit is registered as a valid Control Flow Guard target.
+_WINDOWS_CFG_COPTS = select({
+    "@platforms//os:windows": ["/guard:cf"],
+    "//conditions:default": [],
+})
+
+cc_library(
+    name = "write_jpeg",
+    srcs = ["write_jpeg.cc"],
+    hdrs = ["include/goldfish/display/write_jpeg.h"],
+    copts = _WINDOWS_CFG_COPTS,
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@libjpeg_turbo//:jpeg",
+    ],
+)
+
+cc_test(
+    name = "write_jpeg_test",
+    size = "small",
+    srcs = ["write_jpeg_test.cc"],
+    copts = _WINDOWS_CFG_COPTS,
+    deps = [
+        ":image_writer_test_utils",
+        ":write_jpeg",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/base:config",
+        "@abseil-cpp//absl/time",
+        "@libjpeg_turbo//:jpeg",
     ],
 )
 
@@ -273,10 +318,13 @@ cc_test(
 clang_tidy_test(
     name = "tidy",
     targets = [
+        ":image_writer_test_utils",
         ":primary_display",
         ":video_recorder",
         ":webm_encoder_perf",
         ":webm_encoder_test",
+        ":write_jpeg",
+        ":write_jpeg_test",
         ":write_png",
         ":write_png_test",
         ":base",
