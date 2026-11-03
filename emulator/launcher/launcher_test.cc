@@ -19,6 +19,7 @@
 #include <future>
 #include <memory>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "absl/base/log_severity.h"
@@ -58,6 +59,10 @@ using testing::Return;
 
 MATCHER_P(IsPort, port, "") {
     return ExplainMatchResult(port, ::goldfish::network::GetPortFromEndpoint(arg), result_listener);
+}
+
+MATCHER(IsIpv4Endpoint, "") {
+    return std::holds_alternative<::goldfish::network::Ipv4Endpoint>(arg);
 }
 
 class MockAsyncSocketServer : public ::goldfish::async::AsyncSocketServer {
@@ -638,6 +643,29 @@ TEST_F(LauncherTest, HandlesPortOption) {
     trigger.join();
 }
 
+TEST_F(LauncherTest, PortOptionStartsWithOnlyIpv6Loopback) {
+    auto avd = CreateMockAvd();
+    opts.port = "5562";
+
+    // An IPv6-only host: the IPv4 console fails, IPv6 binds, and the emulator
+    // still launches because -port skips the free port search.
+    EXPECT_CALL(*mock_socket_factory,
+                CreateServer(_, testing::AllOf(IsPort(5562), IsIpv4Endpoint()), _, _))
+            .WillOnce(Return(nullptr));
+    EXPECT_CALL(*mock_socket_factory,
+                CreateServer(_, testing::AllOf(IsPort(5562), testing::Not(IsIpv4Endpoint())), _, _))
+            .WillOnce(Return(std::make_shared<MockAsyncSocketServer>()));
+
+    absl::Notification launched;
+    ::goldfish::async::ProcessLauncher::ExitCallback emulator_exit_cb;
+    ExpectEmulatorLaunch(launched, emulator_exit_cb);
+
+    std::thread trigger = TriggerEmulatorExit(launched, emulator_exit_cb);
+
+    RunLauncher(std::move(avd));
+    trigger.join();
+}
+
 TEST_F(LauncherTest, HandlesValidPortsOption) {
     auto avd = CreateMockAvd();
     opts.ports = "5560,5561";
@@ -893,8 +921,10 @@ TEST_F(LauncherTest, ReturnsErrorStatusWhenPortIsBusy) {
     auto avd = CreateMockAvd();
     opts.port = "5562";
 
+    // -port tries both loopback families before giving up.
     EXPECT_CALL(*mock_socket_factory, CreateServer(_, IsPort(5562), _, _))
-            .WillOnce(Return(nullptr));
+            .Times(2)
+            .WillRepeatedly(Return(nullptr));
     EXPECT_CALL(*mock_launcher, Launch(_, _)).Times(0);
 
     absl::StatusOr<int> status = RunLauncherStatus(std::move(avd));
@@ -1200,8 +1230,10 @@ TEST_F(LauncherTest, StartupFailureShutsDownMetricsBeforeClosingSignalHandlers) 
     auto avd = CreateMockAvd();
     opts.port = "5562";
 
+    // -port tries both loopback families before giving up.
     EXPECT_CALL(*mock_socket_factory, CreateServer(_, IsPort(5562), _, _))
-            .WillOnce(Return(nullptr));
+            .Times(2)
+            .WillRepeatedly(Return(nullptr));
     EXPECT_CALL(*mock_launcher, Launch(_, _)).Times(0);
 
     auto reporter = std::make_unique<::goldfish::metrics::MetricsReporter>();

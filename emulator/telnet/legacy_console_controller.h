@@ -47,12 +47,28 @@ class LegacyConsoleController {
                             goldfish::metrics::MetricsReporter& metrics_reporter);
 
     /**
+     * @brief Which loopback families must be bound for Start() to succeed.
+     */
+    enum class LoopbackRequirement {
+        // IPv4 must bind; IPv6 is best effort. Required when the console port is
+        // picked by hunting for a free port, because serial number selection
+        // relies on every emulator on the host sharing the IPv4 port space.
+        kRequireIpv4,
+        // Either family is enough. Only safe when the caller chose the port
+        // explicitly (-port/-ports), so no free port search can race with
+        // emulators bound to the other family. Allows IPv6-only hosts.
+        kAnyFamily,
+    };
+
+    /**
      * @brief Starts the console servers for both IPv4 and IPv6 on the specified port.
      *
      * @param port The port to listen on.
-     * @return absl::Status Ok if at least one server started successfully, or an error.
+     * @param requirement Which loopback families must bind successfully.
+     * @return absl::Status Ok if the required server(s) started, or an error.
      */
-    absl::Status Start(int port);
+    absl::Status Start(int port,
+                       LoopbackRequirement requirement = LoopbackRequirement::kRequireIpv4);
 
     /**
      * @brief Stops all running console servers.
