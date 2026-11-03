@@ -176,10 +176,12 @@ TEST(VirtualsceneImageProvider, CreateStartCaptureStopMultiStream) {
 
     ASSERT_EQ(provider->start(streams, std::size(streams)), 0);
     EXPECT_TRUE(physicalModel.GetVirtualSceneCamera().IsConnected());
+    EXPECT_EQ(provider->getScaledFramebufferSizeBytes(), 320u * 240u * 4u);
 
     // Reconfiguring streams while active should keep scene controls active without dropping to 0.
     ASSERT_EQ(provider->start(streams, std::size(streams)), 0);
     EXPECT_TRUE(physicalModel.GetVirtualSceneCamera().IsConnected());
+    EXPECT_EQ(provider->getScaledFramebufferSizeBytes(), 320u * 240u * 4u);
 
     const CameraImageProviderStreamCaptureInfo captureInfos[] = {
         {.cfg = &streams[0]},
@@ -214,6 +216,7 @@ TEST(VirtualsceneImageProvider, CreateStartCaptureStopMultiStream) {
                             [](uint8_t b) { return b != 0; }));
 
     provider->stop();
+    EXPECT_EQ(provider->getScaledFramebufferSizeBytes(), 0u);
     EXPECT_FALSE(physicalModel.GetVirtualSceneCamera().IsConnected());
     provider.reset();
     ver_cleanup();
@@ -472,6 +475,107 @@ TEST(VirtualsceneImageProvider, Capture2DImageFile_RotatesAccordingToDeviceOrien
     EXPECT_TRUE(hasDifferenceWithoutRotation);
 
     provider->stop();
+    provider.reset();
+    ver_cleanup();
+}
+
+TEST(VirtualsceneImageProvider, SharesScaledFramebufferAcrossMultiStreamSession) {
+    namespace fs = std::filesystem;
+
+    const fs::path posterRunfile = ::android::base::Bazel::RunfilesPath(
+            "goldfish_prebuilts_common+/virtualscene/Toren1BD/poster.png");
+    ASSERT_TRUE(fs::exists(posterRunfile));
+    ASSERT_TRUE(ver_initialize({posterRunfile.parent_path()}));
+
+    system::testing::FakeVirtualClock virtualClock;
+    sensors::PhysicalModel physicalModel(android::goldfish::FakeHardwareConfig::GetHwConfig(),
+                                         virtualClock);
+    physicalModel.OverrideAccelerometer(glm::vec3(9.81f, 0.0f, 0.0f));
+    VirtualsceneImageProvider::CreateArgs createArgs{
+        .sceneConfig = VerSceneConfig(VerSceneConfig::Mode::ImageFile, posterRunfile.string()),
+        .physicalModel = &physicalModel,
+    };
+    CameraImageProviderInfo info = {
+        .createArg = &createArgs,
+        .isBackFacing = 1,
+    };
+    std::unique_ptr<VirtualsceneImageProvider> provider(
+            static_cast<VirtualsceneImageProvider*>(VirtualsceneImageProvider::create(info)));
+    ASSERT_NE(provider, nullptr);
+
+    const CameraImageProviderStreamConfig streams[] = {
+        {
+            .size = {1280, 960},
+            .id = 1,
+            .format = imaging::ImageFormat::kRgba8888,
+        },
+        {
+            .size = {1280, 720},
+            .id = 2,
+            .format = imaging::ImageFormat::kRgba8888,
+        },
+        {
+            .size = {1280, 720},
+            .id = 3,
+            .format = imaging::ImageFormat::kYuV420NV12,
+        },
+        {
+            .size = {640, 480},
+            .id = 4,
+            .format = imaging::ImageFormat::kYuV4203P,
+        },
+    };
+
+    // Single max-resolution stream matches RenderOutputConfig and needs no scaling buffer.
+    ASSERT_EQ(provider->start(&streams[0], 1), 0);
+    EXPECT_EQ(provider->getScaledFramebufferSizeBytes(), 0u);
+
+    auto sink = [](void* opaque, const CameraImageProviderStreamCaptureInfo* sci,
+                   const void* frameBits, size_t frameByteSize) -> int {
+        auto* map = static_cast<std::unordered_map<int32_t, std::vector<uint8_t>>*>(opaque);
+        const auto* bytes = static_cast<const uint8_t*>(frameBits);
+        (*map)[sci->cfg->id].assign(bytes, bytes + frameByteSize);
+        return 0;
+    };
+    const CameraImageProviderCaptureOpts opts = {};
+
+    // Capture reference outputs when each non-max stream is the only scaled stream in the session.
+    std::unordered_map<int32_t, std::vector<uint8_t>> referenceFrames;
+    for (size_t i = 1; i < std::size(streams); ++i) {
+        const CameraImageProviderStreamConfig pairConfigs[] = {streams[0], streams[i]};
+        const CameraImageProviderStreamCaptureInfo singleCaptureInfo = {.cfg = &streams[i]};
+        ASSERT_EQ(provider->start(pairConfigs, std::size(pairConfigs)), 0);
+        ASSERT_EQ(provider->capture(opts, sink, &referenceFrames, &singleCaptureInfo, 1), 0);
+    }
+
+    // Multi-stream session with 3 scaled streams (1280x720 RGBA, 1280x720 NV12, 640x480 I420)
+    // shares a single scaling buffer sized to the largest scaled stream (1280x720x4 = 3,686,400 B)
+    // instead of allocating 3,686,400 + 3,686,400 + 1,228,800 = 8,601,600 B across streams.
+    constexpr size_t kMaxScaledStreamBytes = 1280u * 720u * 4u;
+    constexpr size_t kPerStreamScaledBytesSum = (1280u * 720u * 4u) * 2u + (640u * 480u * 4u);
+    ASSERT_EQ(provider->start(streams, std::size(streams)), 0);
+    EXPECT_EQ(provider->getScaledFramebufferSizeBytes(), kMaxScaledStreamBytes);
+    EXPECT_LT(provider->getScaledFramebufferSizeBytes(), kPerStreamScaledBytesSum);
+
+    const CameraImageProviderStreamCaptureInfo captureInfos[] = {
+        {.cfg = &streams[0]},
+        {.cfg = &streams[1]},
+        {.cfg = &streams[2]},
+        {.cfg = &streams[3]},
+    };
+    std::unordered_map<int32_t, std::vector<uint8_t>> multiStreamFrames;
+    ASSERT_EQ(provider->capture(opts, sink, &multiStreamFrames, captureInfos,
+                                std::size(captureInfos)),
+              0);
+
+    ASSERT_EQ(multiStreamFrames.size(), 4u);
+    EXPECT_EQ(multiStreamFrames[1].size(), 1280u * 960u * 4u);
+    EXPECT_EQ(multiStreamFrames[2], referenceFrames[2]);
+    EXPECT_EQ(multiStreamFrames[3], referenceFrames[3]);
+    EXPECT_EQ(multiStreamFrames[4], referenceFrames[4]);
+
+    provider->stop();
+    EXPECT_EQ(provider->getScaledFramebufferSizeBytes(), 0u);
     provider.reset();
     ver_cleanup();
 }
