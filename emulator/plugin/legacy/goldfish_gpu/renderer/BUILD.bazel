@@ -1,0 +1,106 @@
+load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+# Everything about getting a gfxstream Renderer up: locating and dlopen-ing
+# libgfxstream_backend, turning environment/AVD settings into gfxstream feature sets, and
+# the C function-pointer tables gfxstream calls back through from its render threads.
+
+package(
+    default_applicable_licenses = ["//emulator:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "renderer_config",
+    srcs = ["renderer_config.cc"],
+    hdrs = ["include/goldfish/legacy/goldfish_gpu/renderer/renderer_config.h"],
+    includes = ["include"],
+    deps = [
+        "//emulator/plugin/legacy/goldfish_gpu/api:goldfish_gpu_interface",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@gfxstream//host:gfxstream_backend_headers",
+    ],
+)
+
+cc_test(
+    name = "renderer_config_test",
+    size = "small",
+    srcs = ["renderer_config_test.cc"],
+    deps = [
+        ":renderer_config",
+        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/status",
+        "@gfxstream//host:gfxstream_backend_headers",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "gfxstream_library_loader",
+    srcs = ["gfxstream_library_loader.cc"],
+    hdrs = ["include/goldfish/legacy/goldfish_gpu/renderer/gfxstream_library_loader.h"],
+    includes = ["include"],
+    deps = [
+        "//emulator/libs/file",
+        "//emulator/libs/os",
+        "//emulator/libs/system",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@gfxstream//host:gfxstream_backend_headers",
+    ],
+)
+
+cc_test(
+    name = "gfxstream_library_loader_test",
+    size = "small",
+    srcs = ["gfxstream_library_loader_test.cc"],
+    deps = [
+        ":gfxstream_library_loader",
+        "//emulator/libs/system:test-headers",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/status",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "render_lib_bridge",
+    srcs = ["render_lib_bridge.cc"],
+    hdrs = ["include/goldfish/legacy/goldfish_gpu/renderer/render_lib_bridge.h"],
+    includes = ["include"],
+    deps = [
+        "@abseil-cpp//absl/log",
+        "@gfxstream//host:gfxstream_backend_headers",
+    ],
+)
+
+cc_test(
+    name = "render_lib_bridge_test",
+    size = "small",
+    srcs = ["render_lib_bridge_test.cc"],
+    deps = [
+        ":render_lib_bridge",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/legacy/goldfish_gpu/testing:mock_gfxstream",
+        "@googletest//:gtest",
+    ],
+)
+
+clang_tidy_test(
+    name = "tidy",
+    targets = [
+        ":renderer_config",
+        ":renderer_config_test",
+        ":gfxstream_library_loader",
+        ":gfxstream_library_loader_test",
+        ":render_lib_bridge",
+        ":render_lib_bridge_test",
+    ],
+    tidy_config_file = "//:clang_tidy_config",
+)

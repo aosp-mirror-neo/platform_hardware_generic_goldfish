@@ -1,0 +1,88 @@
+load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+# The guest-facing tables: Address Space Graphics blobs and their gfxstream consumers
+# (goldfish_address_space), and the "pipe:opengles" render channels with their host reader
+# threads (goldfish_pipe). Each table owns its own lock and never calls back into the facade.
+
+package(
+    default_applicable_licenses = ["//emulator:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "asg_blob_table",
+    srcs = ["asg_blob_table.cc"],
+    hdrs = ["include/goldfish/legacy/goldfish_gpu/transport/asg_blob_table.h"],
+    includes = ["include"],
+    deps = [
+        "//emulator/plugin/legacy/goldfish_gpu/api:goldfish_gpu_interface",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@gfxstream//host:gfxstream_backend_headers",
+    ],
+)
+
+cc_test(
+    name = "asg_blob_table_test",
+    size = "small",
+    srcs = ["asg_blob_table_test.cc"],
+    deps = [
+        ":asg_blob_table",
+        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/legacy/goldfish_gpu/snapshot:snapshot_streams",
+        "//emulator/plugin/legacy/goldfish_gpu/testing:mock_gfxstream",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "opengles_pipe_table",
+    srcs = ["opengles_pipe_table.cc"],
+    hdrs = ["include/goldfish/legacy/goldfish_gpu/transport/opengles_pipe_table.h"],
+    includes = ["include"],
+    deps = [
+        "//emulator/plugin/legacy/goldfish_gpu/api:goldfish_gpu_interface",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@gfxstream//host:gfxstream_backend_headers",
+    ],
+)
+
+cc_test(
+    name = "opengles_pipe_table_test",
+    size = "small",
+    srcs = ["opengles_pipe_table_test.cc"],
+    deps = [
+        ":opengles_pipe_table",
+        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/legacy/goldfish_gpu/snapshot:snapshot_streams",
+        "//emulator/plugin/legacy/goldfish_gpu/testing:mock_gfxstream",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@googletest//:gtest",
+    ],
+)
+
+clang_tidy_test(
+    name = "tidy",
+    targets = [
+        ":asg_blob_table",
+        ":asg_blob_table_test",
+        ":opengles_pipe_table",
+        ":opengles_pipe_table_test",
+    ],
+    tidy_config_file = "//:clang_tidy_config",
+)

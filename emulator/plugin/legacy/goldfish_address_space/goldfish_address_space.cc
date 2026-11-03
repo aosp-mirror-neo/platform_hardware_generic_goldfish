@@ -35,12 +35,67 @@
 #include "absl/base/thread_annotations.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 
+#include "android/status/status_macros.h"
+#include "goldfish/archive/qemu_file_reader.h"
+#include "goldfish/archive/qemu_file_writer.h"
+#include "goldfish/archive/reader.h"
+#include "goldfish/archive/writer.h"
 #include "goldfish/legacy/common/adapters.h"
 
 namespace goldfish::legacy {
 namespace {
+
+constexpr uint32_t kAddressSpaceSnapshotMagic = 0x47464153U;  // "GFAS"
+constexpr uint32_t kAddressSpaceSnapshotVersion = 1U;
+// Most handles a guest may hold at once. Enforced on the live kAsCmdGenHandle path (ENOMEM) so
+// that whatever the device accepted can also be loaded back; UniqueIdAllocator recycles ids, so
+// live ids never exceed the peak handle count either.
+constexpr uint32_t kMaxSnapshotHandles = 65536U;
+// Largest ASG ring+buffer blob a snapshot may carry (the live device always allocates exactly
+// kAsgTotalAllocationSize; the slack only tolerates a GPU that rounds the blob up).
+constexpr uint64_t kMaxAsgBlobSize = 256ULL << 20;
+
+template <typename... Args>
+absl::Status ReadFields(archive::IReader& r, std::string_view context, Args&... args) {
+    absl::Status st = archive::ReadValue(r, args...);
+    if (!st.ok()) {
+        return absl::DataLossError(
+                absl::StrCat("truncated or corrupt ", context, ": ", st.message()));
+    }
+    return absl::OkStatus();
+}
+
+void WriteBytes(archive::IWriter& w, const void* src, size_t size) {
+    if (size > 0) {
+        w.Write(src, size);
+    }
+}
+
+absl::Status ReadBytes(archive::IReader& r, void* dst, size_t size, std::string_view context) {
+    if (size == 0) {
+        return absl::OkStatus();
+    }
+    absl::Status st = r.Read(dst, size);
+    if (!st.ok()) {
+        return absl::DataLossError(absl::StrCat("truncated ", context, ": ", st.message()));
+    }
+    return absl::OkStatus();
+}
+
+// Every BAR 1 span, SharedSlots backing block and HostMemoryAllocator region is at least one
+// page of the BAR 1 window, so a snapshot can never legitimately describe more of them than the
+// window has pages (+1 for a possible trailing free span). Deriving the bound from the geometry
+// instead of a constant keeps save and load symmetric: nothing the live device hands out can
+// exceed it. The per-record truncation checks are what bound the memory a corrupt count can
+// make the loader touch.
+uint64_t MaxSnapshotRecords(uint64_t bar1_size, uint64_t page_size) {
+    return bar1_size / std::max<uint64_t>(page_size, 1ULL) + 1ULL;
+}
 
 uint64_t QueryHostPageSize() {
 #if defined(_WIN32)
@@ -117,44 +172,59 @@ class GraphicsAsgSubdevice final : public IAddressSpaceSubdevice {
         DCHECK(allocator != nullptr);
         DCHECK(bar1 != nullptr);
 
-        absl::StatusOr<AsgBlob> blob = gpu.CreateAsgBlob(kAsgTotalAllocationSize);
+        const auto ring_region_size_opt = AlignUp(kAsgRingStorageSize, page_size);
+        if (!ring_region_size_opt.has_value()) {
+            LOG(ERROR) << "goldfish_address_space: ASG ring size overflow "
+                       << "(size=" << kAsgRingStorageSize << ", page_size=" << page_size << ")";
+            return nullptr;
+        }
+        const uint64_t ring_region_size = *ring_region_size_opt;
+        const auto alloc_size_opt = AlignUp(ring_region_size + kAsgBufferSize, page_size);
+        if (!alloc_size_opt.has_value()) {
+            LOG(ERROR) << "goldfish_address_space: ASG allocation size overflow "
+                       << "(size=" << (ring_region_size + kAsgBufferSize)
+                       << ", page_size=" << page_size << ")";
+            return nullptr;
+        }
+        const uint64_t alloc_size = *alloc_size_opt;
+
+        absl::StatusOr<AsgBlob> blob = gpu.CreateAsgBlob(alloc_size);
         if (!blob.ok()) {
             LOG(ERROR) << "goldfish_address_space: CreateAsgBlob failed: " << blob.status();
             return nullptr;
         }
-        if (blob->external_addr == nullptr || blob->size < kAsgTotalAllocationSize) {
+        if (blob->external_addr == nullptr || blob->size < alloc_size) {
             LOG(ERROR) << "goldfish_address_space: CreateAsgBlob returned invalid buffer "
                        << "(external_addr=" << static_cast<const void*>(blob->external_addr)
-                       << ", size=" << blob->size << ", required=" << kAsgTotalAllocationSize
-                       << ")";
-            gpu.DestroyAsg(*blob);
+                       << ", size=" << blob->size << ", required=" << alloc_size << ")";
+            gpu.CloseAsg(*blob);
             return nullptr;
         }
 
-        const auto bar_off = allocator->AllocateHostRegion(kAsgTotalAllocationSize, page_size);
+        const auto bar_off = allocator->AllocateHostRegion(alloc_size, page_size);
         if (!bar_off.has_value()) {
             LOG(ERROR) << "goldfish_address_space: BAR 1 out of space for ASG ring+buffer "
-                       << "(size=" << kAsgTotalAllocationSize << ", page_size=" << page_size
+                       << "(size=" << alloc_size << ", page_size=" << page_size
                        << ", bar1_size=" << bar1->Size() << ")";
-            gpu.DestroyAsg(*blob);
+            gpu.CloseAsg(*blob);
             return nullptr;
         }
 
-        if (!bar1->Map(*bar_off, blob->external_addr, kAsgTotalAllocationSize)) {
+        if (!bar1->Map(*bar_off, blob->external_addr, alloc_size)) {
             LOG(ERROR) << "goldfish_address_space: BAR 1 Map failed for ASG ring+buffer "
-                       << "(offset=" << *bar_off << ", size=" << kAsgTotalAllocationSize
-                       << ", end=" << (*bar_off + kAsgTotalAllocationSize)
+                       << "(offset=" << *bar_off << ", size=" << alloc_size
+                       << ", end=" << (*bar_off + alloc_size)
                        << ", bar1_size=" << bar1->Size() << ")";
             allocator->Free(*bar_off);
-            gpu.DestroyAsg(*blob);
+            gpu.CloseAsg(*blob);
             return nullptr;
         }
 
-        std::memset(blob->external_addr, 0, static_cast<size_t>(kAsgTotalAllocationSize));
-        WriteDefaultRingConfig(blob->external_addr);
+        std::memset(blob->external_addr, 0, static_cast<size_t>(alloc_size));
+        WriteDefaultRingConfig(blob->external_addr + kAsgBufferSize);
 
         return std::unique_ptr<GraphicsAsgSubdevice>(
-                new GraphicsAsgSubdevice(allocator, bar1, gpu, *blob, *bar_off));
+                new GraphicsAsgSubdevice(allocator, bar1, gpu, *blob, *bar_off, alloc_size));
     }
 
     ~GraphicsAsgSubdevice() override { TeardownNonVirtual(); }
@@ -164,19 +234,26 @@ class GraphicsAsgSubdevice final : public IAddressSpaceSubdevice {
     void Ping(AddressSpacePing& ping) override {
         switch (static_cast<AsgControlCommand>(ping.metadata)) {
         case kAsgCmdGetRing:
-            ping.offset = bar_offset_;
+            // Place the ring storage at [kAsgBufferSize, alloc_size_) and report the full
+            // [0, alloc_size_) range from kAsgCmdGetBuffer. On 16 KiB-page guests (ps16k),
+            // createGoldfishAddressSpaceStream claims sizeof(asg_ring_storage) == 12 KiB for the
+            // ring and then mmaps it, which the 16 KiB kernel VMM rounds up to 16 KiB; having the
+            // claimed buffer span cover the trailing ring page lets as_mmap succeed, while
+            // ring_buffer_view_init and ring_config->buffer_size bound guest writes to
+            // kAsgBufferSize.
+            ping.offset = bar_offset_ + kAsgBufferSize;
             ping.size = kAsgRingStorageSize;
-            ping.metadata = bar_offset_;
+            ping.metadata = bar_offset_ + kAsgBufferSize;
             break;
         case kAsgCmdGetBuffer:
-            ping.offset = bar_offset_ + kAsgRingStorageSize;
-            ping.size = kAsgBufferSize;
-            ping.metadata = bar_offset_ + kAsgRingStorageSize;
+            ping.offset = bar_offset_;
+            ping.size = alloc_size_;
+            ping.metadata = bar_offset_;
             break;
         case kAsgCmdSetVersion: {
             const uint64_t guest_version = ping.size;
             const uint64_t negotiated = std::min<uint64_t>(guest_version, 1ULL);
-            WriteDefaultRingConfig(blob_.external_addr);
+            WriteDefaultRingConfig(blob_.external_addr + kAsgBufferSize);
             if (!consumer_started_) {
                 const absl::Status status = gpu_.StartAsg(blob_);
                 if (!status.ok()) {
@@ -210,7 +287,7 @@ class GraphicsAsgSubdevice final : public IAddressSpaceSubdevice {
             break;
         }
         case kAsgCmdGetConfig:
-            RestoreBufferConfigFields(blob_.external_addr);
+            RestoreBufferConfigFields(blob_.external_addr + kAsgBufferSize);
             ping.metadata = 0ULL;
             break;
         default:
@@ -222,6 +299,73 @@ class GraphicsAsgSubdevice final : public IAddressSpaceSubdevice {
 
     void Teardown() override { TeardownNonVirtual(); }
 
+    void Save(archive::IWriter& w) const {
+        w << bar_offset_ << blob_.context_handle << blob_.size << consumer_started_;
+        WriteBytes(w, blob_.external_addr, static_cast<size_t>(blob_.size));
+    }
+
+    // Rebuilds one ASG subdevice from the bytes written by `Save()`. Fails with DATA_LOSS on a
+    // truncated or inconsistent record, NOT_FOUND when the GPU no longer knows `context_handle`,
+    // and INTERNAL when the BAR 1 mapping fails.
+    static absl::StatusOr<std::unique_ptr<GraphicsAsgSubdevice>> Restore(Bar1Allocator* allocator,
+                                                                         IBar1Mapper* bar1,
+                                                                         IGoldfishGpu& gpu,
+                                                                         archive::IReader& r) {
+        uint64_t bar_offset = 0;
+        uint32_t context_handle = 0;
+        uint64_t blob_size = 0;
+        bool consumer_started = false;
+        RETURN_IF_ERROR(ReadFields(r, "asg subdevice header", bar_offset, context_handle, blob_size,
+                                   consumer_started));
+        if (blob_size < kAsgTotalAllocationSize || blob_size > kMaxAsgBlobSize) {
+            return absl::DataLossError(absl::StrCat("asg blob_size ", blob_size, " is outside [",
+                                                    kAsgTotalAllocationSize, ", ", kMaxAsgBlobSize,
+                                                    "]"));
+        }
+        if (blob_size > bar1->Size() || bar_offset > bar1->Size() - blob_size) {
+            return absl::DataLossError(absl::StrCat("asg bar_offset ", bar_offset, " + blob_size ",
+                                                    blob_size, " exceeds BAR 1 size ",
+                                                    bar1->Size()));
+        }
+        // The block must be exactly the host region the allocator snapshot says it is; anything
+        // else (e.g. a guest block's offset) would be freed as a host region on teardown. This
+        // also implies page alignment, so it is checked before asking the GPU for the blob.
+        if (!allocator->IsHostRegion(bar_offset, blob_size)) {
+            return absl::DataLossError(absl::StrCat("asg bar_offset ", bar_offset, " size ",
+                                                    blob_size,
+                                                    " is not a host region of the restored BAR 1 "
+                                                    "allocator"));
+        }
+        absl::StatusOr<AsgBlob> blob = gpu.RestoreAsgBlob(context_handle, blob_size);
+        if (!blob.ok()) {
+            return absl::NotFoundError(
+                    absl::StrCat("asg context_handle ", context_handle,
+                                 " could not be restored: ", blob.status().message()));
+        }
+        if (blob->external_addr == nullptr || blob->size < blob_size) {
+            gpu.CloseAsg(*blob);
+            return absl::NotFoundError(absl::StrCat(
+                    "asg context_handle ", context_handle, " restored blob of size ", blob->size,
+                    blob->external_addr == nullptr ? " with no address" : "",
+                    " is smaller than blob_size ", blob_size));
+        }
+        if (absl::Status st = ReadBytes(r, blob->external_addr, static_cast<size_t>(blob_size),
+                                        "asg blob bytes");
+            !st.ok()) {
+            gpu.CloseAsg(*blob);
+            return st;
+        }
+        if (!bar1->Map(bar_offset, blob->external_addr, blob_size)) {
+            gpu.CloseAsg(*blob);
+            return absl::InternalError(absl::StrCat("BAR 1 Map failed for asg blob at bar_offset ",
+                                                    bar_offset, " size ", blob_size));
+        }
+        auto subdev = std::unique_ptr<GraphicsAsgSubdevice>(
+                new GraphicsAsgSubdevice(allocator, bar1, gpu, *blob, bar_offset, blob_size));
+        subdev->consumer_started_ = consumer_started;
+        return subdev;
+    }
+
   private:
     void TeardownNonVirtual() {
         if (torn_down_) {
@@ -231,7 +375,7 @@ class GraphicsAsgSubdevice final : public IAddressSpaceSubdevice {
         const AsgBlob blob_copy = blob_;
         IGoldfishGpu* gpu_ptr = &gpu_;
         bar1_->UnmapAndRetire(bar_offset_,
-                              [gpu_ptr, blob_copy]() { gpu_ptr->DestroyAsg(blob_copy); });
+                              [gpu_ptr, blob_copy]() { gpu_ptr->CloseAsg(blob_copy); });
         allocator_->Free(bar_offset_);
         blob_ = AsgBlob{};
         consumer_started_ = false;
@@ -258,14 +402,20 @@ class GraphicsAsgSubdevice final : public IAddressSpaceSubdevice {
     }
 
     GraphicsAsgSubdevice(Bar1Allocator* allocator, IBar1Mapper* bar1, IGoldfishGpu& gpu,
-                         AsgBlob blob, uint64_t bar_offset)
-            : allocator_(allocator), bar1_(bar1), gpu_(gpu), blob_(blob), bar_offset_(bar_offset) {}
+                         AsgBlob blob, uint64_t bar_offset, uint64_t alloc_size)
+            : allocator_(allocator)
+            , bar1_(bar1)
+            , gpu_(gpu)
+            , blob_(blob)
+            , bar_offset_(bar_offset)
+            , alloc_size_(alloc_size) {}
 
     Bar1Allocator* const allocator_;
     IBar1Mapper* const bar1_;
     IGoldfishGpu& gpu_;
     AsgBlob blob_;
     const uint64_t bar_offset_;
+    const uint64_t alloc_size_;
     bool consumer_started_ = false;
     bool torn_down_ = false;
 };
@@ -307,6 +457,64 @@ class HostMemoryAllocatorSubdevice final : public IAddressSpaceSubdevice {
     }
 
     void Teardown() override { TeardownNonVirtual(); }
+
+    void Save(archive::IWriter& w) const {
+        std::vector<std::pair<uint64_t, const AlignedHostBuffer*>> sorted;
+        sorted.reserve(regions_.size());
+        for (const auto& [bar_offset, buf] : regions_) {
+            sorted.emplace_back(bar_offset, buf.get());
+        }
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        w << static_cast<uint32_t>(sorted.size());
+        for (const auto& [bar_offset, buf] : sorted) {
+            w << bar_offset << buf->Size();
+            WriteBytes(w, buf->Data(), static_cast<size_t>(buf->Size()));
+        }
+    }
+
+    absl::Status Restore(archive::IReader& r) {
+        uint32_t region_count = 0;
+        RETURN_IF_ERROR(ReadFields(r, "host_memory region_count", region_count));
+        const uint64_t max_regions = MaxSnapshotRecords(bar1_->Size(), page_size_);
+        if (region_count > max_regions) {
+            return absl::DataLossError(absl::StrCat("host_memory region_count ", region_count,
+                                                    " exceeds ", max_regions));
+        }
+        for (uint32_t i = 0; i < region_count; ++i) {
+            uint64_t bar_offset = 0;
+            uint64_t size = 0;
+            RETURN_IF_ERROR(ReadFields(r, absl::StrCat("host_memory region ", i, " header"),
+                                       bar_offset, size));
+            if (size == 0ULL || size > bar1_->Size()) {
+                return absl::DataLossError(absl::StrCat("host_memory region ", i, " size ", size,
+                                                        " is outside [1, ", bar1_->Size(), "]"));
+            }
+            if (!allocator_->IsInsideGuestBlock(bar_offset, size)) {
+                return absl::NotFoundError(absl::StrCat("host_memory region ", i, " bar_offset ",
+                                                        bar_offset, " size ", size,
+                                                        " is not inside any restored guest block"));
+            }
+            if (regions_.contains(bar_offset)) {
+                return absl::DataLossError(absl::StrCat("host_memory region ", i, " bar_offset ",
+                                                        bar_offset, " appears twice"));
+            }
+            auto buf = AlignedHostBuffer::Allocate(size, page_size_);
+            if (buf == nullptr) {
+                return absl::ResourceExhaustedError(absl::StrCat(
+                        "host_memory region ", i, ": failed to allocate ", size, " bytes"));
+            }
+            RETURN_IF_ERROR(ReadBytes(r, buf->Data(), static_cast<size_t>(size),
+                                      absl::StrCat("host_memory region ", i, " bytes")));
+            if (!bar1_->Map(bar_offset, buf->Data(), size)) {
+                return absl::InternalError(absl::StrCat("BAR 1 Map failed for host_memory region ",
+                                                        i, " at bar_offset ", bar_offset, " size ",
+                                                        size));
+            }
+            regions_.emplace(bar_offset, std::move(buf));
+        }
+        return absl::OkStatus();
+    }
 
   private:
     void TeardownNonVirtual() {
@@ -509,6 +717,105 @@ class SharedSlotsPool {
             allocator_->Free(bar_offset);
         }
         blocks_.clear();
+    }
+
+    void Save(archive::IWriter& w) const {
+        w << static_cast<uint32_t>(blocks_.size());
+        for (const auto& [bar_offset, block] : blocks_) {
+            w << block.bar_offset << block.size;
+            WriteBytes(w, block.buffer->Data(), static_cast<size_t>(block.size));
+            w << static_cast<uint32_t>(block.spans.size());
+            for (const auto& [rel_off, span] : block.spans) {
+                w << rel_off << span.size << span.owner_id << span.free;
+            }
+        }
+    }
+
+    absl::Status Restore(archive::IReader& r) {
+        uint32_t block_count = 0;
+        RETURN_IF_ERROR(ReadFields(r, "shared_slots block_count", block_count));
+        const uint64_t max_blocks = MaxSnapshotRecords(bar1_->Size(), page_size_);
+        if (block_count > max_blocks) {
+            return absl::DataLossError(absl::StrCat("shared_slots block_count ", block_count,
+                                                    " exceeds ", max_blocks));
+        }
+        for (uint32_t i = 0; i < block_count; ++i) {
+            uint64_t bar_offset = 0;
+            uint64_t size = 0;
+            RETURN_IF_ERROR(ReadFields(r, absl::StrCat("shared_slots block ", i, " header"),
+                                       bar_offset, size));
+            if (size == 0ULL || size > bar1_->Size() || bar_offset > bar1_->Size() - size) {
+                return absl::DataLossError(absl::StrCat("shared_slots block ", i, " bar_offset ",
+                                                        bar_offset, " + size ", size,
+                                                        " exceeds BAR 1 size ", bar1_->Size()));
+            }
+            if (!allocator_->IsHostRegion(bar_offset, size)) {
+                return absl::DataLossError(absl::StrCat(
+                        "shared_slots block ", i, " bar_offset ", bar_offset, " size ", size,
+                        " is not a host region of the restored BAR 1 allocator"));
+            }
+            if (blocks_.contains(bar_offset)) {
+                return absl::DataLossError(absl::StrCat("shared_slots block ", i, " bar_offset ",
+                                                        bar_offset, " appears twice"));
+            }
+            auto buf = AlignedHostBuffer::Allocate(size, page_size_);
+            if (buf == nullptr) {
+                return absl::ResourceExhaustedError(absl::StrCat(
+                        "shared_slots block ", i, ": failed to allocate ", size, " bytes"));
+            }
+            RETURN_IF_ERROR(ReadBytes(r, buf->Data(), static_cast<size_t>(size),
+                                      absl::StrCat("shared_slots block ", i, " bytes")));
+            uint32_t span_count = 0;
+            RETURN_IF_ERROR(ReadFields(r, absl::StrCat("shared_slots block ", i, " span_count"),
+                                       span_count));
+            // Sub-spans are page-granular carve-outs of this block.
+            const uint64_t max_spans = MaxSnapshotRecords(size, page_size_);
+            if (span_count == 0U || span_count > max_spans) {
+                return absl::DataLossError(absl::StrCat("shared_slots block ", i, " span_count ",
+                                                        span_count, " is outside [1, ", max_spans,
+                                                        "]"));
+            }
+            BackingBlock block;
+            block.buffer = std::move(buf);
+            block.bar_offset = bar_offset;
+            block.size = size;
+            uint64_t expected_rel = 0ULL;
+            for (uint32_t s = 0; s < span_count; ++s) {
+                uint64_t rel_off = 0;
+                uint64_t span_size = 0;
+                uint32_t owner_id = 0;
+                bool is_free = false;
+                RETURN_IF_ERROR(ReadFields(
+                        r, absl::StrCat("shared_slots block ", i, " span ", s), rel_off, span_size,
+                        owner_id, is_free));
+                if (rel_off != expected_rel) {
+                    return absl::DataLossError(absl::StrCat(
+                            "shared_slots block ", i, " span ", s, " rel_off ", rel_off,
+                            " does not follow the previous span (expected ", expected_rel, ")"));
+                }
+                if (span_size == 0ULL || span_size > size - expected_rel) {
+                    return absl::DataLossError(absl::StrCat("shared_slots block ", i, " span ", s,
+                                                            " size ", span_size, " is outside [1, ",
+                                                            size - expected_rel, "]"));
+                }
+                expected_rel += span_size;
+                block.spans.emplace(
+                        rel_off,
+                        SubSpan{.size = span_size, .owner_id = owner_id, .free = is_free});
+            }
+            if (expected_rel != size) {
+                return absl::DataLossError(absl::StrCat("shared_slots block ", i, " spans cover ",
+                                                        expected_rel, " bytes but block size is ",
+                                                        size));
+            }
+            if (!bar1_->Map(bar_offset, block.buffer->Data(), size)) {
+                return absl::InternalError(absl::StrCat("BAR 1 Map failed for shared_slots block ",
+                                                        i, " at bar_offset ", bar_offset, " size ",
+                                                        size));
+            }
+            blocks_.emplace(bar_offset, std::move(block));
+        }
+        return absl::OkStatus();
     }
 
   private:
@@ -1024,6 +1331,12 @@ void GoldfishAddressSpaceDevice::ExecuteCommand(uint32_t cmd) {
         break;
     }
     case kAsCmdGenHandle: {
+        if (handles_.size() >= kMaxSnapshotHandles) {
+            // Keep the live device inside what LoadState() accepts, so a snapshot of any
+            // reachable state can be restored.
+            status_ = kAsErrnoEnomem;
+            break;
+        }
         const uint32_t handle = handle_allocator_.Get();
         handles_.emplace(handle, HandleSlot{});
         handle_ = handle;
@@ -1170,6 +1483,195 @@ bool GoldfishAddressSpaceDevice::UnmapUserMemoryUnderBql(uint64_t gpa, uint64_t 
     return true;
 }
 
+void GoldfishAddressSpaceDevice::SaveState(archive::IWriter& w) const {
+    w << kAddressSpaceSnapshotMagic << kAddressSpaceSnapshotVersion << effective_page_size_
+      << block_size_ << block_offset_ << ping_info_addr_ << phys_start_ << status_
+      << guest_page_size_ << handle_ << allocator_.MinAlign();
+    const auto& spans = allocator_.Spans();
+    w << static_cast<uint32_t>(spans.size());
+    for (const Bar1Allocator::Span& span : spans) {
+        w << span.offset << span.size << span.allocated << span.guest_block;
+    }
+
+    shared_slots_pool_->Save(w);
+
+    w << handle_allocator_.LastId();
+    std::vector<std::pair<uint32_t, const HandleSlot*>> sorted_handles;
+    sorted_handles.reserve(handles_.size());
+    for (const auto& [h, slot] : handles_) {
+        sorted_handles.emplace_back(h, &slot);
+    }
+    std::sort(sorted_handles.begin(), sorted_handles.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    w << static_cast<uint32_t>(sorted_handles.size());
+    for (const auto& [h, slot] : sorted_handles) {
+        const AddressSpaceSubdeviceType type = slot->subdevice != nullptr
+                                                       ? slot->subdevice->Type()
+                                                       : AddressSpaceSubdeviceType::kNoDevice;
+        w << h << slot->ping_gpa << static_cast<uint32_t>(type);
+        if (type == AddressSpaceSubdeviceType::kGraphics) {
+            static_cast<const GraphicsAsgSubdevice*>(slot->subdevice.get())->Save(w);
+        } else if (type == AddressSpaceSubdeviceType::kHostMemoryAllocator) {
+            static_cast<const HostMemoryAllocatorSubdevice*>(slot->subdevice.get())->Save(w);
+        }
+    }
+}
+
+absl::Status GoldfishAddressSpaceDevice::LoadState(archive::IReader& reader) {
+    bool mutated = false;
+    absl::Status st = LoadStateImpl(reader, &mutated);
+    if (!st.ok() && mutated) {
+        // The device was already torn down for the restore; leave it in the reset state rather
+        // than half-restored.
+        Reset();
+    }
+    return st;
+}
+
+absl::Status GoldfishAddressSpaceDevice::LoadStateImpl(archive::IReader& r, bool* mutated) {
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    RETURN_IF_ERROR(ReadFields(r, "snapshot header", magic, version));
+    if (magic != kAddressSpaceSnapshotMagic) {
+        return absl::DataLossError(absl::StrCat("snapshot magic 0x", absl::Hex(magic),
+                                                " does not match 0x",
+                                                absl::Hex(kAddressSpaceSnapshotMagic)));
+    }
+    if (version != kAddressSpaceSnapshotVersion) {
+        return absl::FailedPreconditionError(absl::StrCat("snapshot version ", version,
+                                                          " is not the supported version ",
+                                                          kAddressSpaceSnapshotVersion));
+    }
+
+    uint64_t effective_page_size = 0;
+    uint64_t block_size = 0;
+    uint64_t block_offset = 0;
+    uint64_t ping_info_addr = 0;
+    uint64_t phys_start = 0;
+    uint32_t status = 0;
+    uint32_t guest_page_size = 0;
+    uint32_t handle = 0;
+    RETURN_IF_ERROR(ReadFields(r, "device registers", effective_page_size, block_size, block_offset,
+                               ping_info_addr, phys_start, status, guest_page_size, handle));
+    if (!std::has_single_bit(effective_page_size)) {
+        return absl::DataLossError(absl::StrCat("effective_page_size ", effective_page_size,
+                                                " is not a power of two"));
+    }
+    if (!std::has_single_bit(guest_page_size)) {
+        return absl::DataLossError(
+                absl::StrCat("guest_page_size ", guest_page_size, " is not a power of two"));
+    }
+
+    uint64_t min_align = 0;
+    uint32_t span_count = 0;
+    RETURN_IF_ERROR(ReadFields(r, "bar1 span_count", min_align, span_count));
+    const uint64_t max_spans = MaxSnapshotRecords(bar1_->Size(), host_page_size_);
+    if (span_count > max_spans) {
+        return absl::DataLossError(
+                absl::StrCat("span_count ", span_count, " exceeds ", max_spans));
+    }
+    std::vector<Bar1Allocator::Span> spans;
+    for (uint32_t i = 0; i < span_count; ++i) {
+        Bar1Allocator::Span span{};
+        RETURN_IF_ERROR(ReadFields(r, absl::StrCat("bar1 span ", i), span.offset, span.size,
+                                   span.allocated, span.guest_block));
+        spans.push_back(span);
+    }
+
+    *mutated = true;
+    TeardownAllSubdevices();
+    allocator_.Reset();
+    effective_page_size_ = std::max(effective_page_size, host_page_size_);
+    guest_page_size_ = guest_page_size;
+    block_size_ = block_size;
+    block_offset_ = block_offset;
+    ping_info_addr_ = ping_info_addr;
+    phys_start_ = phys_start;
+    status_ = status;
+    handle_ = handle;
+    UpdateMappingTablePhysBase();
+
+    RETURN_IF_ERROR(
+            allocator_.RestoreSpans(std::max(min_align, host_page_size_), std::move(spans)));
+
+    shared_slots_pool_->SetPageSize(effective_page_size_);
+    RETURN_IF_ERROR(shared_slots_pool_->Restore(r));
+
+    uint32_t last_handle_id = 0;
+    uint32_t handle_count = 0;
+    RETURN_IF_ERROR(ReadFields(r, "handle_count", last_handle_id, handle_count));
+    if (handle_count > kMaxSnapshotHandles) {
+        return absl::DataLossError(
+                absl::StrCat("handle_count ", handle_count, " exceeds ", kMaxSnapshotHandles));
+    }
+    if (last_handle_id > kMaxSnapshotHandles) {
+        return absl::DataLossError(
+                absl::StrCat("last_handle_id ", last_handle_id, " exceeds ", kMaxSnapshotHandles));
+    }
+
+    uint32_t max_seen_handle = last_handle_id;
+    for (uint32_t i = 0; i < handle_count; ++i) {
+        uint32_t h = 0;
+        uint64_t ping_gpa = 0;
+        uint32_t raw_type = 0;
+        RETURN_IF_ERROR(
+                ReadFields(r, absl::StrCat("handle record ", i), h, ping_gpa, raw_type));
+        const auto type = static_cast<AddressSpaceSubdeviceType>(raw_type);
+        if (h == 0U) {
+            return absl::DataLossError(absl::StrCat("handle record ", i, " has handle 0"));
+        }
+        if (h > kMaxSnapshotHandles) {
+            return absl::DataLossError(
+                    absl::StrCat("handle ", h, " exceeds ", kMaxSnapshotHandles));
+        }
+        if (handles_.contains(h)) {
+            return absl::DataLossError(absl::StrCat("handle ", h, " appears twice"));
+        }
+        max_seen_handle = std::max(max_seen_handle, h);
+
+        HandleSlot slot{};
+        slot.ping_gpa = ping_gpa;
+        switch (type) {
+        case AddressSpaceSubdeviceType::kNoDevice:
+            break;
+        case AddressSpaceSubdeviceType::kGraphics: {
+            ASSIGN_OR_RETURN(slot.subdevice,
+                             GraphicsAsgSubdevice::Restore(&allocator_, bar1_.get(), gpu_, r));
+            break;
+        }
+        case AddressSpaceSubdeviceType::kHostMemoryAllocator: {
+            auto subdev = std::make_unique<HostMemoryAllocatorSubdevice>(
+                    &allocator_, bar1_.get(), effective_page_size_,
+                    [this]() { return EffectivePhysStart(); });
+            RETURN_IF_ERROR(subdev->Restore(r));
+            slot.subdevice = std::move(subdev);
+            break;
+        }
+        case AddressSpaceSubdeviceType::kSharedSlotsHostMemoryAllocator:
+            slot.subdevice = std::make_unique<SharedSlotsSubdevice>(
+                    shared_slots_pool_.get(), h, [this]() { return EffectivePhysStart(); });
+            break;
+        default:
+            return absl::DataLossError(absl::StrCat(
+                    "handle ", h, " has unsupported subdevice type ", static_cast<uint32_t>(type)));
+        }
+        handles_.emplace(h, std::move(slot));
+    }
+
+    handle_allocator_.Reset();
+    for (uint32_t id = 1U; id <= max_seen_handle; ++id) {
+        (void)handle_allocator_.Get();
+    }
+    for (uint32_t id = 1U; id <= max_seen_handle; ++id) {
+        if (!handles_.contains(id)) {
+            handle_allocator_.Put(id);
+        }
+    }
+
+    UpdateMappingTablePhysBase();
+    return absl::OkStatus();
+}
+
 }  // namespace goldfish::legacy
 
 extern "C" GoldfishMmioCore GoldfishAddressSpaceCoreCreate(const GoldfishDeviceEnv* env) {
@@ -1182,4 +1684,30 @@ extern "C" GoldfishMmioCore GoldfishAddressSpaceCoreCreate(const GoldfishDeviceE
 
 extern "C" uint64_t GoldfishAddressSpaceHostPageSize(void) {
     return goldfish::legacy::QueryHostPageSize();
+}
+
+extern "C" bool GoldfishAddressSpaceCoreSave(const void* core, QEMUFile* f) {
+    if (core == nullptr || f == nullptr) {
+        return false;
+    }
+    const auto* dev = static_cast<const goldfish::legacy::GoldfishAddressSpaceDevice*>(
+            static_cast<const goldfish::legacy::IMmioDevice*>(core));
+    goldfish::archive::QEMUFileWriter writer(f);
+    dev->SaveState(writer);
+    return true;
+}
+
+extern "C" bool GoldfishAddressSpaceCoreLoad(void* core, QEMUFile* f) {
+    if (core == nullptr || f == nullptr) {
+        return false;
+    }
+    auto* dev = static_cast<goldfish::legacy::GoldfishAddressSpaceDevice*>(
+            static_cast<goldfish::legacy::IMmioDevice*>(core));
+    goldfish::archive::QEMUFileReader reader(f);
+    const absl::Status st = dev->LoadState(reader);
+    if (!st.ok()) {
+        LOG(ERROR) << "goldfish_address_space: load failed: " << st;
+        return false;
+    }
+    return true;
 }

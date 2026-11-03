@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "goldfish/legacy/common/c/device_env.h"
@@ -24,8 +26,11 @@
 #include <memory>
 
 #include "absl/base/thread_annotations.h"
+#include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
 
+#include "goldfish/archive/reader.h"
+#include "goldfish/archive/writer.h"
 #include "goldfish/legacy/common/adapters.h"
 #include "goldfish/legacy/common/i_guest_memory.h"
 #include "goldfish/legacy/common/i_mmio_device.h"
@@ -84,6 +89,16 @@ class GoldfishSyncDevice final : public IMmioDevice {
     void QueueTimelineInc(uint64_t guest_timeline, uint32_t how_much) ABSL_LOCKS_EXCLUDED(mu_);
     void QueueHostCommand(const GoldfishSyncCommand& cmd) ABSL_LOCKS_EXCLUDED(mu_);
 
+    // Snapshot hooks. The GoldfishGpu is quiesced/saved/loaded by its own VMState sections
+    // (goldfish_gpu_low_level.c), which run before this device's section; nothing GPU-related
+    // happens here.
+    void SaveState(archive::IWriter& writer) ABSL_LOCKS_EXCLUDED(mu_);
+    // Restores the state written by SaveState(). Returns DATA_LOSS for a
+    // truncated or corrupt stream (naming the field, value and limit) and
+    // FAILED_PRECONDITION for an unsupported snapshot version. The device is
+    // left untouched on failure.
+    absl::Status LoadState(archive::IReader& reader) ABSL_LOCKS_EXCLUDED(mu_);
+
   private:
     struct CallbackState {
         GoldfishSyncDevice* dev ABSL_GUARDED_BY(mu) = nullptr;
@@ -107,7 +122,11 @@ class GoldfishSyncDevice final : public IMmioDevice {
 extern "C" {
 #endif
 
+typedef struct QEMUFile QEMUFile;
+
 struct GoldfishMmioCore GoldfishSyncCoreCreate(const struct GoldfishDeviceEnv* env);
+bool GoldfishSyncCoreSave(void* core, QEMUFile* f);
+bool GoldfishSyncCoreLoad(void* core, QEMUFile* f);
 
 #ifdef __cplusplus
 }

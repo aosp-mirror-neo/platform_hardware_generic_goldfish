@@ -1,0 +1,42 @@
+load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# The QEMU edge of the legacy GoldfishGpu:
+#   :c_api  the extern "C" shim (goldfish_gpu_c_api.h) over the process-wide IGoldfishGpu;
+#           absl::Status -> logged bool. Pure C++, no QEMU headers, so tests can link it.
+#   :impl   goldfish_gpu_low_level.c: the "goldfish_gpu_begin" / "goldfish_gpu_end" VMState
+#           sections and the VM change-state handler. Linked into the plugin only.
+
+package(
+    default_applicable_licenses = ["//emulator:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "c_api",
+    srcs = ["goldfish_gpu_c_api.cc"],
+    deps = [
+        "//emulator/plugin/legacy/goldfish_gpu:facade",
+        "//emulator/plugin/legacy/goldfish_gpu/api:goldfish_gpu_interface",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
+cc_library(
+    name = "impl",
+    srcs = ["goldfish_gpu_low_level.c"],
+    deps = [
+        "//emulator/plugin/legacy/goldfish_gpu",
+        "@qemu//:aemu_func_defs",
+        "@qemu//:qemu-headers-exported",
+    ],
+    alwayslink = True,
+)
+
+clang_tidy_test(
+    name = "tidy",
+    targets = [":c_api"],
+    tidy_config_file = "//:clang_tidy_config",
+)

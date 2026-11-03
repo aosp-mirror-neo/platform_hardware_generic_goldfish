@@ -16,6 +16,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -26,11 +28,36 @@ namespace goldfish::legacy {
 
 class FakeGoldfishGpu : public IGoldfishGpu {
   public:
+    absl::Status Start(GoldfishGpuConfig /*config*/) override { return absl::OkStatus(); }
+    void Stop() override {}
+    void StopForProcessExit() override { Stop(); }
+    void FlushReadPixelPipeline() override {}
+    void SetVerifyMode(GoldfishGpuVerifyMode /*mode*/) override {}
+    GoldfishGpuVerifyMode GetVerifyMode() const override { return GoldfishGpuVerifyMode::kLog; }
+    absl::Status VerifySteadyState() override { return absl::OkStatus(); }
+
+    absl::Status Quiesce(std::string_view /*snapshot_name*/) override { return absl::OkStatus(); }
+    absl::Status PreSave(std::string_view /*snapshot_name*/) override { return absl::OkStatus(); }
+    absl::StatusOr<std::vector<uint8_t>> Save(std::string_view /*snapshot_name*/) override {
+        return std::vector<uint8_t>{};
+    }
+    absl::Status PostSave(std::string_view /*snapshot_name*/) override { return absl::OkStatus(); }
+    absl::Status PreLoad(std::string_view /*snapshot_name*/) override { return absl::OkStatus(); }
+    absl::Status Load(std::string_view /*snapshot_name*/, const uint8_t* /*meta_data*/,
+                      size_t /*meta_size*/) override {
+        return absl::OkStatus();
+    }
+    absl::Status PostLoad(std::string_view /*snapshot_name*/) override { return absl::OkStatus(); }
+    void OnSnapshotOperationFinished() override {}
+
     void SetMemoryMappingCallbacks(MapUserMemoryCallback /*map_cb*/,
                                    UnmapUserMemoryCallback /*unmap_cb*/,
                                    ResolveDmaHostAddrCallback /*resolve_dma_cb*/) override {}
     absl::StatusOr<AsgBlob> CreateAsgBlob(uint64_t /*size*/) override {
         return absl::UnimplementedError("unused");
+    }
+    absl::StatusOr<AsgBlob> RestoreAsgBlob(uint32_t /*context_handle*/, uint64_t size) override {
+        return CreateAsgBlob(size);
     }
     absl::Status StartAsg(const AsgBlob& /*blob*/) override {
         return absl::UnimplementedError("unused");
@@ -38,16 +65,20 @@ class FakeGoldfishGpu : public IGoldfishGpu {
     absl::Status PingAsg(const AsgBlob& /*blob*/) override {
         return absl::UnimplementedError("unused");
     }
-    void DestroyAsg(const AsgBlob& /*blob*/) override {}
+    void CloseAsg(const AsgBlob& /*blob*/) override {}
     void SetTimelineIncCallback(TimelineIncCallback /*callback*/) override {}
     void TriggerHostWait(uint64_t /*glsync_handle*/, uint64_t /*thread_handle*/,
                          uint64_t /*guest_timeline_handle*/) override {}
-    void ReceiveHostCmdResult(uint32_t /*cmd*/, uint64_t /*handle*/, uint32_t /*time_arg*/,
-                              uint64_t /*hostcmd_handle*/) override {}
     uint64_t CreateProcessContext() override { return 0; }
     void DestroyProcessContext(uint64_t /*puid*/) override {}
+    void ColorBufferRef(uint32_t /*handle*/) override {}
     void ColorBufferLastRef(uint32_t /*handle*/) override {}
-    absl::StatusOr<uint32_t> OpenOpenglesPipe(OpenglesReadCallback /*on_host_data*/) override {
+    absl::StatusOr<uint32_t> CreateOpenglesPipe(OpenglesReadCallback /*on_host_data*/,
+                                                OpenglesWritableCallback /*on_writable*/) override {
+        return absl::UnimplementedError("unused");
+    }
+    absl::Status RestoreOpenglesPipe(uint32_t /*id*/, OpenglesReadCallback /*on_host_data*/,
+                                     OpenglesWritableCallback /*on_writable*/) override {
         return absl::UnimplementedError("unused");
     }
     absl::Status WriteOpenglesPipe(uint32_t /*id*/, const uint8_t* /*data*/,

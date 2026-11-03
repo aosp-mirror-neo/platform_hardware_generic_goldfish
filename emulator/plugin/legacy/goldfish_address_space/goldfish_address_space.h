@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "goldfish/legacy/common/c/device_env.h"
@@ -24,12 +26,17 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <string_view>
+#include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
 
 #include "bar1_allocator.h"
+#include "goldfish/archive/reader.h"
+#include "goldfish/archive/writer.h"
 #include "goldfish/legacy/common/adapters.h"
 #include "goldfish/legacy/common/i_bar1_mapper.h"
 #include "goldfish/legacy/common/i_guest_memory.h"
@@ -159,6 +166,17 @@ class GoldfishAddressSpaceDevice final : public IMmioDevice {
     bool UnmapUserMemory(uint64_t gpa, uint64_t size);
     void* ResolveDmaHostAddr(uint64_t gpa) const;
 
+    // Snapshot hooks. The GoldfishGpu is quiesced (its ASG consumers saved / destroyed) by its
+    // own "goldfish_gpu_begin" VMState section, which precedes this device's section; its
+    // consumers are recreated by the "goldfish_gpu_end" section after `LoadState()` restored the
+    // blobs through `IGoldfishGpu::RestoreAsgBlob()`.
+    void SaveState(archive::IWriter& writer) const;
+    // Restores the state written by `SaveState()`. Returns DATA_LOSS for a truncated or corrupt
+    // stream, FAILED_PRECONDITION for an unsupported snapshot version, NOT_FOUND when a record
+    // refers to a GPU handle or guest block that does not exist, and INTERNAL / RESOURCE_EXHAUSTED
+    // for host-side failures. On any error the device is left in its reset state.
+    absl::Status LoadState(archive::IReader& reader);
+
   private:
     class Bar1MappingTable;
 
@@ -185,6 +203,7 @@ class GoldfishAddressSpaceDevice final : public IMmioDevice {
     void TeardownAllSubdevices();
     bool MapUserMemoryUnderBql(uint64_t gpa, void* hva, uint64_t size);
     bool UnmapUserMemoryUnderBql(uint64_t gpa, uint64_t size);
+    absl::Status LoadStateImpl(archive::IReader& reader, bool* mutated);
 
     const std::unique_ptr<IGuestMemory> memory_;
     const std::shared_ptr<Bar1MappingTable> mapping_table_;
@@ -216,8 +235,12 @@ class GoldfishAddressSpaceDevice final : public IMmioDevice {
 extern "C" {
 #endif
 
+typedef struct QEMUFile QEMUFile;
+
 struct GoldfishMmioCore GoldfishAddressSpaceCoreCreate(const struct GoldfishDeviceEnv* env);
 uint64_t GoldfishAddressSpaceHostPageSize(void);
+bool GoldfishAddressSpaceCoreSave(const void* core, QEMUFile* f);
+bool GoldfishAddressSpaceCoreLoad(void* core, QEMUFile* f);
 
 #ifdef __cplusplus
 }

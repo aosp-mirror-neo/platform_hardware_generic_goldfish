@@ -1,0 +1,29 @@
+load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# In-process fakes of gfxstream's RenderChannel / Renderer / RenderLib, shared by every
+# goldfish_gpu test. Test-only.
+
+package(
+    default_applicable_licenses = ["//emulator:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "mock_gfxstream",
+    testonly = True,
+    hdrs = ["include/goldfish/legacy/goldfish_gpu/testing/mock_gfxstream.h"],
+    includes = ["include"],
+    deps = [
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@gfxstream//host:gfxstream_backend_headers",
+    ],
+)
+
+clang_tidy_test(
+    name = "tidy",
+    targets = [":mock_gfxstream"],
+    tidy_config_file = "//:clang_tidy_config",
+)

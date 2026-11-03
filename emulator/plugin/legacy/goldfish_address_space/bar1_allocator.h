@@ -18,12 +18,21 @@
 #include <optional>
 #include <vector>
 
+#include "absl/status/status.h"
+
 namespace goldfish::legacy {
 
 std::optional<uint64_t> AlignUp(uint64_t value, uint64_t align);
 
 class Bar1Allocator {
   public:
+    struct Span {
+        uint64_t offset = 0;
+        uint64_t size = 0;
+        bool allocated = false;
+        bool guest_block = false;
+    };
+
     Bar1Allocator(uint64_t total_size, uint64_t min_align);
 
     void Reset();
@@ -38,20 +47,23 @@ class Bar1Allocator {
 
     bool IsInsideGuestBlock(uint64_t offset, uint64_t size) const;
     std::optional<uint64_t> GuestBlockSize(uint64_t offset) const;
+    // True when [offset, offset + AlignUp(size, MinAlign())) is exactly one span that
+    // AllocateHostRegion() handed out (allocated, not a guest block). Snapshot restore uses it
+    // so a host-owned block can never be rebuilt on top of a guest block, which Free() would
+    // later release out from under the guest.
+    bool IsHostRegion(uint64_t offset, uint64_t size) const;
 
     uint64_t TotalSize() const { return total_size_; }
     uint64_t MinAlign() const { return min_align_; }
     bool IsEmpty() const { return spans_.empty(); }
     void SetMinAlign(uint64_t min_align);
 
-  private:
-    struct Span {
-        uint64_t offset = 0;
-        uint64_t size = 0;
-        bool allocated = false;
-        bool guest_block = false;
-    };
+    const std::vector<Span>& Spans() const { return spans_; }
+    // Replaces the span list with one read from a snapshot. Returns DATA_LOSS naming the
+    // offending span when the list does not tile [0, TotalSize()) exactly.
+    absl::Status RestoreSpans(uint64_t min_align, std::vector<Span> spans);
 
+  private:
     static uint64_t AlignDown(uint64_t value, uint64_t align);
 
     const uint64_t total_size_;
