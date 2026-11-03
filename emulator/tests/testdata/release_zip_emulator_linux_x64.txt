@@ -234,6 +234,7 @@ emulator/fishtank/lib64/qt/translations/qtwebengine_locales/zh-CN.pak
 emulator/fishtank/lib64/qt/translations/qtwebengine_locales/zh-TW.pak
 emulator/lib/
 emulator/lib/advancedFeatures.ini
+emulator/lib/emu-original-feature-flags.protobuf
 emulator/lib/emulator_access.json
 emulator/lib/qemu/
 emulator/lib/qemu/libgfxstream_backend.so

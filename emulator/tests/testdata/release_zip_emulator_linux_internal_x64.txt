@@ -101,6 +101,7 @@ emulator/fishtank/lib64/qt/plugins/platforms/libqvncAndroidEmu.so
 emulator/fishtank/lib64/qt/plugins/platforms/libqxcbAndroidEmu.so
 emulator/lib/
 emulator/lib/advancedFeatures.ini
+emulator/lib/emu-original-feature-flags.protobuf
 emulator/lib/emulator_access.json
 emulator/lib/qemu/
 emulator/lib/qemu/libgfxstream_backend.so

@@ -82,13 +82,20 @@ cc_library(
     name = "feature_flags",
     srcs = ["feature_flags.cc"],
     hdrs = ["include/android/goldfish/feature_flags.h"],
+    implementation_deps = [
+        "//emulator/libs/cpu:version",
+        "//emulator/libs/file",
+        "@abseil-cpp//absl/base:no_destructor",
+        "@protobuf",
+    ],
     includes = ["include"],
     visibility = ["//visibility:public"],
     deps = [
-        "//emulator/libs/file",
+        "//emulator/launcher/protos:emulator_feature_patterns_cc_proto",
         "//emulator/libs/metrics:studio_stats_wrapper",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
     ],
@@ -98,15 +105,68 @@ cc_test(
     name = "feature_flags_test",
     size = "small",
     srcs = ["feature_flags_test.cc"],
-    data = [":advanced_features_ini"],
+    data = [
+        ":advanced_features_ini",
+        ":feature_patterns",
+    ],
     deps = [
         ":feature_flags",
+        "//emulator/launcher/protos:emulator_feature_patterns_cc_proto",
+        "//emulator/libs/file",
         "//emulator/libs/status_macros:status_matcher_macros",
-        "//emulator/libs/system",
         "//emulator/libs/system:bazel_info",
         "//emulator/libs/system:test-headers",
         "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/base:log_severity",
+        "@abseil-cpp//absl/log:scoped_mock_log",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/status:statusor",
+        "@protobuf",
+    ],
+)
+
+cc_library(
+    name = "feature_pattern_downloader",
+    srcs = ["feature_pattern_downloader.cc"],
+    hdrs = ["feature_pattern_downloader.h"],
+    implementation_deps = [
+        ":feature_flags",
+        "//emulator/launcher/protos:emulator_feature_patterns_cc_proto",
+        "//emulator/libs/file",
+        "//emulator/libs/system",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@protobuf",
+    ],
+    deps = [
+        "//emulator/libs/network:http_client",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_test(
+    name = "feature_pattern_downloader_test",
+    size = "small",
+    srcs = ["feature_pattern_downloader_test.cc"],
+    deps = [
+        ":feature_flags",
+        ":feature_pattern_downloader",
+        "//emulator/launcher/protos:emulator_feature_patterns_cc_proto",
+        "//emulator/libs/file",
+        "//emulator/libs/http:web_server",
+        "//emulator/libs/network:http_client",
+        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/system:test-headers",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
     ],
 )
 
@@ -592,10 +652,19 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "feature_patterns",
+    srcs = ["data/emu-original-feature-flags.protobuf"],
+    visibility = ["//visibility:public"],
+)
+
 collect_plugins(
     name = "advanced_features",
     output_dir = "lib",
-    plugins = [":advanced_features_ini"],
+    plugins = [
+        ":advanced_features_ini",
+        ":feature_patterns",
+    ],
 )
 
 collect_plugins(
@@ -713,6 +782,7 @@ cc_binary_with_manifest(
     visibility = ["//visibility:public"],
     deps = [
         ":feature_flags",
+        ":feature_pattern_downloader",
         ":host_info",
         ":launcher_lib",
         ":trampoline",
@@ -969,6 +1039,7 @@ clang_tidy_test(
     name = "tidy",
     targets = [
         ":feature_flags",
+        ":feature_pattern_downloader",
         ":input_paths",
         ":avd",
     ],
