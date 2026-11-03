@@ -117,11 +117,11 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
             if (cancelled_.exchange(true)) {
                 return;
             }
+            timer_del(&qemu_timer_handle_);
             if (event_loop_->IsOnLoopThread()) {
-                DoCancel();
+                event_loop_->UnregisterTimer(this);
                 return;
             }
-            timer_del(&qemu_timer_handle_);
             // QEMU's timerlist_run_timers() invokes callbacks after releasing active_timers_lock,
             // so unpin only on the loop thread after any already-popped callback has run. During
             // shutdown, ShutdownTimersInternal() unpins remaining timers on the loop thread.
@@ -170,13 +170,6 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
         }
 
       private:
-        void DoCancel() {
-            cancelled_.store(true);
-            timer_del(&qemu_timer_handle_);
-            std::shared_ptr<QemuTimer> loop_pin = event_loop_->UnregisterTimer(this);
-            loop_pin.reset();
-        }
-
         // C-style callback passed to QEMU.
         static void OnTimerStatic(void* opaque) {
             // `opaque` is alive on entry: `timer_del()` always precedes `UnregisterTimer()` and
@@ -202,7 +195,7 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
 
             if (!task_()) {
                 if (ownership_ == Ownership::kLoopManaged) {
-                    DoCancel();
+                    Cancel();
                 }
             } else if (interval_ms_ && !cancelled_.load() &&
                        active_schedule_seq_ == schedule_seq_.load()) {
