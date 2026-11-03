@@ -1816,4 +1816,123 @@ TEST_P(EventLoopTest, IsOnLoopThreadIsTrueOnQemuMainThreadBeforeFirstDrain) {
                "bottom half drains";
 }
 
+namespace {
+
+constexpr absl::Duration kPromptTimeout = absl::Seconds(1);
+constexpr absl::Duration kCleanupTimeout = absl::Seconds(10);
+
+QemuSnapshotProgress MakeSnapshotProgress(QemuSnapshotOperation operation,
+                                          QemuSnapshotPhase phase) {
+    QemuSnapshotProgress progress{};
+    progress.operation = operation;
+    progress.phase = phase;
+    return progress;
+}
+
+bool PumpFakeQemuUntil(const absl::Notification& done, absl::Duration timeout) {
+    const absl::Time deadline = absl::Now() + timeout;
+    while (!done.HasBeenNotified()) {
+        if (absl::Now() >= deadline) {
+            return false;
+        }
+        fake_qemu_advance_ms(1);
+        std::this_thread::yield();
+    }
+    return true;
+}
+
+}  // namespace
+
+TEST_P(EventLoopTest, TimerCancelKeepsCallerBqlHeld) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    fake_qemu_set_bql_tracking(true);
+    auto timer = loop->CreateTimer([] { return true; });
+    timer->Schedule(absl::Seconds(10));
+    fake_qemu_advance_ms(1);
+
+    absl::Notification cancel_returned;
+    int64_t bql_releases_during_cancel = -1;
+    std::thread vcpu([&] {
+        bql_lock();
+        const int64_t unlocks_before = fake_qemu_bql_unlock_count();
+        timer.reset();
+        bql_releases_during_cancel = fake_qemu_bql_unlock_count() - unlocks_before;
+        bql_unlock();
+        cancel_returned.Notify();
+    });
+    EXPECT_TRUE(PumpFakeQemuUntil(cancel_returned, kCleanupTimeout));
+    vcpu.join();
+
+    EXPECT_EQ(bql_releases_during_cancel, 0)
+            << "ScopedTimer::reset() released the BQL that its caller holds";
+}
+
+TEST_P(EventLoopTest, TimerCancelDoesNotWaitForSnapshotInProgress) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    auto timer = loop->CreateTimer([] { return true; });
+    timer->Schedule(absl::Seconds(10));
+    fake_qemu_advance_ms(1);
+
+    absl::Notification snapshot_running;
+    absl::Notification cancel_returned;
+    bool cancel_returned_during_snapshot = false;
+    const absl::Status posted = loop->Post([&] {
+        const QemuSnapshotProgress preparing =
+                MakeSnapshotProgress(QEMU_SNAPSHOT_OP_SAVE, QEMU_SNAPSHOT_PHASE_PREPARING);
+        fake_qemu_fire_snapshot_progress(&preparing);
+        snapshot_running.Notify();
+        cancel_returned_during_snapshot =
+                cancel_returned.WaitForNotificationWithTimeout(kPromptTimeout);
+        const QemuSnapshotProgress completed =
+                MakeSnapshotProgress(QEMU_SNAPSHOT_OP_SAVE, QEMU_SNAPSHOT_PHASE_COMPLETED);
+        fake_qemu_fire_snapshot_progress(&completed);
+    });
+    ASSERT_THAT(posted, absl_testing::IsOk());
+
+    std::thread hang_detector([&] {
+        snapshot_running.WaitForNotification();
+        timer.reset();
+        cancel_returned.Notify();
+    });
+    EXPECT_TRUE(PumpFakeQemuUntil(cancel_returned, kCleanupTimeout));
+    hang_detector.join();
+
+    EXPECT_TRUE(cancel_returned_during_snapshot)
+            << "ScopedTimer::reset() blocked until the snapshot on the QEMU main thread finished";
+}
+
+TEST_P(EventLoopTest, TimerCancelRacesWithFiringCallbackWithoutUseAfterFree) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    for (int iter = 0; iter < 300; ++iter) {
+        std::atomic<int> fires = 0;
+        absl::Notification scheduled;
+        auto timer = loop->CreateTimer([&fires] {
+            fires.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        });
+        timer->Schedule(absl::Milliseconds(1), absl::Milliseconds(1));
+        (void)loop->Post([&scheduled] { scheduled.Notify(); });
+        while (!scheduled.HasBeenNotified()) {
+            fake_qemu_advance_ms(1);
+        }
+
+        std::atomic<bool> canceller_done = false;
+        std::thread canceller([&] {
+            timer.reset();
+            canceller_done.store(true, std::memory_order_release);
+        });
+        while (!canceller_done.load(std::memory_order_acquire)) {
+            fake_qemu_advance_ms(1);
+        }
+        canceller.join();
+        fake_qemu_advance_ms(2);
+    }
+}
+
 }  // namespace goldfish::async

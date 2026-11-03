@@ -81,7 +81,7 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
     //
     // This class is responsible for managing the lifetime of cancellable delayed
     // and repeating tasks scheduled on the QemuEventLoopImpl.
-    class QemuTimer : public EventLoop::Timer, public std::enable_shared_from_this<QemuTimer> {
+    class QemuTimer : public EventLoop::Timer {
         struct Private {};
 
       public:
@@ -121,23 +121,17 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
                 DoCancel();
                 return;
             }
-            if (event_loop_->GetState() == LooperStatusEvent::State::kNotStarted) {
-                DoCancel();
-                return;
-            }
-            bool under_bql = false;
-            if (bql_locked()) {
-                under_bql = true;
-                bql_unlock();
-            }
-
-            if (!event_loop_->PostAndWait([this]() { DoCancel(); }).ok()) {
-                DoCancel();
-            }
-
-            if (under_bql) {
-                bql_lock();
-            }
+            timer_del(&qemu_timer_handle_);
+            // QEMU's timerlist_run_timers() invokes callbacks after releasing active_timers_lock,
+            // so unpin only on the loop thread after any already-popped callback has run. During
+            // shutdown, ShutdownTimersInternal() unpins remaining timers on the loop thread.
+            event_loop_
+                    ->PostImmediately(
+                            [self = std::move(caller_pin)] {
+                                self->event_loop_->UnregisterTimer(self.get());
+                            },
+                            /*flow_id=*/0)
+                    .IgnoreError();
         }
 
         void Schedule(absl::Duration new_delay, absl::Duration new_interval) override {
@@ -156,7 +150,7 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
             const uint64_t seq = ++schedule_seq_;
             event_loop_
                     ->PostImmediately(
-                            [self = shared_from_this(), seq, new_delay_ms = to_qemu_ms(new_delay),
+                            [self = pinned_, seq, new_delay_ms = to_qemu_ms(new_delay),
                              new_interval_ms = to_qemu_ms(new_interval)] {
                                 if (self->cancelled_.load() ||
                                     !self->event_loop_->LockActiveTimer(self.get())) {
@@ -185,9 +179,11 @@ class QemuEventLoopImpl : public goldfish::async::QemuEventLoop {
 
         // C-style callback passed to QEMU.
         static void OnTimerStatic(void* opaque) {
-            auto* raw = static_cast<QemuTimer*>(opaque);
-            const std::shared_ptr<QemuTimer> self = raw->event_loop_->LockActiveTimer(raw);
-            if (!self || self->cancelled_.load()) {
+            // `opaque` is alive on entry: `timer_del()` always precedes `UnregisterTimer()` and
+            // `ShutdownTimersInternal()`, both of which run only on the loop thread, so `pinned_`
+            // cannot be released before an already-popped callback finishes on the loop thread.
+            const std::shared_ptr<QemuTimer> self = static_cast<QemuTimer*>(opaque)->pinned_;
+            if (self->cancelled_.load()) {
                 return;
             }
             DCHECK(self->event_loop_->IsOnLoopThread())
