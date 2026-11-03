@@ -96,6 +96,7 @@ cc_library(
     name = "simple_string_annotation",
     hdrs = ["simple_string_annotation.h"],
     deps = [
+        "@abseil-cpp//absl/log:check",
         "@crashpad//client",
     ],
 )
@@ -153,6 +154,12 @@ cc_library(
 )
 
 cc_library(
+    name = "crash_reporter_testing",
+    hdrs = ["crash_reporter_testing.h"],
+    visibility = ["//visibility:private"],
+)
+
+cc_library(
     name = "crash_reporter",
     srcs = ["crash_reporter.cc"],
     hdrs = ["include/android/crashreport/crash_reporter.h"],
@@ -162,9 +169,14 @@ cc_library(
         "//conditions:default": [],
     }) + [
         ":annotation_streambuf",
+        ":crash_reporter_testing",
         ":simple_string_annotation",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/base:no_destructor",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
         "@crashpad//client",
     ],
     includes = ["include"],
@@ -365,6 +377,23 @@ cc_test(
 )
 
 cc_test(
+    name = "crash_reporter_test",
+    size = "small",
+    srcs = ["crash_reporter_test.cc"],
+    # buildifier: leave-alone
+    deps = select({
+        "@platforms//os:windows": ["@aemu//windows:compat-hdrs"],
+        "//conditions:default": [],
+    }) + [
+        ":crash_reporter",
+        ":crash_reporter_testing",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/strings",
+        "@crashpad//client",
+    ],
+)
+
+cc_test(
     name = "crash_system_test",
     size = "small",
     srcs = ["crash_system_test.cc"],
@@ -439,11 +468,14 @@ clang_tidy_test(
         ":breadcrumb",
         ":breadcrumb_proto",
         ":crash_reporter",
+        ":crash_reporter_test",
+        ":crash_reporter_testing",
         ":crash_system",
         ":crash_uploader",
         ":debug",
         ":hang_detector",
         ":looper_registrations",
+        ":simple_string_annotation",
         ":thread",
         ":timeout_monitor",
     ],

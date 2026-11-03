@@ -9,14 +9,14 @@
 | Class / Interface | Bazel Target | Header Path | Description |
 | :--- | :--- | :--- | :--- |
 | `crashhandler_init` | `:crash_system` | `include/android/crashreport/crash_system.h` | C-entry point to initialize the crash reporting system at startup. |
-| `CrashReporter` | `:crash_reporter` | `include/android/crashreport/crash_reporter.h` | Singleton for adding annotations or triggering a crash. |
+| `CrashReporter` | `:crash_reporter` | `include/android/crashreport/crash_reporter.h` | Singleton for adding or updating annotations (`SetAnnotation`, `AddMessage`) or triggering a crash (`Die`). |
 | `BreadcrumbTracker` | `:breadcrumb` | `include/android/crashreport/breadcrumb.h` | Tracker for leaving "breadcrumbs" in circular buffers within crash reports. |
 | `HangDetector` | `:hang_detector` | `include/android/crashreport/hang_detector.h` | Service to monitor event loops for hangs. |
 | `upload_crashes` | `:crash_system` | `include/android/crashreport/crash_system.h` | Starts the background upload of pending reports. |
 
 ## Critical Infrastructure
 * **Crashpad Integration:** Starts an out-of-process `crashpad_handler` to monitor the emulator. If the emulator crashes, the handler saves a minidump to a local database.
-* **Annotations:** `CrashReporter::attachData` allows attaching key-value pairs (e.g., version, GPU driver) to the crash dump.
+* **Annotations:** `CrashReporter::SetAnnotation` allows attaching and updating key-value pairs (e.g., version, GPU driver, lifecycle phase) in the crash dump.
 * **Hang Detection:**
     *   **Looper Watcher:** Registers `goldfish::async::EventLoop` instances. It posts heartbeat tasks to the loop; if they don't complete within a timeout, it triggers a "hang" crash.
     *   **Predicates:** Allows registering custom lambda functions that return true if a specific subsystem is stuck.

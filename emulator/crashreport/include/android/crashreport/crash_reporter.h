@@ -14,7 +14,9 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include "android/crashreport/hang_detector.h"
 
@@ -23,38 +25,31 @@ namespace android::crashreport {
 /**
  * @brief Singleton class tracking crashpad annotations
  *
- * Provides a method to track crashpad annotations.
+ * Provides methods to attach and update Crashpad annotations.
  */
 class CrashReporter {
   public:
     virtual ~CrashReporter() = default;
 
     /**
-     * @brief Attaches data to the crash report.
+     * @brief Sets or replaces a key-value annotation in the crash report.
      *
-     * This results in the creation of an annotation object with the given data.
-     * The annotation object will use str::size < 2^x bytes of memory in the minidump.
-     * Note that the provided string should not be larger than 16384 bytes.
+     * Allocates or updates a power-of-2 Crashpad annotation bucket in place
+     * (up to 16384 bytes; larger values are truncated).
      *
-     * @param name A description of the data.
-     * @param data The data to attach as a string.
-     * @param replace If true, replaces existing data with the same name.
-     *                If false, appends the data.
+     * @param name Annotation key name.
+     * @param value String value to attach.
      */
-    virtual void AttachData(std::string name, std::string data, bool replace) = 0;
+    virtual void SetAnnotation(std::string_view name, std::string_view value) = 0;
 
     /**
-     * @brief Attaches data to the crash report without replacing existing data.
-     *
-     * @param name A description of the data.
-     * @param data The data to attach as a string.
+     * @brief Returns the current value of an attached annotation if set.
      */
-    void AttachData(std::string name, std::string data) {
-        AttachData(std::move(name), std::move(data), false);
-    }
+    [[nodiscard]] virtual std::optional<std::string> GetAttachedData(
+            std::string_view name) const = 0;
 
     /**
-     * @brief Adds an addition message to the default `internal-msg` annotation.
+     * @brief Adds an additional message to the default `internal-msg` annotation.
      *
      * Note: this can hold at most 8kb of data.
      *
@@ -63,18 +58,18 @@ class CrashReporter {
     virtual void AddMessage(std::string_view message) = 0;
 
     /**
-     * @brief Generates a crash dump and terminates the pro cess.
+     * @brief Generates a crash dump and terminates the process.
      *
      * The message will be added to the 'internal-msg' annotation.
      *
      * @param message The message to include in the dump.
      */
-    virtual void Die(std::string_view message) = 0;
+    [[noreturn]] virtual void Die(std::string_view message) = 0;
 
     /**
      * @brief Gets the singleton instance of the CrashReporter.
      *
-     * @return A pointer to the CrashReporter instance.
+     * @return A reference to the CrashReporter instance.
      */
     static CrashReporter& Get();
 
