@@ -179,6 +179,7 @@ TEST_F(CapabilitiesServiceTest, ReturnsSubsystemsCapabilities) {
     ASSERT_TRUE(reply.audio().has_microphone_profile());
     ASSERT_TRUE(reply.audio().has_max_concurrent_microphone_streams());
     EXPECT_EQ(reply.audio().max_concurrent_microphone_streams(), 4);
+    EXPECT_TRUE(reply.audio().supports_wired_headset());
     EXPECT_THAT(reply.audio().microphone_profile().supported_formats(),
                 ElementsAre(SampleFormat::SAMPLE_FORMAT_PCM16_BIT,
                             SampleFormat::SAMPLE_FORMAT_F32_BIT));

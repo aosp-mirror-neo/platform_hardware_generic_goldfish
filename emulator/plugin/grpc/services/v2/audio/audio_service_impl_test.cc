@@ -71,6 +71,7 @@ using ::android::emulation::v2::StreamAudioStateRequest;
 using ::android::emulation::v2::StreamMicrophoneAudioResponse;
 using ::android::emulation::v2::StreamSpeakerAudioRequest;
 using ::android::emulation::v2::UpdateAudioStateRequest;
+using ::android::emulation::v2::WiredHeadset;
 using ::goldfish::audio::AudioInputMux;
 using ::goldfish::audio::AudioStreamConfig;
 using ::goldfish::audio::GuestAudioConfig;
@@ -1938,6 +1939,84 @@ TEST_F(AudioServiceTest, QemuAudioCleanupDuringActiveStreamsEndsThemCleanly) {
     // Late teardown of both streams (and of the service in TearDown) must not hang or crash.
     reader->OnDone();
     state_writer->OnDone();
+}
+
+TEST_F(AudioServiceTest, UpdateAudioStateWiredHeadsetUpdatesSwitchesAndNotifiesStream) {
+    std::vector<std::pair<bool, bool>> switch_calls;
+    auto opts = MakeDefaultOptions();
+    opts.has_audio_input = false;
+    opts.has_audio_output = true;
+    opts.set_headset_switches = [&switch_calls](bool headphone, bool microphone) {
+        switch_calls.emplace_back(headphone, microphone);
+    };
+    RecreateService(std::move(opts));
+
+    auto* writer = service_->CreateAudioStateWriter<test::FakeWriteReactor<AudioState>>();
+    ASSERT_EQ(writer->written_messages.size(), 1U);
+    EXPECT_EQ(writer->written_messages.back().wired_headset(),
+              WiredHeadset::WIRED_HEADSET_DISCONNECTED);
+    writer->OnWriteDone(true);
+
+    // WIRED_HEADSET_WITHOUT_MICROPHONE -> (true, false)
+    {
+        ServerContext ctx;
+        UpdateAudioStateRequest req;
+        req.set_wired_headset(WiredHeadset::WIRED_HEADSET_WITHOUT_MICROPHONE);
+        AudioState reply;
+        ASSERT_TRUE(service_->UpdateAudioState(&ctx, &req, &reply).ok());
+        EXPECT_EQ(reply.wired_headset(), WiredHeadset::WIRED_HEADSET_WITHOUT_MICROPHONE);
+    }
+    ASSERT_EQ(switch_calls.size(), 1U);
+    EXPECT_EQ(switch_calls.back(), std::make_pair(true, false));
+    ASSERT_EQ(writer->written_messages.size(), 2U);
+    EXPECT_EQ(writer->written_messages.back().wired_headset(),
+              WiredHeadset::WIRED_HEADSET_WITHOUT_MICROPHONE);
+    writer->OnWriteDone(true);
+
+    // WIRED_HEADSET_WITH_MICROPHONE -> (true, true)
+    {
+        ServerContext ctx;
+        UpdateAudioStateRequest req;
+        req.set_wired_headset(WiredHeadset::WIRED_HEADSET_WITH_MICROPHONE);
+        AudioState reply;
+        ASSERT_TRUE(service_->UpdateAudioState(&ctx, &req, &reply).ok());
+        EXPECT_EQ(reply.wired_headset(), WiredHeadset::WIRED_HEADSET_WITH_MICROPHONE);
+    }
+    ASSERT_EQ(switch_calls.size(), 2U);
+    EXPECT_EQ(switch_calls.back(), std::make_pair(true, true));
+    ASSERT_EQ(writer->written_messages.size(), 3U);
+    EXPECT_EQ(writer->written_messages.back().wired_headset(),
+              WiredHeadset::WIRED_HEADSET_WITH_MICROPHONE);
+    writer->OnWriteDone(true);
+
+    // WIRED_HEADSET_DISCONNECTED -> (false, false)
+    {
+        ServerContext ctx;
+        UpdateAudioStateRequest req;
+        req.set_wired_headset(WiredHeadset::WIRED_HEADSET_DISCONNECTED);
+        AudioState reply;
+        ASSERT_TRUE(service_->UpdateAudioState(&ctx, &req, &reply).ok());
+        EXPECT_EQ(reply.wired_headset(), WiredHeadset::WIRED_HEADSET_DISCONNECTED);
+    }
+    ASSERT_EQ(switch_calls.size(), 3U);
+    EXPECT_EQ(switch_calls.back(), std::make_pair(false, false));
+    ASSERT_EQ(writer->written_messages.size(), 4U);
+    EXPECT_EQ(writer->written_messages.back().wired_headset(),
+              WiredHeadset::WIRED_HEADSET_DISCONNECTED);
+    writer->OnWriteDone(true);
+
+    // Invalid WIRED_HEADSET_UNSPECIFIED fails with INVALID_ARGUMENT without calling switches.
+    {
+        ServerContext ctx;
+        UpdateAudioStateRequest req;
+        req.set_wired_headset(WiredHeadset::WIRED_HEADSET_UNSPECIFIED);
+        AudioState reply;
+        Status status = service_->UpdateAudioState(&ctx, &req, &reply);
+        EXPECT_EQ(status.error_code(), StatusCode::INVALID_ARGUMENT);
+    }
+    EXPECT_EQ(switch_calls.size(), 3U);
+
+    writer->OnDone();
 }
 
 }  // namespace

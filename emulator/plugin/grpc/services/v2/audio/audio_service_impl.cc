@@ -15,6 +15,7 @@
 #include "audio/audio_service_impl.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -57,6 +58,7 @@ using ::android::emulation::v2::StreamAudioStateRequest;
 using ::android::emulation::v2::StreamMicrophoneAudioResponse;
 using ::android::emulation::v2::StreamSpeakerAudioRequest;
 using ::android::emulation::v2::UpdateAudioStateRequest;
+using ::android::emulation::v2::WiredHeadset;
 using ::goldfish::audio::AudioInputMux;
 using ::goldfish::audio::AudioInputStateMutation;
 using ::goldfish::audio::AudioInputStateSnapshot;
@@ -183,6 +185,53 @@ void PopulateAudioStateFromSnapshot(const AudioInputStateSnapshot& snapshot, abs
         proto_input->set_kind(ToProtoMicrophoneInputKind(channel.kind));
         proto_input->set_muted(channel.muted);
         proto_input->set_gain(channel.gain);
+    }
+}
+
+std::optional<AudioInputStateMutation> ToAudioInputStateMutation(
+        const UpdateAudioStateRequest& request) {
+    if (!request.has_microphone_muted() && request.microphone_inputs().empty()) {
+        return std::nullopt;
+    }
+    AudioInputStateMutation mutation;
+    if (request.has_microphone_muted()) {
+        mutation.microphone_muted = request.microphone_muted();
+    }
+    mutation.input_updates.reserve(static_cast<size_t>(request.microphone_inputs_size()));
+    for (const auto& update : request.microphone_inputs()) {
+        MicrophoneInputChannelUpdate channel_update;
+        channel_update.source_id = update.source_id();
+        if (update.has_muted()) {
+            channel_update.muted = update.muted();
+        }
+        if (update.has_gain()) {
+            channel_update.gain = update.gain();
+        }
+        mutation.input_updates.push_back(std::move(channel_update));
+    }
+    return mutation;
+}
+
+struct HeadsetSwitches {
+    bool headphone = false;
+    bool microphone = false;
+};
+
+absl::StatusOr<HeadsetSwitches> ValidateWiredHeadset(WiredHeadset state) {
+    switch (state) {
+    case WiredHeadset::WIRED_HEADSET_DISCONNECTED:
+        return HeadsetSwitches{.headphone = false, .microphone = false};
+    case WiredHeadset::WIRED_HEADSET_WITHOUT_MICROPHONE:
+        return HeadsetSwitches{.headphone = true, .microphone = false};
+    case WiredHeadset::WIRED_HEADSET_WITH_MICROPHONE:
+        return HeadsetSwitches{.headphone = true, .microphone = true};
+    case WiredHeadset::WIRED_HEADSET_UNSPECIFIED:
+    default:
+        return absl::InvalidArgumentError(absl::StrFormat(
+                "Failed to update audio state in UpdateAudioState: invalid wired_headset=%d. "
+                "Specify WIRED_HEADSET_DISCONNECTED (1), WIRED_HEADSET_WITHOUT_MICROPHONE (2), or "
+                "WIRED_HEADSET_WITH_MICROPHONE (3).",
+                static_cast<int>(state)));
     }
 }
 
@@ -803,6 +852,7 @@ void AudioServiceImpl::PopulateAudioState(AudioState* out) const {
     const absl::Duration now = clock_.Now();
     out->clear_microphone_inputs();
     out->set_timestamp_nanos(absl::ToInt64Nanoseconds(now));
+    out->set_wired_headset(wired_headset_.load(std::memory_order_acquire));
 
     if (!options_.has_audio_input) {
         out->set_microphone_muted(false);
@@ -849,46 +899,71 @@ Status AudioServiceImpl::UpdateAudioState(ServerContext* /*context*/,
     if (!HasAudioSubsystem()) {
         return AudioSubsystemDisabledStatus("UpdateAudioState");
     }
-    if (Status writable = CheckMicrophoneWritable("UpdateAudioState"); !writable.ok()) {
+    if (Status writable = CheckWritable("UpdateAudioState"); !writable.ok()) {
         return writable;
     }
 
+    std::optional<HeadsetSwitches> next_headset;
+    if (request->has_wired_headset()) {
+        auto parsed = ValidateWiredHeadset(request->wired_headset());
+        if (!parsed.ok()) {
+            return AbslStatusToGrpcStatus(parsed.status());
+        }
+        next_headset = *parsed;
+    }
+
+    std::optional<AudioInputStateSnapshot> updated_mux;
+    if (const auto mutation = ToAudioInputStateMutation(*request); mutation.has_value()) {
+        AudioInputStateSnapshot snapshot;
+        if (Status status = UpdateMicrophone(*mutation, &snapshot); !status.ok()) {
+            return status;
+        }
+        updated_mux = std::move(snapshot);
+    }
+
+    if (next_headset.has_value()) {
+        if (options_.set_headset_switches) {
+            options_.set_headset_switches(next_headset->headphone, next_headset->microphone);
+        }
+        const WiredHeadset prev =
+                wired_headset_.exchange(request->wired_headset(), std::memory_order_acq_rel);
+        if (prev != request->wired_headset()) {
+            OnMuxStateChanged();
+        }
+    }
+
+    if (updated_mux.has_value()) {
+        PopulateAudioStateFromSnapshot(*updated_mux, clock_.Now(), reply);
+        reply->set_wired_headset(wired_headset_.load(std::memory_order_acquire));
+    } else {
+        (void)BindActiveMux();
+        PopulateAudioState(reply);
+    }
+    return Status::OK;
+}
+
+Status AudioServiceImpl::UpdateMicrophone(const AudioInputStateMutation& mutation,
+                                          AudioInputStateSnapshot* updated) const {
+    if (Status writable = CheckMicrophoneWritable("UpdateAudioState"); !writable.ok()) {
+        return writable;
+    }
     std::shared_ptr<AudioInputMux> mux = BindActiveMux();
     if (mux == nullptr) {
         return MissingMuxStatus("UpdateAudioState");
     }
-
-    AudioInputStateMutation mutation;
-    if (request->has_microphone_muted()) {
-        mutation.microphone_muted = request->microphone_muted();
-    }
-    mutation.input_updates.reserve(static_cast<size_t>(request->microphone_inputs_size()));
-    for (const auto& update : request->microphone_inputs()) {
-        MicrophoneInputChannelUpdate channel_update;
-        channel_update.source_id = update.source_id();
-        if (update.has_muted()) {
-            channel_update.muted = update.muted();
-        }
-        if (update.has_gain()) {
-            channel_update.gain = update.gain();
-        }
-        mutation.input_updates.push_back(std::move(channel_update));
-    }
-
-    auto updated = ::goldfish::audio::UpdateAudioInputMuxState(*mux, mutation);
-    if (!updated.ok()) {
-        if (updated.status().code() == absl::StatusCode::kUnavailable ||
-            updated.status().code() == absl::StatusCode::kFailedPrecondition) {
+    auto result = ::goldfish::audio::UpdateAudioInputMuxState(*mux, mutation);
+    if (!result.ok()) {
+        if (result.status().code() == absl::StatusCode::kUnavailable ||
+            result.status().code() == absl::StatusCode::kFailedPrecondition) {
             return MissingMuxStatus("UpdateAudioState");
         }
-        return AbslStatusToGrpcStatus(updated.status());
+        return AbslStatusToGrpcStatus(result.status());
     }
-
-    PopulateAudioStateFromSnapshot(*updated, clock_.Now(), reply);
+    *updated = *std::move(result);
     return Status::OK;
 }
 
-Status AudioServiceImpl::CheckMicrophoneWritable(absl::string_view operation) const {
+Status AudioServiceImpl::CheckWritable(absl::string_view operation) const {
     if (options_.read_only) {
         return Status(
                 StatusCode::PERMISSION_DENIED,
@@ -896,6 +971,13 @@ Status AudioServiceImpl::CheckMicrophoneWritable(absl::string_view operation) co
                              ": microphone mutations and audio injection are disabled on this "
                              "device (ACCESS_MODE_READ_ONLY). Use GetAudioState, StreamAudioState, "
                              "or StreamSpeakerAudio for read-only observation."));
+    }
+    return Status::OK;
+}
+
+Status AudioServiceImpl::CheckMicrophoneWritable(absl::string_view operation) const {
+    if (Status writable = CheckWritable(operation); !writable.ok()) {
+        return writable;
     }
     if (!options_.has_audio_input) {
         return Status(

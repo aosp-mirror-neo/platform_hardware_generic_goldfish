@@ -144,6 +144,7 @@ void PopulateAudioFormatProfile(AudioFormatProfile* profile) {
 void PopulateAudioCapabilities(const HardwareConfig& hw, AudioCapabilities* audio_caps) {
     audio_caps->set_access_mode(AccessMode::ACCESS_MODE_READ_WRITE);
     audio_caps->set_fidelity(Fidelity::FIDELITY_HARDWARE);
+    audio_caps->set_supports_wired_headset(true);
 
     if (hw.hw_audioInput) {
         PopulateAudioFormatProfile(audio_caps->mutable_microphone_profile());
