@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -23,12 +24,21 @@
 #include <unordered_map>
 #include <vector>
 
+#include "absl/status/status.h"
+
+#include "android/base/testing/needs_winsock.h"
 #include "goldfish/archive/reader.h"
 #include "goldfish/archive/writer.h"
+#include "goldfish/async/async_socket_server.h"
+#include "goldfish/async/testing/fake_async_socket.h"
+#include "goldfish/async/testing/test_event_loop.h"
 #include "goldfish/devices/cable/cable.h"
+#include "goldfish/network/endpoint.h"
+#include "goldfish/network/ip_address.h"
 #include "goldfish/vsock/clear.h"
 #include "goldfish/vsock/connect.h"
 #include "goldfish/vsock/vsock_low_level.h"
+#include "vsock_port_fwd_internal.h"
 
 struct QEMUFile {
     std::string buffer;
@@ -478,6 +488,143 @@ TEST_F(VsockTest, CreditStarvationBuffersWithoutCreditRequestStormAndResumesOnCr
     EXPECT_EQ(packets_[0].hdr.op, VIRTIO_VSOCK_OP_RW);
     EXPECT_EQ(packets_[0].payload, "89ABCDEF");
     socket.reset();
+}
+
+class MockAsyncSocketServer : public goldfish::async::AsyncSocketServer {
+  public:
+    MOCK_METHOD(goldfish::network::Endpoint, GetEndpoint, (), (const, override));
+    MOCK_METHOD(void, Close, (), (override));
+    MOCK_METHOD(goldfish::async::EventLoop*, GetLoop, (), (const, override));
+};
+
+constexpr uint16_t kTestHostPort = 10525;
+
+TEST(VsockPortFwdTest, ResolveForwarderEndpointsOrdersIpv4BeforeIpv6) {
+    auto ipv4_endpoints = ResolveForwarderEndpoints("127.0.0.1:10525");
+    ASSERT_TRUE(ipv4_endpoints.ok()) << ipv4_endpoints.status();
+    ASSERT_FALSE(ipv4_endpoints->empty());
+    EXPECT_TRUE(IsIpv4Endpoint(ipv4_endpoints->front()));
+    EXPECT_EQ(goldfish::network::ToString(ipv4_endpoints->front()), "[127.0.0.1]:10525");
+
+    auto ipv6_endpoints = ResolveForwarderEndpoints("[::1]:10525");
+    if (ipv6_endpoints.ok()) {
+        ASSERT_FALSE(ipv6_endpoints->empty());
+        EXPECT_FALSE(IsIpv4Endpoint(ipv6_endpoints->front()));
+        EXPECT_EQ(goldfish::network::ToString(ipv6_endpoints->front()), "[::1]:10525");
+    }
+
+    auto localhost_endpoints = ResolveForwarderEndpoints("localhost:10525");
+    ASSERT_TRUE(localhost_endpoints.ok()) << localhost_endpoints.status();
+    ASSERT_FALSE(localhost_endpoints->empty());
+    EXPECT_TRUE(std::is_partitioned(localhost_endpoints->begin(), localhost_endpoints->end(),
+                                    IsIpv4Endpoint));
+}
+
+TEST(VsockPortFwdTest, ResolveForwarderEndpointsRejectsInvalidHostname) {
+    auto endpoints = ResolveForwarderEndpoints("invalid.host.that.does.not.exist.invalid:10525");
+    EXPECT_FALSE(endpoints.ok());
+    EXPECT_NE(endpoints.status().message().find("invalid.host.that.does.not.exist.invalid:10525"),
+              std::string_view::npos);
+}
+
+TEST(VsockPortFwdTest, BindForwarderServerPrefersIpv4WhenAvailable) {
+    using ::goldfish::async::testing::MockAsyncSocketFactory;
+    using ::goldfish::network::Endpoint;
+    using ::goldfish::network::kIPv4LoopbackAddress;
+    using ::goldfish::network::kIPv6LoopbackAddress;
+    using ::goldfish::network::ToEndpoint;
+    using ::testing::_;
+    using ::testing::Return;
+
+    auto loop = goldfish::async::testing::TestEventLoop::Create();
+    ::testing::NiceMock<MockAsyncSocketFactory> factory;
+
+    const Endpoint ipv4_endpoint = ToEndpoint(kIPv4LoopbackAddress, kTestHostPort);
+    const Endpoint ipv6_endpoint = ToEndpoint(kIPv6LoopbackAddress, kTestHostPort);
+    const std::vector<Endpoint> endpoints = {ipv4_endpoint, ipv6_endpoint};
+
+    auto mock_ipv4_server = std::make_shared<::testing::NiceMock<MockAsyncSocketServer>>();
+    EXPECT_CALL(factory, CreateServer(loop.get(), ipv4_endpoint, _, _))
+            .WillOnce(Return(mock_ipv4_server));
+    EXPECT_CALL(factory, CreateServer(loop.get(), ipv6_endpoint, _, _)).Times(0);
+
+    auto bound = BindForwarderServer(
+            factory, loop.get(), endpoints, kGuestPort,
+            [](std::shared_ptr<goldfish::async::AsyncSocket> /*socket*/) { return false; });
+    ASSERT_TRUE(bound.ok()) << bound.status();
+    EXPECT_EQ(bound->server, mock_ipv4_server);
+    EXPECT_EQ(bound->endpoint, ipv4_endpoint);
+}
+
+TEST(VsockPortFwdTest, BindForwarderServerFallsBackToIpv6WhenIpv4Fails) {
+    using ::goldfish::async::testing::MockAsyncSocketFactory;
+    using ::goldfish::network::Endpoint;
+    using ::goldfish::network::kIPv4LoopbackAddress;
+    using ::goldfish::network::kIPv6LoopbackAddress;
+    using ::goldfish::network::ToEndpoint;
+    using ::testing::_;
+    using ::testing::InSequence;
+    using ::testing::Return;
+
+    auto loop = goldfish::async::testing::TestEventLoop::Create();
+    ::testing::NiceMock<MockAsyncSocketFactory> factory;
+
+    const Endpoint ipv4_endpoint = ToEndpoint(kIPv4LoopbackAddress, kTestHostPort);
+    const Endpoint ipv6_endpoint = ToEndpoint(kIPv6LoopbackAddress, kTestHostPort);
+    const std::vector<Endpoint> endpoints = {ipv4_endpoint, ipv6_endpoint};
+
+    auto mock_ipv6_server = std::make_shared<::testing::NiceMock<MockAsyncSocketServer>>();
+    {
+        InSequence seq;
+        EXPECT_CALL(factory, CreateServer(loop.get(), ipv4_endpoint, _, _))
+                .WillOnce(Return(nullptr));
+        EXPECT_CALL(factory, CreateServer(loop.get(), ipv6_endpoint, _, _))
+                .WillOnce(Return(mock_ipv6_server));
+    }
+
+    auto bound = BindForwarderServer(
+            factory, loop.get(), endpoints, kGuestPort,
+            [](std::shared_ptr<goldfish::async::AsyncSocket> /*socket*/) { return false; });
+    ASSERT_TRUE(bound.ok()) << bound.status();
+    EXPECT_EQ(bound->server, mock_ipv6_server);
+    EXPECT_EQ(bound->endpoint, ipv6_endpoint);
+}
+
+TEST(VsockPortFwdTest, BindForwarderServerReturnsUnavailableWhenAllEndpointsFail) {
+    using ::goldfish::async::testing::MockAsyncSocketFactory;
+    using ::goldfish::network::Endpoint;
+    using ::goldfish::network::kIPv4LoopbackAddress;
+    using ::goldfish::network::kIPv6LoopbackAddress;
+    using ::goldfish::network::ToEndpoint;
+    using ::testing::_;
+    using ::testing::Return;
+
+    auto loop = goldfish::async::testing::TestEventLoop::Create();
+    ::testing::NiceMock<MockAsyncSocketFactory> factory;
+
+    const Endpoint ipv4_endpoint = ToEndpoint(kIPv4LoopbackAddress, kTestHostPort);
+    const Endpoint ipv6_endpoint = ToEndpoint(kIPv6LoopbackAddress, kTestHostPort);
+    const std::vector<Endpoint> endpoints = {ipv4_endpoint, ipv6_endpoint};
+
+    EXPECT_CALL(factory, CreateServer(loop.get(), ipv4_endpoint, _, _)).WillOnce(Return(nullptr));
+    EXPECT_CALL(factory, CreateServer(loop.get(), ipv6_endpoint, _, _)).WillOnce(Return(nullptr));
+
+    auto bound = BindForwarderServer(
+            factory, loop.get(), endpoints, kGuestPort,
+            [](std::shared_ptr<goldfish::async::AsyncSocket> /*socket*/) { return false; });
+    EXPECT_EQ(bound.status().code(), absl::StatusCode::kUnavailable);
+    EXPECT_NE(bound.status().message().find("[127.0.0.1]:10525"), std::string_view::npos);
+    EXPECT_NE(bound.status().message().find("[::1]:10525"), std::string_view::npos);
+}
+
+TEST(VsockPortFwdTest, BindForwarderServerRejectsEmptyEndpoints) {
+    auto loop = goldfish::async::testing::TestEventLoop::Create();
+    ::testing::NiceMock<goldfish::async::testing::MockAsyncSocketFactory> factory;
+
+    auto bound = BindForwarderServer(
+            factory, loop.get(), {}, kGuestPort,
+            [](std::shared_ptr<goldfish::async::AsyncSocket> /*socket*/) { return false; });
+    EXPECT_EQ(bound.status().code(), absl::StatusCode::kInvalidArgument);
 }
 
 }  // namespace
