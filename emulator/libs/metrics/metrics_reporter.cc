@@ -15,6 +15,7 @@
 
 #include "goldfish/metrics/metrics_reporter.h"
 
+#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/log/vlog_is_on.h"
 
@@ -23,16 +24,34 @@
 #include "qemu-version.h"
 
 namespace goldfish::metrics {
+namespace {
+
+thread_local const MetricsReporter* g_active_worker_reporter = nullptr;
+
+}  // namespace
 
 MetricsReporter::MetricsReporter(Uuid session_id) : session_id_(session_id.ToString()) {
     debug_printer_.SetSingleLineMode(true);
-    absl::MutexLock lock(mutex_);
-    running_ = true;
+    absl::MutexLock shutdown_lock(shutdown_mutex_);
+    {
+        absl::MutexLock lock(mutex_);
+        running_ = true;
+    }
     worker_thread_ = std::thread(&MetricsReporter::Run, this);
     LOG(INFO) << "Metrics session started: " << session_id_;
 }
 
 MetricsReporter::~MetricsReporter() {
+    Shutdown();
+    LOG(INFO) << "Metrics session stopped.";
+}
+
+void MetricsReporter::Shutdown() {
+    DCHECK_NE(g_active_worker_reporter, this)
+            << "MetricsReporter::Shutdown() must not be called from its worker thread";
+    absl::MutexLock shutdown_lock(shutdown_mutex_);
+    DCHECK_NE(std::this_thread::get_id(), worker_thread_.get_id())
+            << "MetricsReporter::Shutdown() must not be called from its worker thread";
     {
         absl::MutexLock lock(mutex_);
         running_ = false;
@@ -42,12 +61,27 @@ MetricsReporter::~MetricsReporter() {
         worker_thread_.join();
     }
 
-    LOG(INFO) << "Metrics session stopped.";
+    std::shared_ptr<MetricsWriter> writer_to_destroy;
+    {
+        absl::MutexLock lock(mutex_);
+        writer_to_destroy = std::move(writer_);
+    }
+    writer_to_destroy.reset();
 }
 
 void MetricsReporter::SetWriter(std::unique_ptr<MetricsWriter> writer) {
-    absl::MutexLock lock(mutex_);
-    writer_ = std::move(writer);
+    std::shared_ptr<MetricsWriter> next_writer(std::move(writer));
+    std::shared_ptr<MetricsWriter> old_writer;
+    {
+        absl::MutexLock lock(mutex_);
+        if (!running_) {
+            old_writer = std::move(next_writer);
+        } else {
+            old_writer = std::move(writer_);
+            writer_ = std::move(next_writer);
+        }
+    }
+    old_writer.reset();
 }
 
 void MetricsReporter::SetBaseFields(android_studio::AndroidStudioEvent& event) {
@@ -86,19 +120,25 @@ void MetricsReporter::Report(const Callback& callback) {
 
 void MetricsReporter::Run() {
     VLOG(1) << "Metrics reporter Run enter";
+    g_active_worker_reporter = this;
     while (true) {
-        auto has_event = [this]() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
-            return !event_queue_.empty() || !running_;
-        };
-        absl::MutexLock lock(mutex_);
-        mutex_.Await(absl::Condition(&has_event));
+        MetricsEvent event;
+        std::shared_ptr<MetricsWriter> writer;
+        {
+            auto has_event = [this]() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
+                return !event_queue_.empty() || !running_;
+            };
+            absl::MutexLock lock(mutex_);
+            mutex_.Await(absl::Condition(&has_event));
 
-        if (event_queue_.empty() && !running_) {
-            break;
+            if (event_queue_.empty() && !running_) {
+                break;
+            }
+
+            event = std::move(event_queue_.front());
+            event_queue_.pop();
+            writer = writer_;
         }
-
-        auto event = std::move(event_queue_.front());
-        event_queue_.pop();
 
         if (VLOG_IS_ON(kMetricsWriterDebugVlogLevel)) {
             std::string buf;
@@ -108,10 +148,11 @@ void MetricsReporter::Run() {
                     << "event time " << event.time_ms << "ms\n{ " << buf << "}";
         }
 
-        if (writer_) {
-            writer_->Write(std::move(event));
+        if (writer) {
+            writer->Write(std::move(event));
         }
     }
+    g_active_worker_reporter = nullptr;
     VLOG(1) << "Metrics reporter Run exit";
 }
 

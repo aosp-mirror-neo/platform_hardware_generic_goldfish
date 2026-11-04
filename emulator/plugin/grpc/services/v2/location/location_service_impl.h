@@ -28,11 +28,11 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 
-#include "android/base/clock.h"
 #include "android/emulation/control/grpc_event_stream_support.h"
 #include "goldfish/async/event_loop.h"
 #include "goldfish/avd_universe/gps/location.h"
 #include "goldfish/eventing/event_sources.h"
+#include "goldfish/system/steady_clock.h"
 #include "location_service.grpc.pb.h"
 
 namespace goldfish::grpc::v2 {
@@ -88,8 +88,7 @@ class LocationServiceImpl final : public LocationServiceBase {
     using Location = ::goldfish::avd_universe::gps::Location;
     using LocationEventSource = ::android::base::eventing::CallbackEventSource<Location>;
     using EventLoop = ::goldfish::async::EventLoop;
-    using TimerPtr = std::shared_ptr<EventLoop::Timer>;
-    using NowFn = std::function<absl::Time()>;
+    using TimerPtr = EventLoop::ScopedTimer;
 
     using LocationState = ::android::emulation::v2::LocationState;
     using GetLocationStateRequest = ::android::emulation::v2::GetLocationStateRequest;
@@ -107,7 +106,8 @@ class LocationServiceImpl final : public LocationServiceBase {
         bool has_gps{true};
         bool read_only{false};
         EventLoop* event_loop{nullptr};
-        NowFn now_fn{[]() { return ::android::base::IClock::RealtimeNow(); }};
+        std::reference_wrapper<const ::goldfish::system::SteadyClock> clock{
+                ::goldfish::system::SteadyClock::GetRealClock()};
     };
 
     template <typename Reactor = ::grpc::ServerWriteReactor<LocationState>>
@@ -175,20 +175,22 @@ class LocationServiceImpl final : public LocationServiceBase {
 
     static absl::StatusOr<std::vector<PreparedWaypoint>> PrepareWaypoints(
             const PlayRouteRequest& request);
-    static void ApplyNextWaypointLocked(const std::shared_ptr<RouteState>& route_state,
-                                        uint64_t generation)
+    static void ApplyNextWaypointLocked(const std::shared_ptr<RouteState>& route_state)
             ABSL_EXCLUSIVE_LOCKS_REQUIRED(route_state->mutex);
-    static TimerPtr ScheduleWaypointTimerLocked(const std::shared_ptr<RouteState>& route_state,
-                                                uint64_t generation, absl::Duration delay)
+    static void ScheduleWaypointTimerLocked(const std::shared_ptr<RouteState>& route_state,
+                                            absl::Duration delay)
             ABSL_EXCLUSIVE_LOCKS_REQUIRED(route_state->mutex);
-    static void OnRouteTimerTick(const std::shared_ptr<RouteState>& route_state,
-                                 uint64_t generation) ABSL_LOCKS_EXCLUDED(route_state->mutex);
+    static void OnRouteTimerTick(const std::shared_ptr<RouteState>& route_state)
+            ABSL_LOCKS_EXCLUDED(route_state->mutex);
 
     void PopulateLocationState(LocationState* state) const ABSL_LOCKS_EXCLUDED(state_mutex_);
     void OnLocationUpdated(const Location& location) ABSL_LOCKS_EXCLUDED(state_mutex_);
+    // Returns OK if GPS is enabled and location state is writable.
+    ::grpc::Status CheckMutationAllowed(absl::string_view operation) const;
 
     ObservableLocation& observable_location_;
     const Options options_;
+    const ::goldfish::system::SteadyClock& clock_;
     std::shared_ptr<RouteState> route_state_;
 
     LocationEventSource location_events_;

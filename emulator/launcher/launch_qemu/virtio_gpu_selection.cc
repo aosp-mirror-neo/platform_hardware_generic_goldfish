@@ -45,7 +45,7 @@ std::string_view VirtioGpuDeviceName(VirtioGpuDevice device) {
     case VirtioGpuDevice::kGfxstream:
         return "virtio-gpu-gfxstream";
     }
-    return "virtio-gpu-rutabaga";
+    return "virtio-gpu-gfxstream";
 }
 
 }  // namespace android::goldfish

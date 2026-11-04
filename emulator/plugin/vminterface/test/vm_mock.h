@@ -68,6 +68,10 @@ void mock_snapshot_op_hook_set(MockSnapshotOpHook hook, void* opaque);
 // Configure bdrv_snapshot_list mock entries
 void mock_snapshot_list_set(const QEMUSnapshotInfo* entries, int count);
 
+// Configure whether the VM-state node is read-only (found by
+// bdrv_find_read_only_vmstate_bs rather than bdrv_all_find_vmstate_bs)
+void mock_vmstate_read_only_set(bool read_only);
+
 // Number of save_snapshot / load_snapshot / delete_snapshot / bdrv_snapshot_list
 // calls since the last mock_snapshot_calls_reset(), and the thread that made the
 // most recent one (NULL if none). Lets tests check that QEMU snapshot calls are

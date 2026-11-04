@@ -23,8 +23,6 @@
 #include "absl/time/time.h"
 #include "grpc_diagnostic.pb.h"
 
-#include "android/base/abseil_clock.h"
-#include "android/base/testing/test_clock.h"
 #include "android/crashreport/thread.h"
 #include "breadcrumb.pb.h"
 #include "emulator/crashreport/include/android/crashreport/breadcrumb_proto.h"
@@ -167,21 +165,7 @@ std::vector<Breadcrumb> GetAllCrumbs() {
     return result;
 }
 
-class BreadcrumbInterceptorTest : public ::testing::Test {
-  public:
-    void SetUp() override {
-        mTestClock = std::make_unique<android::base::TestClock>();
-        mClockPtr = mTestClock.get();
-        android::base::IClock::Set(std::move(mTestClock));
-    }
-
-    void TearDown() override {
-        android::base::IClock::Set(std::make_unique<android::base::AbseilClock>());
-    }
-
-    android::base::TestClock* mClockPtr;
-    std::unique_ptr<android::base::TestClock> mTestClock;
-};
+class BreadcrumbInterceptorTest : public ::testing::Test {};
 
 TEST_F(BreadcrumbInterceptorTest, LogsStartOnCreation) {
     auto factory = std::make_unique<BreadcrumbInterceptorFactory>();

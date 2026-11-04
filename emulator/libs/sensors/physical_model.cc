@@ -106,9 +106,10 @@ FoldablePostures PhysicalModel::GetFoldablePosture() const {
     return foldable_model_ ? foldable_model_->GetFoldablePosture() : FoldablePostures::kUnknown;
 }
 
-PhysicalModel::PhysicalModel(const android::goldfish::HardwareConfig& hw)
+PhysicalModel::PhysicalModel(const android::goldfish::HardwareConfig& hw,
+                             const ::goldfish::system::VirtualClock& virtual_clock)
         : foldable_model_(HandleFoldableModelError(FoldableModel::Create(hw)))
-        , virtual_scene_camera_(this, false) {}
+        , virtual_scene_camera_(this, false, virtual_clock) {}
 
 SensorData PhysicalModel::GetSensorData(const AndroidSensor sensor_id) const {
     const size_t sz = GetSensorValueSize(sensor_id);

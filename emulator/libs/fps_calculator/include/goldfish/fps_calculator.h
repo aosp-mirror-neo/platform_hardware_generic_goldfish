@@ -15,9 +15,8 @@
 
 #include <vector>
 
+#include "absl/time/clock.h"
 #include "absl/time/time.h"
-
-#include "android/base/clock.h"
 
 namespace goldfish {
 
@@ -50,7 +49,7 @@ class FpsCalculator {
      * @param timestamp The time at which the frame arrived. Defaults to the
      * current time.
      */
-    void AddFrame(absl::Time timestamp = android::base::IClock::HostNow());
+    void AddFrame(absl::Time timestamp = absl::Now());
 
     /**
      * @brief Returns the current FPS.

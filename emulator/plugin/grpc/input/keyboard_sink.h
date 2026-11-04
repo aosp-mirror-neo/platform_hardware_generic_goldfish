@@ -40,6 +40,15 @@ class KeyboardSink {
 
     /** @brief Types `utf8` into the guest, leaving no key held. */
     virtual void TypeText(std::string_view utf8) = 0;
+
+    /**
+     * @brief Releases every key the guest may hold, whether pressed through
+     * `WriteKey()` or restored by a snapshot, and resets the sink's state.
+     *
+     * Callers release nothing beforehand: the sink paces the releases so
+     * that, together, they fit the guest's input queue.
+     */
+    virtual void Reset() = 0;
 };
 
 }  // namespace goldfish::grpc::v2

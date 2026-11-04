@@ -234,6 +234,7 @@ emulator/fishtank/lib64/qt/translations/qtwebengine_locales/zh-CN.pak
 emulator/fishtank/lib64/qt/translations/qtwebengine_locales/zh-TW.pak
 emulator/lib/
 emulator/lib/advancedFeatures.ini
+emulator/lib/emu-original-feature-flags.protobuf
 emulator/lib/emulator_access.json
 emulator/lib/qemu/
 emulator/lib/qemu/libgfxstream_backend.so
@@ -244,8 +245,6 @@ emulator/lib64/libEGL.so
 emulator/lib64/libgallium_dri.so
 emulator/lib64/libGLESv1_CM.so
 emulator/lib64/libGLESv2.so
-emulator/lib64/libglib_shared.so
-emulator/lib64/libgmodule_shared.so
 emulator/lib64/libLLVM.so
 emulator/lib64/libxcb-aemu.so
 emulator/lib64/vulkan/

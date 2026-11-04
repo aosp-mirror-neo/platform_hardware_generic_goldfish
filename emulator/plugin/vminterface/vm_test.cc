@@ -33,9 +33,9 @@
 #include "absl/status/status_matchers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/simulated_clock.h"
 #include "absl/time/time.h"
 
-#include "android/base/testing/test_clock.h"
 #include "android/base/testing/test_temp_dir.h"
 #include "android/crashreport/hang_detector.h"
 #include "android/goldfish/qemu_vm_operations.h"
@@ -67,6 +67,7 @@ using ::goldfish::snapshot::FileSnapshotStore;
 // Arbitrary snapshot version for the store under test.
 constexpr int kSnapshotVersion = ::goldfish::snapshot::MakeSnapshotVersion(5);
 using ::testing::AllOf;
+using ::testing::AnyOf;
 using ::testing::ElementsAre;
 using ::testing::HasSubstr;
 using ::testing::IsEmpty;
@@ -128,6 +129,7 @@ class QemuVmOperationsTest : public ::testing::Test {
         mock_snapshot_op_hook_set(/*hook=*/nullptr, /*opaque=*/nullptr);
         snapshot_op_hook_ = nullptr;
         mock_snapshot_list_set(/*entries=*/nullptr, /*count=*/-1);
+        mock_vmstate_read_only_set(false);
         test_vm_lock_ = TestVmLock::GetInstance();
         test_vm_lock_->lock_count_ = 0;
         test_vm_lock_->unlock_count_ = 0;
@@ -151,7 +153,7 @@ class QemuVmOperationsTest : public ::testing::Test {
         vm_ops_ = CreateQemuVmOperations(
                 /*event_loop=*/loop_.get(), /*qemu_loop=*/qemu_loop_.get(),
                 QemuSnapshotConfig{.store = std::move(store), .enabled = snapshots_enabled},
-                /*hang_detector=*/&hang_detector_, /*clock=*/&clock_);
+                /*hang_detector=*/&hang_detector_, /*clock=*/clock_);
     }
 
     // Marks `name` as a snapshot this emulator can load.
@@ -189,9 +191,10 @@ class QemuVmOperationsTest : public ::testing::Test {
         mock_snapshot_op_hook_set(/*hook=*/nullptr, /*opaque=*/nullptr);
         snapshot_op_hook_ = nullptr;
         mock_snapshot_list_set(/*entries=*/nullptr, /*count=*/-1);
+        mock_vmstate_read_only_set(false);
     }
 
-    android::base::TestClock clock_;
+    absl::SimulatedClock clock_;
     TestHangDetector hang_detector_;
     std::function<void(std::string_view)> snapshot_op_hook_;
     TestVmLock* test_vm_lock_ = nullptr;
@@ -613,6 +616,17 @@ TEST_F(QemuVmOperationsTest, ListSnapshotsExecutesOnQemuLoopAndPropagatesErrors)
     EXPECT_EQ(test_vm_lock_->lock_count_, 0);
     ASSERT_EQ(entries.size(), 1U);
     EXPECT_EQ(entries[0].name, "default_boot");
+
+    // Read-only VM state node -> found via bdrv_find_read_only_vmstate_bs.
+    mock_vmstate_read_only_set(true);
+    entries.clear();
+    tasks = qemu_loop_->WaitUntilIdle();
+    ASSERT_OK(vm_ops_->ListSnapshots(
+            [&](VmOperations::SnapshotEntry entry) { entries.push_back(std::move(entry)); }));
+    EXPECT_EQ(qemu_loop_->WaitUntilIdle(), tasks + 1);
+    EXPECT_EQ(test_vm_lock_->lock_count_, 0);
+    ASSERT_EQ(entries.size(), 1U);
+    EXPECT_EQ(entries[0].name, "default_boot");
 }
 
 TEST_F(QemuVmOperationsTest, QemuSnapshotCallsRunOnQemuLoopAndStoreWorkOnCaller) {
@@ -766,10 +780,135 @@ TEST_F(QemuVmOperationsTest, ListSnapshotsReportsCompatibility) {
     ASSERT_EQ(entries.size(), 3U);
     EXPECT_EQ(entries[0].name, "current");
     EXPECT_TRUE(entries[0].compatible);
+    EXPECT_FALSE(entries[0].loaded);
     EXPECT_EQ(entries[1].name, "stale");
     EXPECT_FALSE(entries[1].compatible);
+    EXPECT_FALSE(entries[1].loaded);
     EXPECT_EQ(entries[2].name, "no_metadata");
     EXPECT_FALSE(entries[2].compatible);
+    EXPECT_FALSE(entries[2].loaded);
+}
+
+TEST_F(QemuVmOperationsTest, ListSnapshotsTracksStartupAndRuntimeLoadedSnapshot) {
+    ::goldfish::avd::FakeAvdUniverse fake_avd;
+    mock_runstate_set(RUN_STATE_RUNNING);
+    mock_snapshot_op_ok_set(true);
+
+    std::array<QEMUSnapshotInfo, 4> qsi{};
+    std::snprintf(qsi[0].name, sizeof(qsi[0].name), "default_boot");
+    std::snprintf(qsi[1].name, sizeof(qsi[1].name), "snap_日本語");
+    std::snprintf(qsi[2].name, sizeof(qsi[2].name), "stale");
+    std::snprintf(qsi[3].name, sizeof(qsi[3].name), "no_metadata");
+    mock_snapshot_list_set(qsi.data(), static_cast<int>(qsi.size()));
+
+    MakeCompatibleSnapshot("default_boot");
+    MakeCompatibleSnapshot("snap_日本語");
+    ASSERT_OK(store_->Prepare("stale"));
+    {
+        std::ofstream ofs(store_->Dir("stale") / "version.txt");
+        ofs << 1;
+    }
+
+    auto list_by_name = [&]() {
+        absl::flat_hash_map<std::string, VmOperations::SnapshotEntry> by_name;
+        EXPECT_OK(vm_ops_->ListSnapshots([&](VmOperations::SnapshotEntry entry) {
+            std::string name = entry.name;
+            by_name.emplace(std::move(name), std::move(entry));
+        }));
+        return by_name;
+    };
+    auto fire_load_phase = [&](const char* name, QemuSnapshotPhase phase) {
+        QemuSnapshotProgress progress{};
+        progress.operation = QEMU_SNAPSHOT_OP_LOAD;
+        progress.phase = phase;
+        progress.name = name;
+        ASSERT_OK(qemu_loop_->PostAndWait([&] { mock_fire_snapshot_progress(&progress); }));
+    };
+
+    // Cold boot: no snapshot has been loaded yet.
+    auto entries = list_by_name();
+    ASSERT_EQ(entries.size(), 4U);
+    EXPECT_FALSE(entries["default_boot"].loaded);
+    EXPECT_FALSE(entries["snap_日本語"].loaded);
+    EXPECT_FALSE(entries["stale"].loaded);
+    EXPECT_FALSE(entries["no_metadata"].loaded);
+
+    // Startup -loadvm failure (cold-boot fallback) leaves all snapshots unloaded.
+    fire_load_phase("default_boot", QEMU_SNAPSHOT_PHASE_PREPARING);
+    fire_load_phase("default_boot", QEMU_SNAPSHOT_PHASE_FAILED);
+    entries = list_by_name();
+    EXPECT_FALSE(entries["default_boot"].loaded);
+
+    // Startup -loadvm success marks default_boot as loaded.
+    fire_load_phase("default_boot", QEMU_SNAPSHOT_PHASE_PREPARING);
+    fire_load_phase("default_boot", QEMU_SNAPSHOT_PHASE_TRANSFERRING);
+    fire_load_phase("default_boot", QEMU_SNAPSHOT_PHASE_COMPLETED);
+    entries = list_by_name();
+    EXPECT_TRUE(entries["default_boot"].loaded);
+    EXPECT_FALSE(entries["snap_日本語"].loaded);
+    EXPECT_FALSE(entries["stale"].loaded);
+    EXPECT_FALSE(entries["no_metadata"].loaded);
+
+    // An incompatible snapshot loaded outside VmOperations (e.g. HMP loadvm) is
+    // never reported as loaded, preserving the invariant loaded => compatible.
+    fire_load_phase("stale", QEMU_SNAPSHOT_PHASE_PREPARING);
+    fire_load_phase("stale", QEMU_SNAPSHOT_PHASE_COMPLETED);
+    entries = list_by_name();
+    EXPECT_FALSE(entries["default_boot"].loaded);
+    EXPECT_FALSE(entries["stale"].compatible);
+    EXPECT_FALSE(entries["stale"].loaded);
+
+    // Runtime LoadSnapshot moves loaded to snap_日本語 (Unicode name).
+    ASSERT_OK(vm_ops_->LoadSnapshot("snap_日本語", /*and_resume=*/true));
+    entries = list_by_name();
+    EXPECT_FALSE(entries["default_boot"].loaded);
+    EXPECT_TRUE(entries["snap_日本語"].loaded);
+
+    // Saving another snapshot (or overwriting the loaded one) preserves loaded.
+    ASSERT_OK(vm_ops_->SaveSnapshot("default_boot", /*overwrite=*/true));
+    ASSERT_OK(vm_ops_->SaveSnapshot("snap_日本語", /*overwrite=*/true));
+    entries = list_by_name();
+    EXPECT_FALSE(entries["default_boot"].loaded);
+    EXPECT_TRUE(entries["snap_日本語"].loaded);
+
+    // Pre-flight LoadSnapshot rejections keep the VM running and preserve loaded.
+    EXPECT_THAT(vm_ops_->LoadSnapshot("../invalid", /*and_resume=*/true),
+                StatusIs(absl::StatusCode::kInvalidArgument));
+    EXPECT_THAT(vm_ops_->LoadSnapshot("stale", /*and_resume=*/true),
+                StatusIs(absl::StatusCode::kFailedPrecondition));
+    mock_runstate_set(RUN_STATE_SAVE_VM);
+    EXPECT_THAT(vm_ops_->LoadSnapshot("default_boot", /*and_resume=*/true),
+                StatusIs(absl::StatusCode::kFailedPrecondition));
+    mock_runstate_set(RUN_STATE_RUNNING);
+    entries = list_by_name();
+    EXPECT_TRUE(entries["snap_日本語"].loaded);
+
+    // A LoadSnapshot that fails inside QEMU clears loaded.
+    mock_snapshot_op_ok_set(false);
+    EXPECT_THAT(vm_ops_->LoadSnapshot("default_boot", /*and_resume=*/true),
+                StatusIs(absl::StatusCode::kInternal));
+    entries = list_by_name();
+    EXPECT_FALSE(entries["default_boot"].loaded);
+    EXPECT_FALSE(entries["snap_日本語"].loaded);
+
+    // Deleting an unrelated snapshot preserves loaded; deleting the loaded
+    // snapshot clears it (even if re-saved with the same name without loading).
+    mock_snapshot_op_ok_set(true);
+    ASSERT_OK(vm_ops_->LoadSnapshot("default_boot", /*and_resume=*/true));
+    ASSERT_OK(vm_ops_->DeleteSnapshot("snap_日本語"));
+    entries = list_by_name();
+    EXPECT_TRUE(entries["default_boot"].loaded);
+
+    ASSERT_OK(vm_ops_->DeleteSnapshot("default_boot"));
+    ASSERT_OK(vm_ops_->SaveSnapshot("default_boot", /*overwrite=*/true));
+    entries = list_by_name();
+    EXPECT_FALSE(entries["default_boot"].loaded);
+
+    // Resetting the VM clears loaded.
+    ASSERT_OK(vm_ops_->LoadSnapshot("default_boot", /*and_resume=*/true));
+    ASSERT_TRUE(list_by_name()["default_boot"].loaded);
+    ASSERT_OK(vm_ops_->Reset());
+    EXPECT_FALSE(list_by_name()["default_boot"].loaded);
 }
 
 TEST_F(QemuVmOperationsTest, InvalidSnapshotNamesAreRejectedBeforeQemu) {
@@ -1003,25 +1142,25 @@ TEST_F(QemuVmOperationsTest, SnapshotEventsAreDeliveredOnLoopAndFilteredAt250Ms)
     mock_fire_snapshot_progress(&qprog);
 
     // First TRANSFERRING event (phase change from PREPARING -> TRANSFERRING) is always forwarded.
-    clock_.Advance(absl::Milliseconds(10));
+    clock_.AdvanceTime(absl::Milliseconds(10));
     qprog.phase = QEMU_SNAPSHOT_PHASE_TRANSFERRING;
     qprog.transferred_bytes = 100;
     mock_fire_snapshot_progress(&qprog);
 
     // Subsequent TRANSFERRING event within 250 ms is throttled out of SnapshotEvents(),
     // though GetSnapshotProgress() still reflects the latest counters immediately.
-    clock_.Advance(absl::Milliseconds(100));
+    clock_.AdvanceTime(absl::Milliseconds(100));
     qprog.transferred_bytes = 300;
     mock_fire_snapshot_progress(&qprog);
     EXPECT_EQ(vm_ops_->GetSnapshotProgress().transferred_bytes, 300);
 
     // After 250 ms from the last forwarded TRANSFERRING event, the next one is forwarded.
-    clock_.Advance(absl::Milliseconds(150));
+    clock_.AdvanceTime(absl::Milliseconds(150));
     qprog.transferred_bytes = 600;
     mock_fire_snapshot_progress(&qprog);
 
     // COMPLETED is always forwarded even if < 250 ms since the last TRANSFERRING event.
-    clock_.Advance(absl::Milliseconds(20));
+    clock_.AdvanceTime(absl::Milliseconds(20));
     qprog.phase = QEMU_SNAPSHOT_PHASE_COMPLETED;
     qprog.transferred_bytes = 1000;
     mock_fire_snapshot_progress(&qprog);
@@ -1043,18 +1182,18 @@ TEST_F(QemuVmOperationsTest, SnapshotEventsAreDeliveredOnLoopAndFilteredAt250Ms)
     // Next operation resets the 250 ms filter on PREPARING so its first TRANSFERRING
     // and FAILED events are immediately forwarded.
     events.clear();
-    clock_.Advance(absl::Milliseconds(10));
+    clock_.AdvanceTime(absl::Milliseconds(10));
     qprog.operation = QEMU_SNAPSHOT_OP_LOAD;
     qprog.phase = QEMU_SNAPSHOT_PHASE_PREPARING;
     qprog.transferred_bytes = 0;
     mock_fire_snapshot_progress(&qprog);
 
-    clock_.Advance(absl::Milliseconds(5));
+    clock_.AdvanceTime(absl::Milliseconds(5));
     qprog.phase = QEMU_SNAPSHOT_PHASE_TRANSFERRING;
     qprog.transferred_bytes = 250;
     mock_fire_snapshot_progress(&qprog);
 
-    clock_.Advance(absl::Milliseconds(5));
+    clock_.AdvanceTime(absl::Milliseconds(5));
     qprog.phase = QEMU_SNAPSHOT_PHASE_FAILED;
     qprog.error_message = "Corrupt qcow2 vmstate";
     mock_fire_snapshot_progress(&qprog);
@@ -1082,18 +1221,18 @@ TEST_F(QemuVmOperationsTest, TrailingFlushDeliversLatestThrottledTransferringUpd
     mock_fire_snapshot_progress(&qprog);
 
     // First TRANSFERRING event at t = 10 ms is forwarded immediately.
-    clock_.Advance(absl::Milliseconds(10));
+    clock_.AdvanceTime(absl::Milliseconds(10));
     qprog.phase = QEMU_SNAPSHOT_PHASE_TRANSFERRING;
     qprog.active_component = "ram";
     qprog.transferred_bytes = 100;
     mock_fire_snapshot_progress(&qprog);
 
     // Two rapid updates within the 250 ms window (at t = 100 ms and t = 180 ms) are throttled.
-    clock_.Advance(absl::Milliseconds(90));
+    clock_.AdvanceTime(absl::Milliseconds(90));
     qprog.transferred_bytes = 500;
     mock_fire_snapshot_progress(&qprog);
 
-    clock_.Advance(absl::Milliseconds(80));
+    clock_.AdvanceTime(absl::Milliseconds(80));
     qprog.active_component = "0000:00:02.0/virtio-gpu-rutabaga";
     qprog.transferred_bytes = 1000;
     qprog.completed_devices = 8;
@@ -1108,14 +1247,14 @@ TEST_F(QemuVmOperationsTest, TrailingFlushDeliversLatestThrottledTransferringUpd
     // The trailing flush was scheduled at t = 100 ms with a 160 ms delay (due at t = 260 ms).
     // Advancing 159 ms on the loop (and 79 ms on clock_ from t = 180 ms to t = 259 ms) does not
     // flush yet.
-    clock_.Advance(absl::Milliseconds(79));
+    clock_.AdvanceTime(absl::Milliseconds(79));
     loop_->AdvanceClock(absl::Milliseconds(159));
     loop_->RunAll();
     EXPECT_EQ(events.size(), 2U);
 
     // Reaching t = 260 ms (250 ms after the first forwarded Transferring event) flushes the
     // latest suppressed state (transferred_bytes = 1000, completed_devices = 8).
-    clock_.Advance(absl::Milliseconds(1));
+    clock_.AdvanceTime(absl::Milliseconds(1));
     loop_->AdvanceClock(absl::Milliseconds(1));
     loop_->RunAll();
     ASSERT_EQ(events.size(), 3U);
@@ -1126,11 +1265,11 @@ TEST_F(QemuVmOperationsTest, TrailingFlushDeliversLatestThrottledTransferringUpd
 
     // A subsequent throttled update followed by COMPLETED before the timer fires must not emit a
     // stale TRANSFERRING event after COMPLETED.
-    clock_.Advance(absl::Milliseconds(40));
+    clock_.AdvanceTime(absl::Milliseconds(40));
     qprog.completed_devices = 9;
     mock_fire_snapshot_progress(&qprog);
 
-    clock_.Advance(absl::Milliseconds(20));
+    clock_.AdvanceTime(absl::Milliseconds(20));
     qprog.phase = QEMU_SNAPSHOT_PHASE_COMPLETED;
     qprog.completed_devices = 10;
     mock_fire_snapshot_progress(&qprog);
@@ -1139,7 +1278,7 @@ TEST_F(QemuVmOperationsTest, TrailingFlushDeliversLatestThrottledTransferringUpd
     ASSERT_EQ(events.size(), 4U);
     EXPECT_EQ(events[3].phase, VmOperations::SnapshotPhase::Completed);
 
-    clock_.Advance(absl::Milliseconds(300));
+    clock_.AdvanceTime(absl::Milliseconds(300));
     loop_->AdvanceClock(absl::Milliseconds(300));
     loop_->RunAll();
     EXPECT_EQ(events.size(), 4U);
@@ -1430,6 +1569,23 @@ TEST_F(QemuVmOperationsTest, DestructorUnregistersWatchdogOfSnapshotStillInFligh
     vm_ops_.reset();
 
     EXPECT_FALSE(hang_detector_.HasPredicate(kWatchdogName));
+}
+
+TEST_F(QemuVmOperationsTest, ShutdownIsIdempotentWhenQemuLoopHasAlreadyShutDown) {
+    mock_runstate_set(RUN_STATE_RUNNING);
+    ASSERT_OK(qemu_loop_->ShutdownAndWait());
+
+    // Once the QEMU loop has shut down during emulator exit, a concurrent Shutdown()
+    // RPC is idempotent and returns OK immediately, while other mutations fail fast:
+    // with UNAVAILABLE while the loop is still shutting down, and FAILED_PRECONDITION
+    // once it has finished. ShutdownAndWait() may return before the loop thread
+    // reports kFinished, so either code is possible here.
+    EXPECT_OK(vm_ops_->Shutdown());
+    EXPECT_EQ(mock_shutdown_cause_get(), SHUTDOWN_CAUSE_NONE);
+    const auto fails_fast =
+            StatusIs(AnyOf(absl::StatusCode::kUnavailable, absl::StatusCode::kFailedPrecondition));
+    EXPECT_THAT(vm_ops_->Pause(), fails_fast);
+    EXPECT_THAT(vm_ops_->Reset(), fails_fast);
 }
 
 TEST_F(QemuVmOperationsDeathTest, SnapshotProgressOnTheLoopThreadDies) {

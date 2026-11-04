@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
@@ -65,7 +66,7 @@ using ActiveChangedEventSource =
 
 struct ActiveChangedListenerDeleter {
     struct Empty {};
-    explicit ActiveChangedListenerDeleter(Empty = {}) noexcept {}
+    explicit ActiveChangedListenerDeleter(Empty) noexcept {}
     explicit ActiveChangedListenerDeleter(std::weak_ptr<ActiveChangedEventSource> source) noexcept
             : source(std::move(source)) {}
 
@@ -107,6 +108,12 @@ class TouchDevices {
 
     /** @return The sink of `device`, or `nullptr` if there is none. */
     virtual TouchDeviceSink* Find(TouchDeviceId device) = 0;
+
+    /**
+     * @return The IDs of all existing touch devices, whether or not any session
+     *     has touched them.
+     */
+    virtual std::vector<TouchDeviceId> Devices() = 0;
 
     /**
      * @brief Subscribes `listener` to push notifications fired whenever a bound

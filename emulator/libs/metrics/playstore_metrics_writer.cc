@@ -140,7 +140,7 @@ PlaystoreMetricsWriter::PlaystoreMetricsWriter(const std::string& playstore_url,
 }
 
 PlaystoreMetricsWriter::~PlaystoreMetricsWriter() {
-    commit_timer_->Cancel();
+    commit_timer_.reset();
     BeginShutdown(kShutdownUploadBudget);
     Commit();
 }

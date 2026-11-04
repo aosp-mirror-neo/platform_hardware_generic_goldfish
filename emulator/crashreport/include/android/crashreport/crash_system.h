@@ -16,6 +16,9 @@
 
 #include <filesystem>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+
 namespace android::crashreport {
 
 namespace fs = std::filesystem;
@@ -46,7 +49,7 @@ class CrashSystem {
      * out-of-process Crashpad handler. If the handler is successfully started,
      * crashes will be recorded in a local database and can be uploaded later. If
      * the Crashpad handler cannot be started, crash reporting will be disabled, and
-     * a warning will be logged.
+     * the returned status says why.
      *
      * Internally, this function utilizes the `CrashpadClient::StartHandler()`
      * method to establish communication with the Crashpad handler and configure
@@ -62,7 +65,10 @@ class CrashSystem {
      *     the crash report if a crash occurs.
      * @param argv An array of command line arguments. These are used to populate
      *     the crash report if a crash occurs.
-     * @return True if crash reporting was successfully initialized, false otherwise.
+     * @return OK if crash reporting is active or intentionally disabled via
+     *     `ANDROID_EMU_ENABLE_CRASH_REPORTING`, otherwise an error saying why
+     *     initialization failed, for the caller to log (Crashpad's own logging
+     *     is not shown on Windows).
      *
      * @note If the Crashpad handler cannot be found, crash reporting will be
      *     disabled. The handler location can be influenced by setting the
@@ -71,14 +77,15 @@ class CrashSystem {
      * @note The crash report database is stored in a platform-specific temporary
      *     directory by default, and its name is based on the emulator version.
      *     The location can be overridden by setting the
-     *     `ANDROID_EMU_CRASH_REPORTING_DATABASE` environment variable.
+     *     `ANDROID_EMU_CRASH_REPORTING_DATABASE` environment variable. Missing
+     *     parent directories are created (see `ensureDatabaseDirectory()`).
      *
      * @note On macOS every child process will be handled by this reporter, on every
      *     other platform a reporter will need to be registered by the client.
      */
     // Catch crashes in everything.
     // This promises to not launch any threads...
-    virtual bool initialize() = 0;
+    virtual absl::Status initialize() = 0;
 
     virtual void uploadEntries(const Consent consent) = 0;
 
@@ -88,6 +95,21 @@ class CrashSystem {
      * @return The database directory as a FilePath.
      */
     static fs::path databaseDirectory();
+
+    /**
+     * @brief Creates the crash report database directory if it is missing.
+     *
+     * Crashpad only creates the last component of the database path, so a
+     * missing parent directory (for example `C:\tmp` for `/tmp/crash-report.db`
+     * on Windows) disables crash reporting. This creates the directory and any
+     * missing parents, owner-only on POSIX.
+     *
+     * @param database_path The database directory, absolute or relative to the
+     *     current working directory.
+     * @return The absolute database directory, or an error naming the path
+     *     that could not be created and why.
+     */
+    static absl::StatusOr<fs::path> ensureDatabaseDirectory(const fs::path& database_path);
 
     /**
      * @brief Returns the path to the crashpad handler executable.

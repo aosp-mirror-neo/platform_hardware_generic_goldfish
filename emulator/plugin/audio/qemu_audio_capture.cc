@@ -23,6 +23,7 @@
 #include "absl/status/status.h"
 
 #include "emulator/plugin/vminterface/vm_lock.h"
+#include "goldfish/audio/goldfish_audio_mux.h"
 
 // clang-format off
 // IWYU pragma: begin_keep
@@ -37,10 +38,6 @@ extern "C" {
 namespace goldfish::audio {
 namespace {
 
-// The emulator launcher explicitly names the primary audio device "mainaudiodev"
-// (configured via -audiodev <backend>,id=mainaudiodev in audio_device.cc).
-constexpr char kDefaultAudiodevId[] = "mainaudiodev";
-
 AudioBackend* ResolveAudioBackend(AudioBackend* explicit_backend) {
     if (explicit_backend) {
         return explicit_backend;
@@ -48,7 +45,7 @@ AudioBackend* ResolveAudioBackend(AudioBackend* explicit_backend) {
     if (AudioBackend* be = audio_get_default_audio_be(nullptr)) {
         return be;
     }
-    return audio_be_by_name(kDefaultAudiodevId, nullptr);
+    return audio_be_by_name(kDefaultMainAudiodevId, nullptr);
 }
 
 void OnAudioNotify(void* /*opaque*/, audcnotification_e cmd) {

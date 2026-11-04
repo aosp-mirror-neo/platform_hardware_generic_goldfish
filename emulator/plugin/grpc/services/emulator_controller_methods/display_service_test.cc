@@ -15,6 +15,7 @@
 #include "display_service.h"
 
 #include <chrono>
+#include <cstddef>
 #include <memory>
 #include <sstream>
 #include <string_view>
@@ -29,6 +30,8 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/synchronization/notification.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 
 #include "android/goldfish/fake_hardware_config.h"
 #include "emulator_controller.grpc.pb.h"
@@ -67,7 +70,7 @@ class DisplayServiceTest : public GrcpServiceTest {
 
     void SetUp() override {
         mHw = android::goldfish::FakeHardwareConfig::GetHwConfig();
-        mPhysicalModel = std::make_unique<PhysicalModel>(mHw);
+        mPhysicalModel = std::make_unique<PhysicalModel>(mHw, fake_avd_.virtual_clock());
         mLoop = ::goldfish::async::ThreadedEventLoop::Create(
                 ::goldfish::async::LibuvEventLoop::Create());
         mQemuLoop = ::goldfish::async::ThreadedEventLoop::Create(
@@ -105,8 +108,8 @@ class DisplayServiceTest : public GrcpServiceTest {
         reinterpret_cast<ActiveFakePixmanDisplay*>(display.get())->Start();
     }
 
-    static std::string getTempSharedMemoryName(std::string_view prefix) {
-        auto ts = absl::ToUnixMillis(base::IClock::RealtimeNow());
+    static std::string GetTempSharedMemoryName(std::string_view prefix) {
+        auto ts = absl::ToUnixMillis(absl::Now());
         std::stringstream ss;
         ss << std::this_thread::get_id();
 #ifdef _WIN32
@@ -645,8 +648,8 @@ TEST_F(DisplayServiceTest, StreamScreenshotHasCorrectRotation) {
 
 TEST_F(DisplayServiceTest, GetScreenshotRGBA8888Mmap) {
     // Create a shared memory region.
-    std::string name = getTempSharedMemoryName("test_mmap");
-    size_t size = 100 * 50 * 4;
+    std::string name = GetTempSharedMemoryName("test_mmap");
+    size_t size = size_t{100} * 50 * 4;
     SharedMemory mem(name, size);
     ASSERT_TRUE(mem.Create(std::filesystem::perms::owner_read | std::filesystem::perms::owner_write)
                         .ok());
@@ -678,9 +681,9 @@ TEST_F(DisplayServiceTest, GetScreenshotRGBA8888Mmap) {
 
 TEST_F(DisplayServiceTest, StreamScreenshotMmap) {
     // Create a shared memory region.
-    std::string name = getTempSharedMemoryName("test_mmap");
+    std::string name = GetTempSharedMemoryName("test_mmap");
 
-    size_t size = 100 * 50 * 4;
+    size_t size = size_t{100} * 50 * 4;
     SharedMemory mem(name, size);
     ASSERT_TRUE(mem.Create(std::filesystem::perms::owner_read | std::filesystem::perms::owner_write)
                         .ok());
@@ -716,7 +719,7 @@ TEST_F(DisplayServiceTest, StreamScreenshotMmap) {
 TEST_F(DisplayServiceTest, StreamScreenshotMmapResourceExhausted) {
     // Create a shared memory region that is too small for the screenshot but
     // large enough to map (e.g. 4KB).
-    std::string name = getTempSharedMemoryName("test_stream_mmap_small");
+    std::string name = GetTempSharedMemoryName("test_stream_mmap_small");
     size_t size = 4096;  // One page, but too small for 100*50*4 = 20000 bytes
     SharedMemory mem(name, size);
     ASSERT_TRUE(mem.Create(std::filesystem::perms::owner_read | std::filesystem::perms::owner_write)
@@ -779,8 +782,8 @@ TEST_F(DisplayServiceTest, GetScreenshotResponseHasCorrectFormat) {
 }
 
 TEST_F(DisplayServiceTest, GetScreenshotPNGMmap) {
-    std::string name = getTempSharedMemoryName("test_png_mmap");
-    size_t size = 100 * 50 * 4;
+    std::string name = GetTempSharedMemoryName("test_png_mmap");
+    size_t size = size_t{100} * 50 * 4;
     SharedMemory mem(name, size);
     ASSERT_TRUE(mem.Create(std::filesystem::perms::owner_read | std::filesystem::perms::owner_write)
                         .ok());
@@ -819,7 +822,7 @@ TEST_F(DisplayServiceTest, GetScreenshotMmapInvalidHandle) {
 }
 
 TEST_F(DisplayServiceTest, GetScreenshotMmapTooSmall) {
-    std::string name = getTempSharedMemoryName("test_mmap_too_small");
+    std::string name = GetTempSharedMemoryName("test_mmap_too_small");
     size_t size = 10;
     SharedMemory mem(name, size);
     ASSERT_TRUE(mem.Create(std::filesystem::perms::owner_read | std::filesystem::perms::owner_write)
@@ -908,7 +911,7 @@ TEST_F(DisplayServiceTest, FiresInitialPostureOnConstruction) {
     // Reset the old service first to prevent it from holding a dangling pointer to the old model
     mDisplayService.reset();
 
-    mPhysicalModel = std::make_unique<PhysicalModel>(mHw);
+    mPhysicalModel = std::make_unique<PhysicalModel>(mHw, fake_avd_.virtual_clock());
     mPhysicalModel->SetCurrentTime(1000000000L);  // Initialize physical model state
 
     bool received_posture = false;

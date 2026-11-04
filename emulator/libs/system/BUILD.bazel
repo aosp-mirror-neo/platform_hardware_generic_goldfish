@@ -1,23 +1,24 @@
 load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test", "objc_library")
-load("//emulator/tools:cc_binary_with_manifest.bzl", "cc_binary_with_manifest")
 
 cc_library(
-    name = "clock",
-    srcs = [
-        "abseil_clock.cc",
-        "clock.cc",
-    ],
-    hdrs = [
-        "include/android/base/abseil_clock.h",
-        "include/android/base/clock.h",
-    ],
+    name = "steady_clock",
+    srcs = ["steady_clock.cc"],
+    hdrs = ["include/goldfish/system/steady_clock.h"],
     includes = ["include"],
     visibility = ["//visibility:public"],
     deps = [
-        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/base:no_destructor",
         "@abseil-cpp//absl/time",
     ],
+)
+
+cc_library(
+    name = "virtual_clock",
+    hdrs = ["include/goldfish/system/virtual_clock.h"],
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+    deps = ["@abseil-cpp//absl/time"],
 )
 
 cc_library(
@@ -91,7 +92,6 @@ cc_library(
     tags = ["no-tidy"],
     visibility = ["//visibility:public"],
     deps = [
-        ":clock",
         ":eintr_wrapper",
         "//emulator/libs/file",
         "//emulator/libs/process",
@@ -139,21 +139,24 @@ cc_library(
     srcs = ["test_file_util_bazel.cc"],
     hdrs = [
         "test-headers/android/base/testing/needs_winsock.h",
-        "test-headers/android/base/testing/test_clock.h",
         "test-headers/android/base/testing/test_event.h",
         "test-headers/android/base/testing/test_file_util.h",
         "test-headers/android/base/testing/test_system.h",
         "test-headers/android/base/testing/test_temp_dir.h",
         "test-headers/android/base/testing/test_thread.h",
+        "test-headers/goldfish/system/testing/fake_clocks.h",
     ],
     includes = ["test-headers"],
     visibility = ["//visibility:public"],
     deps = [
+        ":steady_clock",
         ":system",
+        ":virtual_clock",
         "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
         "@bazel_tools//tools/cpp/runfiles",
     ],
 )
@@ -208,25 +211,25 @@ cc_test(
     ],
 )
 
-cc_binary_with_manifest(
-    name = "clock_perf",
-    testonly = True,
-    srcs = ["bm_clock.cc"],
-    copts = [
-        "-Wno-deprecated-declarations",
-        "-Wno-unused-result",
-    ],
+cc_test(
+    name = "steady_clock_test",
+    size = "small",
+    srcs = ["steady_clock_test.cc"],
     visibility = ["//visibility:public"],
     deps = [
-        ":clock",
-        ":system",
-        "@google_benchmark//:benchmark",
+        ":steady_clock",
+        ":test-headers",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/time",
     ],
 )
 
 clang_tidy_test(
     name = "tidy",
     targets = [
+        ":steady_clock",
+        ":steady_clock_test",
+        ":virtual_clock",
     ],
     tidy_config_file = "//:clang_tidy_config",
 )

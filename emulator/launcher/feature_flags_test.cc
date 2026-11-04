@@ -17,18 +17,25 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "absl/base/log_severity.h"
+#include "absl/log/scoped_mock_log.h"
 #include "absl/status/status.h"
-#include "absl/status/status_matchers.h"
+#include "absl/status/statusor.h"
+#include "google/protobuf/text_format.h"
 
 #include "android/base/bazel_info.h"
 #include "android/base/testing/test_system.h"
 #include "android/status/status_matcher_macros.h"
+#include "emulator_feature_patterns.pb.h"
+#include "emulator_features.pb.h"
+#include "goldfish/file/file.h"
 
 namespace android::goldfish {
 namespace {
@@ -36,6 +43,7 @@ namespace {
 namespace fs = std::filesystem;
 using S = android_studio::EmulatorFeatureFlagState;
 using ::testing::ElementsAre;
+using ::testing::HasSubstr;
 using ::testing::IsEmpty;
 
 void WriteTextFile(const fs::path& path, std::string_view content) {
@@ -470,6 +478,508 @@ TEST(FeatureFlagsTest, Api37OrGreaterPatchesMinigbmAndGuestAngleInGuestFeatures)
     EXPECT_TRUE(explicit_off_flags.IsEnabled(S::MINIGBM));
     EXPECT_FALSE(explicit_off_flags.IsEnabledByGuest(S::GUEST_ANGLE));
     EXPECT_FALSE(explicit_off_flags.IsEnabled(S::GUEST_ANGLE));
+}
+
+TEST(FeatureFlagsTest, ServerPatternHostGpuAndDisjunctionMatching) {
+    base::TestSystem sys("bin", "myhome");
+    const fs::path dir = sys.GetTempRoot()->Path();
+    const fs::path patterns_file = dir / "patterns.protobuf";
+
+    WriteTextFile(patterns_file, R"pb(
+        # 1. Matches AMD CPU on 64-bit OS (no GPU constraint).
+        pattern {
+            hwconfig {
+                hostinfo {
+                    cpu_manufacturer: "AMD"
+                    os_bit_count: 64
+                }
+            }
+            featureaction {
+                feature: ForceSwiftshader
+                enable: true
+            }
+        }
+        # 2. Does not match (requires no virt_support OR 32-bit OS).
+        pattern {
+            hwconfig {
+                hostinfo {
+                    virt_support: false
+                }
+            }
+            hwconfig {
+                hostinfo {
+                    os_bit_count: 32
+                }
+            }
+            featureaction {
+                feature: ForceLavapipe
+                enable: true
+            }
+        }
+        # 3. Requires BOTH Intel and NVIDIA GPUs on an AMD CPU.
+        pattern {
+            hwconfig {
+                hostinfo {
+                    cpu_manufacturer: "AMD"
+                }
+                hostgpuinfo {
+                    make: "Intel"
+                }
+                hostgpuinfo {
+                    make: "NVIDIA"
+                }
+            }
+            featureaction {
+                feature: ForceANGLE
+                enable: true
+            }
+        }
+        # 4. Requires BOTH AMD and NVIDIA GPUs (does not match Intel + NVIDIA).
+        pattern {
+            hwconfig {
+                hostinfo {
+                    cpu_manufacturer: "AMD"
+                }
+                hostgpuinfo {
+                    make: "AMD"
+                }
+                hostgpuinfo {
+                    make: "NVIDIA"
+                }
+            }
+            featureaction {
+                feature: ForceGpuSoftware
+                enable: true
+            }
+        }
+        # 5. Disjunction: matches Intel OR AMD CPU.
+        pattern {
+            hwconfig {
+                hostinfo {
+                    cpu_manufacturer: "Intel"
+                }
+            }
+            hwconfig {
+                hostinfo {
+                    cpu_manufacturer: "AMD"
+                }
+            }
+            featureaction {
+                feature: ForceGpuHost
+                enable: true
+            }
+        }
+        # 6. Empty pattern (no hwconfig) never matches.
+        pattern {
+            featureaction {
+                feature: ForceLavapipeForSoftwareRendering
+                enable: true
+            }
+        })pb");
+
+    ASSERT_OK_AND_ASSIGN(FeatureFlags flags, FeatureFlags::Create({
+                                                 .default_patterns_path = patterns_file,
+                                             }));
+
+    // Before ApplyHostFeaturePatterns: hostinfo-constrained patterns (including virt_support: false)
+    // must not match.
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_SWIFTSHADER));
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_LAVAPIPE));
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_ANGLE));
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_GPU_SOFTWARE));
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_GPU_HOST));
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_LAVAPIPE_FOR_SOFTWARE_RENDERING));
+
+    const HostInfo host_info{
+        .cpu_manufacturer = "AMD",
+        .os_platform = "Windows",
+        .cpu_model_name = 10,
+        .virt_support = true,
+        .running_in_vm = false,
+    };
+    flags.ApplyHostFeaturePatterns(host_info);
+
+    // Before GPU probing: CPU-only patterns (1 and 5) match; GPU pattern (3) does not yet match.
+    EXPECT_TRUE(flags.IsEnabled(S::FORCE_SWIFTSHADER));
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_LAVAPIPE));
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_ANGLE));
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_GPU_SOFTWARE));
+    EXPECT_TRUE(flags.IsEnabled(S::FORCE_GPU_HOST));
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_LAVAPIPE_FOR_SOFTWARE_RENDERING));
+
+    // After probing NVIDIA + Intel GPUs: pattern 3 matches, pattern 4 still does not.
+    const std::vector<HostGpuInfo> gpus = {
+        HostGpuInfo{.make = "NVIDIA"},
+        HostGpuInfo{.make = "Intel"},
+    };
+    flags.ApplyGpuFeaturePatterns(gpus);
+    EXPECT_TRUE(flags.IsEnabled(S::FORCE_ANGLE));
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_GPU_SOFTWARE));
+}
+
+TEST(FeatureFlagsTest, VersionFilteringInFeaturePatterns) {
+    base::TestSystem sys("bin", "myhome");
+    const fs::path patterns_file = sys.GetTempRoot()->Path() / "version_patterns.protobuf";
+    WriteTextFile(patterns_file, R"pb(
+        pattern {
+            hwconfig {}
+            featureaction {
+                feature: ForceSwiftshader
+                enable: true
+                min_version { major: 34 minor: 1 patch: 0 }
+                max_version { major: 35 minor: 2 patch: 5 }
+            }
+            featureaction {
+                feature: ForceLavapipe
+                enable: true
+                min_version { major: 35 minor: 0 patch: 0 }
+            }
+        })pb");
+
+    auto eval_for_version = [&](std::string_view version) {
+        return FeatureFlags::Create({
+            .default_patterns_path = patterns_file,
+            .emulator_version = version,
+        });
+    };
+
+    // Version 34.0.0: below both min_versions.
+    ASSERT_OK_AND_ASSIGN(const FeatureFlags v34_0, eval_for_version("34.0.0"));
+    EXPECT_THAT(v34_0.GetEnabled(), IsEmpty());
+
+    // Version 34.2.0: matches ForceSwiftshader only.
+    ASSERT_OK_AND_ASSIGN(const FeatureFlags v34_2, eval_for_version("34.2.0"));
+    EXPECT_THAT(v34_2.GetEnabled(), ElementsAre(S::FORCE_SWIFTSHADER));
+
+    // Version 35.1.0: matches both.
+    ASSERT_OK_AND_ASSIGN(const FeatureFlags v35_1, eval_for_version("35.1.0"));
+    EXPECT_THAT(v35_1.GetEnabled(), ElementsAre(S::FORCE_SWIFTSHADER, S::FORCE_LAVAPIPE));
+
+    // Version 35.2.5-1234567 (release with build number on exact max_version): matches both.
+    ASSERT_OK_AND_ASSIGN(const FeatureFlags v35_2_5_build, eval_for_version("35.2.5-1234567"));
+    EXPECT_THAT(v35_2_5_build.GetEnabled(), ElementsAre(S::FORCE_SWIFTSHADER, S::FORCE_LAVAPIPE));
+
+    // Version 36.0.0: above ForceSwiftshader max_version, matches ForceLavapipe only.
+    ASSERT_OK_AND_ASSIGN(const FeatureFlags v36_0, eval_for_version("36.0.0"));
+    EXPECT_THAT(v36_0.GetEnabled(), ElementsAre(S::FORCE_LAVAPIPE));
+
+    // Invalid/empty version: min-version constrained actions apply, max-version constrained do not.
+    ASSERT_OK_AND_ASSIGN(const FeatureFlags v_empty, eval_for_version(""));
+    EXPECT_THAT(v_empty.GetEnabled(), ElementsAre(S::FORCE_LAVAPIPE));
+}
+
+TEST(FeatureFlagsTest, OriginalFeatureFlagsProtobufLoadsAndAppliesPatterns) {
+    const fs::path ini_path = android::base::Bazel::RunfilesPath(
+            "goldfish+/emulator/launcher/data/advancedFeatures.ini");
+    const fs::path proto_path = android::base::Bazel::RunfilesPath(
+            "goldfish+/emulator/launcher/data/emu-original-feature-flags.protobuf");
+
+    ASSERT_OK_AND_ASSIGN(FeatureFlags flags,
+                         FeatureFlags::Create({
+                             .host_ini_path = ini_path,
+                             .default_patterns_path = proto_path,
+                             .emulator_version = "37.1.6",
+                         }));
+    flags.ApplyHostFeaturePatterns(HostInfo{
+        .cpu_manufacturer = "Intel",
+        .os_platform = "Linux",
+    });
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_SWIFTSHADER));
+
+    // In emu-original-feature-flags.protobuf, AMD Radeon HD 5450 (make "1002", device_id "68f9")
+    // enables ForceSwiftshader on version >= 36.1.
+    const std::vector<HostGpuInfo> amd_gpu = {
+        HostGpuInfo{.make = "0x1002", .device_id = "0x68f9"},
+    };
+    flags.ApplyGpuFeaturePatterns(amd_gpu);
+    EXPECT_TRUE(flags.IsEnabled(S::FORCE_SWIFTSHADER));
+}
+
+TEST(FeatureFlagsTest, AllEmulatorFeaturesProtoValuesMapToStudioStatsEnum) {
+    // 1. Verify the bundled emu-original-feature-flags.protobuf parses cleanly and never
+    // references the dummy mapping-robustness test entries.
+    const fs::path bundled_proto_path = android::base::Bazel::RunfilesPath(
+            "goldfish+/emulator/launcher/data/emu-original-feature-flags.protobuf");
+    ASSERT_OK_AND_ASSIGN(const std::string bundled_text,
+                         android::base::file::read_whole_file(bundled_proto_path));
+    emulator_features::EmulatorFeaturePatterns bundled_patterns;
+    ASSERT_TRUE(google::protobuf::TextFormat::ParseFromString(bundled_text, &bundled_patterns));
+    ASSERT_GT(bundled_patterns.pattern_size(), 0);
+    for (const auto& pattern : bundled_patterns.pattern()) {
+        for (const auto& action : pattern.featureaction()) {
+            ASSERT_TRUE(action.has_feature());
+            EXPECT_NE(action.feature(), emulator_features::AMDOpenGLDriver);
+            EXPECT_NE(action.feature(), emulator_features::MesaDRI);
+        }
+    }
+
+    // 2. Verify every enum value defined in emulator_features.proto maps cleanly to a valid
+    // android_studio::EmulatorFeatureFlagState::EmulatorFeatureFlag in studio_stats.proto, except
+    // the two speculative dummy entries (AMDOpenGLDriver and MesaDRI) documented in
+    // emulator_features.proto for mapping-robustness testing.
+    base::TestSystem sys("bin", "myhome");
+    const fs::path dir = sys.GetTempRoot()->Path();
+    const fs::path guest_ini = dir / "guest.ini";
+    const fs::path cached_path = dir / "all_features.protobuf";
+    WriteTextFile(guest_ini, "");
+
+    emulator_features::EmulatorFeaturePatterns all_patterns;
+    auto* pattern = all_patterns.add_pattern();
+    pattern->add_hwconfig();
+
+    int enum_value_count = 0;
+    for (int i = emulator_features::Feature_MIN; i <= emulator_features::Feature_MAX; ++i) {
+        if (!emulator_features::Feature_IsValid(i)) {
+            continue;
+        }
+        ++enum_value_count;
+        auto* action = pattern->add_featureaction();
+        action->set_feature(static_cast<emulator_features::Feature>(i));
+        action->set_enable(true);
+    }
+    ASSERT_GE(enum_value_count, 68);
+
+    {
+        std::ofstream out(cached_path, std::ios_base::binary | std::ios_base::trunc);
+        ASSERT_TRUE(out.is_open());
+        ASSERT_TRUE(all_patterns.SerializeToOstream(&out));
+    }
+
+    std::vector<std::string> unknown_warnings;
+    absl::ScopedMockLog mock_log(absl::MockLogDefault::kIgnoreUnexpected);
+    EXPECT_CALL(mock_log, Log(absl::LogSeverity::kWarning, ::testing::_,
+                              HasSubstr("Unknown feature action in server patterns:")))
+            .WillRepeatedly([&](absl::LogSeverity, auto, auto message) {
+                unknown_warnings.emplace_back(message);
+            });
+    mock_log.StartCapturingLogs();
+    const auto res = FeatureFlags::Create({
+        .guest_ini_path = guest_ini,
+        .cached_patterns_path = cached_path,
+        .guest_api_level = 37,
+    });
+    mock_log.StopCapturingLogs();
+    ASSERT_OK_AND_ASSIGN(const FeatureFlags flags, res);
+
+    EXPECT_THAT(unknown_warnings,
+                ::testing::UnorderedElementsAre(
+                        "Unknown feature action in server patterns: AMDOpenGLDriver",
+                        "Unknown feature action in server patterns: MesaDRI"));
+
+    // Active host and guest features are enabled; renamed/deprecated legacy features map without
+    // warning and remain disabled.
+    EXPECT_TRUE(flags.IsEnabled(S::FORCE_ANGLE));
+    EXPECT_TRUE(flags.IsEnabled(S::FORCE_SWIFTSHADER));
+    EXPECT_TRUE(flags.IsEnabled(S::FORCE_GPU_SOFTWARE));
+    EXPECT_TRUE(flags.IsEnabled(S::FORCE_GPU_HOST));
+    EXPECT_TRUE(flags.IsEnabled(S::FORCE_LAVAPIPE_FOR_SOFTWARE_RENDERING));
+    EXPECT_TRUE(flags.IsEnabled(S::FORCE_LAVAPIPE));
+    EXPECT_TRUE(flags.IsEnabled(S::MINIGBM));
+    EXPECT_TRUE(flags.IsEnabled(S::GUEST_ANGLE));
+    EXPECT_FALSE(flags.IsEnabled(S::HOST_COMPOSITION_V1));
+    EXPECT_FALSE(flags.IsEnabled(S::HAXM));
+    EXPECT_FALSE(flags.IsEnabled(S::DEPRECATED_IGNORE_HOST_OPENGL_ERRORS));
+}
+
+TEST(FeatureFlagsTest, ServerPatternsRespectOverridesAndGuestSupport) {
+    base::TestSystem sys("bin", "myhome");
+    const fs::path dir = sys.GetTempRoot()->Path();
+    const fs::path host_ini = dir / "host.ini";
+    const fs::path guest_ini = dir / "guest.ini";
+    const fs::path default_patterns = dir / "emu-original-feature-flags.protobuf";
+    const fs::path cached_patterns = dir / "emu-last-feature-flags.protobuf";
+
+    WriteTextFile(host_ini,
+                  "ForceSwiftshader = off\n"
+                  "ForceLavapipe = off\n"
+                  "ForceGpuHost = on\n"
+                  "Minigbm = off\n"
+                  "GuestAngle = off\n");
+    WriteTextFile(guest_ini,
+                  "Minigbm = on\n"
+                  "GuestAngle = off\n");
+
+    WriteTextFile(default_patterns, R"pb(
+        pattern {
+            hwconfig {
+                hostinfo {
+                    cpu_manufacturer: "Intel"
+                    os_platform: "Linux"
+                }
+            }
+            featureaction {
+                feature: ForceSwiftshader
+                enable: true
+            }
+            featureaction {
+                feature: ForceLavapipe
+                enable: true
+            }
+            featureaction {
+                feature: ForceGpuHost
+                enable: false
+            }
+            featureaction {
+                feature: Minigbm
+                enable: true
+            }
+            featureaction {
+                feature: GuestAngle
+                enable: true
+            }
+        }
+        pattern {
+            hwconfig {
+                hostgpuinfo {
+                    make: "Intel (0x8086)"
+                    device_id: "0x67df"
+                }
+            }
+            featureaction {
+                feature: ForceANGLE
+                enable: true
+            }
+        })pb");
+    // An empty cached patterns file is rejected and falls back to default_patterns.
+    WriteTextFile(cached_patterns, "");
+
+    ASSERT_OK_AND_ASSIGN(
+            FeatureFlags flags,
+            FeatureFlags::Create({
+                .host_ini_path = host_ini,
+                .guest_ini_path = guest_ini,
+                .cached_patterns_path = cached_patterns,
+                .default_patterns_path = default_patterns,
+                .emulator_version = "35.1.0",
+                .avd_feature_flags = "-ForceLavapipe",
+            }));
+
+    flags.ApplyHostFeaturePatterns(HostInfo{
+        .cpu_manufacturer = "Intel",
+        .os_platform = "Linux",
+    });
+
+    // Enabled by server pattern (not overridden).
+    EXPECT_TRUE(flags.IsEnabled(S::FORCE_SWIFTSHADER));
+    EXPECT_FALSE(flags.IsOverridden(S::FORCE_SWIFTSHADER));
+
+    // User/AVD override (-ForceLavapipe) wins over server pattern (enable: true).
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_LAVAPIPE));
+    EXPECT_TRUE(flags.IsOverridden(S::FORCE_LAVAPIPE));
+
+    // Disabled by server pattern (not overridden).
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_GPU_HOST));
+
+    // Guest feature enabled in guest.ini can be enabled by server pattern.
+    EXPECT_TRUE(flags.IsEnabled(S::MINIGBM));
+
+    // Guest feature disabled in guest.ini must NOT be enabled by server pattern.
+    EXPECT_FALSE(flags.IsEnabled(S::GUEST_ANGLE));
+
+    // GPU-dependent pattern does not match until GPUs are probed.
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_ANGLE));
+
+    // Unprefixed substring of a hex ID ("67" inside "0x67df") must not false-match.
+    const std::vector<HostGpuInfo> mismatched_gpus = {
+        HostGpuInfo{.make = "0x8086", .device_id = "67"},
+    };
+    flags.ApplyGpuFeaturePatterns(mismatched_gpus);
+    EXPECT_FALSE(flags.IsEnabled(S::FORCE_ANGLE));
+
+    const std::vector<HostGpuInfo> probed_gpus = {
+        HostGpuInfo{
+            .make = "0x8086",
+            .device_id = "67df",
+        },
+    };
+    flags.ApplyGpuFeaturePatterns(probed_gpus);
+    EXPECT_TRUE(flags.IsEnabled(S::FORCE_ANGLE));
+    EXPECT_THAT(flags.GetEnabledNonOverride(),
+                ElementsAre(S::FORCE_ANGLE, S::FORCE_SWIFTSHADER, S::MINIGBM));
+}
+
+TEST(FeatureFlagsTest, ApplyGpuFeaturePatternsMatchesModelAndRendererSubstringsAndTrademarks) {
+    base::TestSystem sys("bin", "myhome");
+    const fs::path default_patterns =
+            sys.GetTempRoot()->Path() / "emu-original-feature-flags.protobuf";
+
+    WriteTextFile(default_patterns, R"pb(
+        pattern {
+            hwconfig {
+                hostgpuinfo {
+                    make: "Intel (0x8086)"
+                    model: "Intel Iris Pro"
+                }
+            }
+            featureaction {
+                feature: ForceANGLE
+                enable: true
+            }
+        }
+        pattern {
+            hwconfig {
+                hostgpuinfo {
+                    renderer: "AMD Radeon RX 6700 XT"
+                }
+            }
+            featureaction {
+                feature: ForceLavapipe
+                enable: true
+            }
+        })pb");
+
+    auto make_flags = [&]() {
+        return FeatureFlags::Create({
+            .default_patterns_path = default_patterns,
+            .emulator_version = "37.1.0",
+        });
+    };
+
+    // Unrelated or empty GPU strings do not match.
+    {
+        ASSERT_OK_AND_ASSIGN(FeatureFlags flags, make_flags());
+        const std::vector<HostGpuInfo> unrelated_gpus = {
+            HostGpuInfo{
+                .make = "0x8086",
+                .model = "Intel(R) UHD Graphics 770",
+                .renderer = "AMD Radeon RX 6600 (RADV NAVI23)",
+            },
+            HostGpuInfo{.make = "0x8086"},
+        };
+        flags.ApplyGpuFeaturePatterns(unrelated_gpus);
+        EXPECT_FALSE(flags.IsEnabled(S::FORCE_ANGLE));
+        EXPECT_FALSE(flags.IsEnabled(S::FORCE_LAVAPIPE));
+    }
+
+    // ASCII trademark markers "(R)" / "(TM)" and model suffixes match pattern "Intel Iris Pro".
+    {
+        ASSERT_OK_AND_ASSIGN(FeatureFlags flags, make_flags());
+        const std::vector<HostGpuInfo> iris_gpus = {
+            HostGpuInfo{
+                .make = "0x8086",
+                .model = "Intel(R) Iris(TM) Pro Graphics 580",
+            },
+        };
+        flags.ApplyGpuFeaturePatterns(iris_gpus);
+        EXPECT_TRUE(flags.IsEnabled(S::FORCE_ANGLE));
+        EXPECT_FALSE(flags.IsEnabled(S::FORCE_LAVAPIPE));
+    }
+
+    // UTF-8 trademark symbols ("®" / "™"), spaced "(R)" / "(TM)", case variations, and driver
+    // suffixes match.
+    {
+        ASSERT_OK_AND_ASSIGN(FeatureFlags flags, make_flags());
+        const std::vector<HostGpuInfo> mixed_gpus = {
+            HostGpuInfo{
+                .make = "0x8086",
+                .model = "intel® (R) iris™ (TM) pro graphics",
+                .renderer = "amd radeon rx 6700 xt (RADV NAVI22)",
+            },
+        };
+        flags.ApplyGpuFeaturePatterns(mixed_gpus);
+        EXPECT_TRUE(flags.IsEnabled(S::FORCE_ANGLE));
+        EXPECT_TRUE(flags.IsEnabled(S::FORCE_LAVAPIPE));
+    }
 }
 
 }  // namespace

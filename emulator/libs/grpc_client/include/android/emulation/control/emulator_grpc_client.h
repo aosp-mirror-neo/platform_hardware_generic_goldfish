@@ -22,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -412,6 +413,9 @@ class EmulatorGrpcClientBuilder {
     absl::StatusOr<std::pair<std::string, std::shared_ptr<grpc::Channel>>> BuildTargetAndChannel();
 
   private:
+    template <typename TClient>
+    absl::StatusOr<std::unique_ptr<TClient>> BuildClient();
+
     absl::Status status_{absl::OkStatus()};
     InterceptorFactories factories_;
     Endpoint destination_;

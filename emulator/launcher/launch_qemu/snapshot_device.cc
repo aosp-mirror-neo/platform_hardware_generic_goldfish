@@ -77,7 +77,11 @@ absl::Status SnapshotDevice::initialize(const EmulatorConfig& emulator) {
     }
 
     std::string skip_save_reason;
-    if (should_save_snapshot(emulator, skip_save_reason, &save_status_)) {
+    const bool save = should_save_snapshot(emulator, skip_save_reason, &save_status_);
+    if (save && vmstate_read_only_) {
+        LOG(WARNING) << "Snapshot save is disabled: " << vmstate_image_ << " is read-only.";
+        save_status_ = SaveStatus::kDisabledCmdline;
+    } else if (save) {
         // Only create the directory here. version.txt is written once a save
         // actually completes (see QemuVmOperations), so that a crash before the
         // exit-time save cannot leave a version file next to stale or missing
@@ -100,9 +104,27 @@ std::string SnapshotDevice::describe_incompatibility(const SnapshotStore& store,
     if (!found.ok()) {
         return absl::StrCat("snapshot version missing: ", found.status().message());
     }
-    return absl::StrCat(
+    std::string reason = absl::StrCat(
             "snapshot version ", *found, " != ", store.Version(), ": ",
             ::goldfish::snapshot::DescribeSnapshotVersionMismatch(*found, store.Version()));
+    // When only the virtio-gpu device differs, the snapshot is still loadable
+    // by selecting the device it was saved with: say so, since this is what
+    // every pre-existing snapshot hits after the default device changes.
+    using ::goldfish::snapshot::SnapshotGpuDevice;
+    using ::goldfish::snapshot::SnapshotVersionGpuDevice;
+    const SnapshotGpuDevice saved_with = SnapshotVersionGpuDevice(*found);
+    const bool known_device = saved_with == SnapshotGpuDevice::kRutabaga ||
+                              saved_with == SnapshotGpuDevice::kGfxstream;
+    if (known_device && saved_with != SnapshotVersionGpuDevice(store.Version()) &&
+        ::goldfish::snapshot::SnapshotVersionBase(*found) ==
+                ::goldfish::snapshot::SnapshotVersionBase(store.Version()) &&
+        ::goldfish::snapshot::SnapshotVersionGfxstream(*found) ==
+                ::goldfish::snapshot::SnapshotVersionGfxstream(store.Version())) {
+        absl::StrAppend(&reason, " (pass '-virtio-gpu-device ",
+                        saved_with == SnapshotGpuDevice::kGfxstream ? "gfxstream" : "rutabaga",
+                        "' to load it)");
+    }
+    return reason;
 }
 
 absl::StatusOr<bool> SnapshotDevice::prepare_vmstate_image(const SnapshotStore& store) {
@@ -113,6 +135,13 @@ absl::StatusOr<bool> SnapshotDevice::prepare_vmstate_image(const SnapshotStore& 
     // every boot.
     if (exists && ::goldfish::fsimage::IsValidQcow2Image(image, /*allow_empty_backing_path=*/true)) {
         vmstate_image_ = image;
+        // An image we cannot write to (e.g. a symlink to a shared, read-only
+        // copy) is attached read-only: snapshots can still be loaded from it,
+        // but nothing can be saved to it.
+        vmstate_read_only_ = !base::file::can_write(image);
+        if (vmstate_read_only_) {
+            LOG(INFO) << image << " is not writable, attaching it read-only.";
+        }
         return false;
     }
     if (!snapshots_enabled_) {
@@ -150,7 +179,8 @@ std::vector<std::string> SnapshotDevice::getQemuParameters(
         params.push_back(absl::StrCat(
                 "driver=qcow2,node-name=", kVmStateNodeName,
                 ",file.driver=file,file.filename=", EscapeQemuOptionValue(vmstate_image_.string()),
-                ",overlap-check=none,cache.direct=off,cache.no-flush=on"));
+                ",overlap-check=none,cache.direct=off,cache.no-flush=on",
+                vmstate_read_only_ ? ",read-only=on" : ""));
         params.push_back("-vmstate-node");
         params.push_back(std::string(kVmStateNodeName));
     }

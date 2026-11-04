@@ -207,6 +207,7 @@ emulator/fishtank/lib64/qt/translations/qtwebengine_locales/zh-CN.pak
 emulator/fishtank/lib64/qt/translations/qtwebengine_locales/zh-TW.pak
 emulator/lib/
 emulator/lib/advancedFeatures.ini
+emulator/lib/emu-original-feature-flags.protobuf
 emulator/lib/emulator_access.json
 emulator/lib/qemu/
 emulator/lib/qemu/libgfxstream_backend.dylib
@@ -216,8 +217,6 @@ emulator/lib64/
 emulator/lib64/libEGL.dylib
 emulator/lib64/libGLESv1_CM.dylib
 emulator/lib64/libGLESv2.dylib
-emulator/lib64/libglib_shared.dylib
-emulator/lib64/libgmodule_shared.dylib
 emulator/lib64/libkosmickrisp_icd.json
 emulator/lib64/libLLVM.dylib
 emulator/lib64/libMoltenVK.dylib

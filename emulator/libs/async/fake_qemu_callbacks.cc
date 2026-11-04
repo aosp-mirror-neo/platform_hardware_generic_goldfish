@@ -94,6 +94,11 @@ std::vector<QEMUBH*> sScheduledBHs;
 // Registered snapshot progress handlers.
 std::list<QemuSnapshotProgressEntry*> sSnapshotProgressHandlers;
 
+// BQL tracking for tests.
+std::atomic<bool> sBqlTrackingEnabled = false;
+std::atomic<int64_t> sBqlUnlockCount = 0;
+thread_local int sBqlDepth = 0;
+
 // --- I/O Loop State ---
 struct FdHandler {
     IOHandler* read_cb;
@@ -117,15 +122,13 @@ void fake_qemu_advance_ms(int64_t ms) {
 
         // Step 2: Check and dispatch any expired timers
         std::vector<QEMUBH*> scheduled_bh_from_timers;
-        std::list<QEMUTimer*> timers;
         {
             std::lock_guard<std::recursive_mutex> lock(sMutex);
-            timers = sTimers;
-        }
-        for (auto* timer : sTimers) {
-            if (timer->scale && timer->expire_time <= sFakeClockMs) {
-                timer->scale = 0;
-                scheduled_bh_from_timers.push_back(qemu_bh_new(timer->cb, timer->opaque));
+            for (auto* timer : sTimers) {
+                if (timer->scale && timer->expire_time <= sFakeClockMs) {
+                    timer->scale = 0;
+                    scheduled_bh_from_timers.push_back(qemu_bh_new(timer->cb, timer->opaque));
+                }
             }
         }
 
@@ -239,6 +242,20 @@ void fake_qemu_reset() {
         delete entry;
     }
     sSnapshotProgressHandlers.clear();
+    sBqlTrackingEnabled = false;
+    sBqlUnlockCount = 0;
+    sBqlDepth = 0;
+}
+
+void fake_qemu_set_bql_tracking(bool enabled) {
+    sBqlTrackingEnabled = enabled;
+    if (!enabled) {
+        sBqlDepth = 0;
+    }
+}
+
+int64_t fake_qemu_bql_unlock_count() {
+    return sBqlUnlockCount.load();
 }
 
 // --- Fake QEMU API Implementations ---
@@ -315,12 +332,23 @@ void qemu_bh_delete(QEMUBH* bh) {
 }
 
 bool bql_locked() {
-    return false;
+    return sBqlTrackingEnabled.load() && sBqlDepth > 0;
 }
 
-void bql_lock_impl(const char* file, int line) {}
+void bql_lock_impl(const char* file, int line) {
+    if (sBqlTrackingEnabled.load()) {
+        ++sBqlDepth;
+    }
+}
 
-void bql_unlock() {}
+void bql_unlock() {
+    if (sBqlTrackingEnabled.load()) {
+        if (sBqlDepth > 0) {
+            --sBqlDepth;
+        }
+        ++sBqlUnlockCount;
+    }
+}
 
 QemuSnapshotProgressEntry* add_snapshot_progress_handler(QemuSnapshotProgressHandler* cb,
                                                          void* opaque) {

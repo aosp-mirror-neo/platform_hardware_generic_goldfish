@@ -26,6 +26,7 @@
 
 #include "../fourcc_utils.h"
 #include "VerLogging.h"
+#include "android/base/scoped_com_initializer.h"
 #include "android/base/win32_unicode_string.h"
 #include "webcam_source.h"
 
@@ -229,21 +230,16 @@ static MFApi& getMFApiInstance() {
 
 class MFInitialize {
   public:
-    MFInitialize() {
-        HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        if (SUCCEEDED(hr)) {
-            mComInit = true;
-        } else if (hr == RPC_E_CHANGED_MODE) {
-            mComInit = false;
-        } else {
-            LOG(INFO) << "CoInitializeEx failed, hr=" << hrToString(hr);
+    MFInitialize() : mComInit(COINIT_MULTITHREADED) {
+        if (!mComInit) {
+            LOG(INFO) << "CoInitializeEx failed, hr=" << hrToString(mComInit.hr());
             return;
         }
         if (!getMFApiInstance().isValid()) {
             LOG(INFO) << "MFApi is not valid";
             return;
         }
-        hr = getMFApiInstance().mfStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
+        HRESULT hr = getMFApiInstance().mfStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
         if (FAILED(hr)) {
             LOG(INFO) << "MFStartup failed, hr=" << hrToString(hr);
             return;
@@ -252,13 +248,12 @@ class MFInitialize {
     }
     ~MFInitialize() {
         if (mMfInit) getMFApiInstance().mfShutdown();
-        if (mComInit) CoUninitialize();
     }
     operator bool() { return mMfInit; }
     MFApi& getMFApi() { return getMFApiInstance(); }
 
   private:
-    bool mComInit = false;
+    const ScopedComInitializer mComInit;
     bool mMfInit = false;
 };
 

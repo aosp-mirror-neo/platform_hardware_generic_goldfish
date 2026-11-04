@@ -21,6 +21,18 @@
 #include "goldfish/perfetto/perfetto_categories.h"
 
 namespace goldfish::display {
+namespace {
+constexpr size_t kRgbChannels = 3;
+
+size_t ComputeFrameBufferBytes(const AVFrame* frame) {
+    if (!frame) return 0;
+    size_t total = 0;
+    for (int i = 0; i < AV_NUM_DATA_POINTERS && frame->buf[i] != nullptr; ++i) {
+        total += static_cast<size_t>(frame->buf[i]->size);
+    }
+    return total;
+}
+}  // namespace
 
 WebMEncoder::WebMEncoder(std::string fname, int w, int h, int f, int br)
         : filename_(std::move(fname)), width_(w), height_(h), fps_(f), bitrate_(br) {
@@ -118,15 +130,17 @@ bool WebMEncoder::Init() {
     }
 
     frame_->format = codec_ctx_->pix_fmt;
-    frame_->width = width_;
-    frame_->height = height_;
+    frame_->width = codec_ctx_->width;
+    frame_->height = codec_ctx_->height;
     if (const int err = av_frame_get_buffer(frame_, 32); err < 0) {
         return FailInit("Failed to alloc frame buffer", err);
     }
+    yuv_frame_buffer_bytes_.store(ComputeFrameBufferBytes(frame_), std::memory_order_relaxed);
 
     // 10. Init SwsContext (RGB -> YUV)
-    sws_ctx_ = sws_getContext(width_, height_, AV_PIX_FMT_RGB24, width_ / 2, height_ / 2,
-                              AV_PIX_FMT_YUV420P, SWS_BILINEAR, nullptr, nullptr, nullptr);
+    sws_ctx_ =
+            sws_getContext(width_, height_, AV_PIX_FMT_RGB24, codec_ctx_->width, codec_ctx_->height,
+                           codec_ctx_->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr);
     if (!sws_ctx_) {
         return FailInit("Failed to init sws_ctx");
     }
@@ -140,17 +154,31 @@ bool WebMEncoder::Init() {
 
 void WebMEncoder::AddFrame(const uint8_t* rgb_data) {
     TRACE_EVENT("display", "WebMEncoder::AddFrame");
+    if (!rgb_data) return;
+
+    std::vector<uint8_t> frame_data;
     {
         const absl::MutexLock lock(queue_mutex_);
         if (!is_initialized_ || stop_signal_) return;
+        if (frame_queue_.size() >= kMaxQueuedFrames) {
+            frame_data = std::move(frame_queue_.front());
+            frame_queue_.pop_front();
+        } else if (!free_buffers_.empty()) {
+            frame_data = std::move(free_buffers_.back());
+            free_buffers_.pop_back();
+        }
     }
 
-    const size_t data_size = static_cast<size_t>(width_) * height_ * 3;
-    std::vector<uint8_t> frame_data(rgb_data, rgb_data + data_size);
+    const size_t data_size = static_cast<size_t>(width_) * height_ * kRgbChannels;
+    if (frame_data.capacity() < data_size) {
+        frame_buffer_allocations_.fetch_add(1, std::memory_order_relaxed);
+    }
+    frame_data.assign(rgb_data, rgb_data + data_size);
 
     {
         const absl::MutexLock lock(queue_mutex_);
-        frame_queue_.push(std::move(frame_data));
+        if (!is_initialized_ || stop_signal_) return;
+        frame_queue_.push_back(std::move(frame_data));
         TRACE_COUNTER("display", "webm_queue_depth", frame_queue_.size());
     }
 }
@@ -172,19 +200,41 @@ void WebMEncoder::Finish() {
     finished_ = true;
 }
 
+size_t WebMEncoder::QueuedFrames() const {
+    const absl::MutexLock lock(queue_mutex_);
+    return frame_queue_.size();
+}
+
+size_t WebMEncoder::BufferedBytes() const {
+    const absl::MutexLock lock(queue_mutex_);
+    size_t total = in_flight_buffer_bytes_;
+    for (const auto& buf : frame_queue_) {
+        total += buf.capacity();
+    }
+    for (const auto& buf : free_buffers_) {
+        total += buf.capacity();
+    }
+    return total;
+}
+
 bool WebMEncoder::IsFrameAvailable() const ABSL_EXCLUSIVE_LOCKS_REQUIRED(queue_mutex_) {
     return !frame_queue_.empty() || stop_signal_;
 }
 
 void WebMEncoder::EncodeLoop() {
     int count = 0;
+    std::vector<uint8_t> current_data;
     while (true) {
         ++count;
         VLOG(2) << "loop " << count;
-        std::vector<uint8_t> current_data;
 
         {
             const absl::MutexLock lock(queue_mutex_);
+            if (!current_data.empty() && free_buffers_.size() <= kMaxQueuedFrames) {
+                free_buffers_.push_back(std::move(current_data));
+            }
+            current_data = {};
+            in_flight_buffer_bytes_ = 0;
             VLOG(2) << "loop " << count << " wait for new frame ";
             queue_mutex_.Await(absl::Condition(this, &WebMEncoder::IsFrameAvailable));
 
@@ -195,10 +245,15 @@ void WebMEncoder::EncodeLoop() {
                 // before exiting to ensure all enqueued frames are encoded.
                 VLOG(2) << "loop " << count << " exit now " << " stopSignal "
                         << " there are frames left: " << frame_queue_.size();
+                frame_queue_.clear();
+                frame_queue_.shrink_to_fit();
+                free_buffers_.clear();
+                free_buffers_.shrink_to_fit();
                 break;
             }
             current_data = std::move(frame_queue_.front());
-            frame_queue_.pop();
+            frame_queue_.pop_front();
+            in_flight_buffer_bytes_ = current_data.capacity();
             TRACE_COUNTER("display", "webm_queue_depth", frame_queue_.size());
         }
 
@@ -223,6 +278,7 @@ void WebMEncoder::EncodeLoop() {
 void WebMEncoder::ProcessFrame(const std::vector<uint8_t>& raw_data, int64_t frame_index) {
     TRACE_EVENT("display", "WebMEncoder::ProcessFrame", "frame_index", frame_index);
     if (av_frame_make_writable(frame_) < 0) return;
+    yuv_frame_buffer_bytes_.store(ComputeFrameBufferBytes(frame_), std::memory_order_relaxed);
 
     const uint8_t* const src_slice[AV_NUM_DATA_POINTERS] = {raw_data.data()};
     const int src_stride[AV_NUM_DATA_POINTERS] = {width_ * 3};
@@ -263,7 +319,17 @@ void WebMEncoder::DrainPackets() {
 }
 
 void WebMEncoder::Cleanup() {
+    {
+        const absl::MutexLock lock(queue_mutex_);
+        frame_queue_.clear();
+        frame_queue_.shrink_to_fit();
+        free_buffers_.clear();
+        free_buffers_.shrink_to_fit();
+        in_flight_buffer_bytes_ = 0;
+        is_initialized_ = false;
+    }
     av_frame_free(&frame_);
+    yuv_frame_buffer_bytes_.store(0, std::memory_order_relaxed);
     av_packet_free(&pkt_);
     avcodec_free_context(&codec_ctx_);
     if (fmt_ctx_) {
@@ -274,6 +340,5 @@ void WebMEncoder::Cleanup() {
         sws_freeContext(sws_ctx_);
         sws_ctx_ = nullptr;
     }
-    is_initialized_ = false;
 }
 }  // namespace goldfish::display

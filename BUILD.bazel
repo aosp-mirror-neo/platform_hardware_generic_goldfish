@@ -11,7 +11,6 @@ PERF_TESTS = [
     "//emulator/libs/SocketBuffer:socket_buffer_perf",
     "//emulator/libs/async:sockets_perf",
     "//emulator/libs/logging:log_bridge_perf",
-    "//emulator/libs/system:clock_perf",
     "//emulator/plugin/vsock_goldfish:vsock_perf",
 ]
 

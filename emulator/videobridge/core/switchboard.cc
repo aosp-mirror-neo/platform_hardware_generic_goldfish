@@ -24,13 +24,15 @@
 namespace goldfish::videobridge {
 
 Switchboard::Switchboard(std::shared_ptr<MediaProvider> media_provider,
-                         InputSenderFactory input_sender_factory)
+                         InputSenderFactory input_sender_factory,
+                         ::webrtc::scoped_refptr<GoldfishAudioDeviceModule> audio_device)
         : Switchboard(std::move(media_provider), std::move(input_sender_factory),
-                      NetworkSubstrate{}) {}
+                      NetworkSubstrate{}, std::move(audio_device)) {}
 
 Switchboard::Switchboard(std::shared_ptr<MediaProvider> media_provider,
-                         InputSenderFactory input_sender_factory, NetworkSubstrate substrate)
-        : RtcConnection(std::move(substrate))
+                         InputSenderFactory input_sender_factory, NetworkSubstrate substrate,
+                         ::webrtc::scoped_refptr<GoldfishAudioDeviceModule> audio_device)
+        : RtcConnection(std::move(substrate), std::move(audio_device))
         , media_provider_(std::move(media_provider))
         , input_sender_factory_(std::move(input_sender_factory)) {
     ConfigureWebRtcLogging();

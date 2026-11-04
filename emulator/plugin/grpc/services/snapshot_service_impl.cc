@@ -14,7 +14,10 @@
 
 #include "android/emulation/control/snapshot_service_impl.h"
 
+#include <utility>
+
 #include "absl/status/status.h"
+#include "absl/time/time.h"
 
 #include "android/emulation/control/absl_status_translate.h"
 
@@ -34,16 +37,24 @@ grpc::Status SnapshotServiceImpl::ListSnapshots(grpc::ServerContext* context,
                                                 const SnapshotFilter* request,
                                                 SnapshotList* reply) {
     using SnapshotEntry = goldfish::VmOperations::SnapshotEntry;
+    const bool compatible_only =
+            request == nullptr || request->statusfilter() == SnapshotFilter::CompatibleOnly;
 
-    return AbslStatusToGrpcStatus(vm_operations_.ListSnapshots([reply](SnapshotEntry se) {
-        SnapshotDetails* details = reply->mutable_snapshots()->Add();
+    return AbslStatusToGrpcStatus(
+            vm_operations_.ListSnapshots([reply, compatible_only](SnapshotEntry se) {
+                if (!se.compatible && compatible_only) {
+                    return;
+                }
+                SnapshotDetails* details = reply->mutable_snapshots()->Add();
+                details->set_snapshot_id(se.name);
+                details->set_status(se.compatible ? (se.loaded ? SnapshotDetails::Loaded
+                                                               : SnapshotDetails::Compatible)
+                                                  : SnapshotDetails::Incompatible);
 
-        details->set_snapshot_id(se.name);
-
-        emulator_snapshot::Snapshot* details2 = details->mutable_details();
-        details2->set_logical_name(std::move(se.name));
-        details2->set_creation_time(absl::ToUnixSeconds(se.timestamp));
-    }));
+                emulator_snapshot::Snapshot* details2 = details->mutable_details();
+                details2->set_logical_name(std::move(se.name));
+                details2->set_creation_time(absl::ToUnixSeconds(se.timestamp));
+            }));
 }
 
 grpc::Status SnapshotServiceImpl::LoadSnapshot(grpc::ServerContext* context,

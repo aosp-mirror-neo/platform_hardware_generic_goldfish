@@ -44,10 +44,6 @@ FakePixmanDisplay::~FakePixmanDisplay() {
     ShutdownProducer();
 }
 
-void FakePixmanDisplay::SendMultiTouchEvent(uint8_t slot, int x, int y, MultiTouchType type) {
-    multi_touch_events.push_back({slot, x, y, type});
-}
-
 void FakePixmanDisplay::UpdateSourceImage(::pixman_image_t* image) {
     PixmanDisplay::UpdateSourceImage(image);
     const Dimensions dims = GetDimensions();
@@ -68,10 +64,6 @@ std::pair<int, int> FakePixmanDisplay::ResizeKeepAspectRatio(int desired_width,
     }
     if (hook) hook();
     return PixmanDisplay::ResizeKeepAspectRatio(desired_width, desired_height);
-}
-
-void FakePixmanDisplay::SendMouseEvent(int x, int y, int button_mask) {
-    mouse_events.push_back({x, y, button_mask});
 }
 
 void FakePixmanDisplay::SendEvDevEvent(uint16_t type, uint16_t code, uint32_t value) {

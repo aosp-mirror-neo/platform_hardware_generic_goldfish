@@ -1136,7 +1136,7 @@ class FlakyLoop final : public async::EventLoop {
     void ShutdownTimers() override {}
     size_t WaitUntilIdle() override { return 0; }
     bool IsOnLoopThread() const override { return false; }
-    std::shared_ptr<Timer> CreateTimer(RepeatingTask /*task*/) override { return nullptr; }
+    ScopedTimer CreateTimer(RepeatingTask /*task*/) override { return nullptr; }
 
     TestEventLoop& Inner() { return *inner_; }
     bool fail_next = false;

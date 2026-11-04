@@ -39,8 +39,8 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 
-#include "android/base/clock.h"
 #include "goldfish/async/testing/test_event_loop.h"
+#include "goldfish/system/steady_clock.h"
 #include "keyboard_sink.h"
 #include "standard-headers/linux/input-event-codes.h"
 #include "standard-headers/linux/input.h"
@@ -50,14 +50,15 @@ namespace {
 
 using ::absl_testing::IsOk;
 using ::absl_testing::StatusIs;
-using ::android::base::ClockType;
 using ::android::emulation::control::EvDevEvent;
+using ::android::emulation::v2::ButtonMask;
 using ::android::emulation::v2::InputActivity;
 using ::android::emulation::v2::InputEvent;
 using ::android::emulation::v2::KeyAction;
 using ::android::emulation::v2::KeyEvent;
 using ::android::emulation::v2::PointerAction;
 using ::android::emulation::v2::PointerEvent;
+using ::android::emulation::v2::ToolType;
 using ::goldfish::async::EventLoop;
 using ::goldfish::async::testing::TestEventLoop;
 using ::testing::Contains;
@@ -94,14 +95,26 @@ auto ContactAt(float x, float y) {
     return ::testing::AllOf(Field(&GuestContact::x, Abs(x)), Field(&GuestContact::y, Abs(y)));
 }
 
-// Minimal model of Android's MultiTouchMotionAccumulator over Linux multi-touch
-// protocol B: ABS_MT_SLOT selects a slot, later ABS_MT_* values update it, and
-// ABS_MT_TRACKING_ID < 0 immediately clears the slot before SYN_REPORT syncs
-// TouchInputMapper. Each WriteReport() call is one SYN_REPORT frame.
+// Minimal model of Android's MultiTouchMotionAccumulator and
+// TouchButtonAccumulator over Linux multi-touch protocol B: ABS_MT_SLOT selects
+// a slot, later ABS_MT_* values update it, EV_KEY updates global stylus/eraser
+// button state, and ABS_MT_TRACKING_ID < 0 immediately clears the slot before
+// SYN_REPORT syncs TouchInputMapper. Each WriteReport() call is one SYN_REPORT
+// frame.
 class GuestTouchState {
   public:
     void ApplyReport(absl::Span<const EvDevEvent> events) {
         for (const EvDevEvent& event : events) {
+            if (event.type == EV_KEY) {
+                if (event.code == BTN_TOOL_RUBBER) {
+                    btn_tool_rubber_ = event.value != 0;
+                } else if (event.code == BTN_STYLUS) {
+                    btn_stylus_ = event.value != 0;
+                } else {
+                    FAIL() << "unexpected EV_KEY code " << event.code;
+                }
+                continue;
+            }
             ASSERT_EQ(event.type, EV_ABS) << "the sink, not the dispatcher, appends SYN_REPORT";
             if (event.code == ABS_MT_SLOT) {
                 ASSERT_LT(event.value, slots_.size());
@@ -126,6 +139,9 @@ class GuestTouchState {
         }
     }
 
+    bool BtnToolRubber() const { return btn_tool_rubber_; }
+    bool BtnStylus() const { return btn_stylus_; }
+
     std::vector<GuestContact> Active() const {
         std::vector<GuestContact> active;
         for (int i = 0; i < kTouchDeviceSlots; ++i) {
@@ -145,6 +161,8 @@ class GuestTouchState {
         uint32_t tool_type = 0;
     };
     int selected_ = 0;
+    bool btn_tool_rubber_ = false;
+    bool btn_stylus_ = false;
     std::array<Slot, kTouchDeviceSlots> slots_{};
 };
 
@@ -207,8 +225,14 @@ class FakeTouchDevices : public TouchDevices {
         if (device == kInner) {
             return &inner;
         }
-        return device == kOuter ? &outer : nullptr;
+        if (device == kOuter) {
+            return &outer;
+        }
+        auto it = extra.find(device);
+        return it == extra.end() ? nullptr : it->second;
     }
+
+    std::vector<TouchDeviceId> Devices() override { return {kInner, kOuter}; }
 
     // Simulates a guest driver reset or re-probe on `device`: advances its
     // active generation and fires the push notification.
@@ -221,6 +245,7 @@ class FakeTouchDevices : public TouchDevices {
 
     FakeSink inner;
     FakeSink outer;
+    absl::flat_hash_map<TouchDeviceId, TouchDeviceSink*> extra;
     absl::flat_hash_map<int32_t, TouchDeviceId> remap;
     absl::Status resolve_status;
 };
@@ -236,6 +261,7 @@ class FakeKeyboard : public KeyboardSink {
     void TypeText(std::string_view utf8) override {
         log_.Record(loop_, absl::StrCat("text ", utf8));
     }
+    void Reset() override { log_.Record(loop_, "reset"); }
 
   private:
     const EventLoop& loop_;
@@ -283,18 +309,30 @@ PointerEvent Touch(PointerAction action, std::vector<P> pointers, int32_t displa
     return event;
 }
 
+PointerEvent PenTouch(PointerAction action, int32_t id, ToolType tool_type,
+                      uint32_t button_mask = 0, float x = 0.5F, float y = 0.5F,
+                      int32_t display_id = 0) {
+    PointerEvent event;
+    event.set_display_id(display_id);
+    event.set_action(action);
+    auto* pointer = event.add_pointers();
+    pointer->set_pointer_id(id);
+    pointer->set_x(x);
+    pointer->set_y(y);
+    pointer->set_tool_type(tool_type);
+    pointer->set_button_mask(button_mask);
+    return event;
+}
+
 constexpr PointerAction kDown = PointerAction::POINTER_ACTION_DOWN;
 constexpr PointerAction kMove = PointerAction::POINTER_ACTION_MOVE;
 constexpr PointerAction kUp = PointerAction::POINTER_ACTION_UP;
 
 // Advances one microsecond on every read, so each activity gets a distinct
 // timestamp.
-class TickingClock : public ::android::base::IClock {
+class TickingClock : public ::goldfish::system::SteadyClock {
   public:
-    absl::Time Now(ClockType type) const override {
-        EXPECT_EQ(type, ClockType::kRealtime);
-        return absl::UnixEpoch() + absl::Microseconds(ticks_.fetch_add(1) + 1);
-    }
+    absl::Duration Now() const override { return absl::Microseconds(ticks_.fetch_add(1) + 1); }
 
   private:
     mutable std::atomic<int64_t> ticks_{0};
@@ -454,7 +492,7 @@ class InputDispatcherTest : public ::testing::Test {
     FakeKeyboard keyboard_{*loop_, log_};
     TickingClock clock_;
     ActivityRecorder recorder_{*loop_};
-    InputDispatcher dispatcher_{*loop_, devices_, &keyboard_, ResolveEvdevOnly, &clock_};
+    InputDispatcher dispatcher_{*loop_, devices_, &keyboard_, ResolveEvdevOnly, clock_};
 };
 
 TEST_F(InputDispatcherTest, SessionIdsStartAtOneAndAreUnique) {
@@ -586,7 +624,7 @@ TEST_F(InputDispatcherTest, DriverResetPushEagerlyCancelsContactsWithoutSubseque
     ASSERT_THAT(inner_.reports.back(), SizeIs(::testing::Ge(2)));
     EXPECT_EQ(inner_.reports.back()[0], (EvDevEvent{EV_ABS, ABS_MT_SLOT, 0}));
     EXPECT_EQ(inner_.reports.back()[1], (EvDevEvent{EV_ABS, ABS_MT_TRACKING_ID, 0}));
-    ASSERT_THAT(Dispatch(a, Touch(kMove, {{2, 0.75F, 0.75F}})), IsOk());
+    ASSERT_THAT(Dispatch(a, Touch(kMove, {{2, 0.75F, 0.75F}}, 1)), IsOk());
     EXPECT_THAT(outer_.guest.Active(), ElementsAre(ContactAt(0.75F, 0.75F)));
 }
 
@@ -628,7 +666,7 @@ TEST_F(InputDispatcherTest, CloseSessionAfterDriverResetWritesNoRelease) {
 
 TEST_F(InputDispatcherTest, DriverResetPushSafeWhenDispatcherDestroyedBeforeLoopDrains) {
     auto dispatcher = std::make_unique<InputDispatcher>(*loop_, devices_, &keyboard_,
-                                                        ResolveEvdevOnly, &clock_);
+                                                        ResolveEvdevOnly, clock_);
     const InputSessionId a = dispatcher->OpenSession({.source_id = 1});
     dispatcher->DispatchPointer(a, Touch(kDown, {{0}}));
     loop_->RunAll();
@@ -1233,7 +1271,7 @@ TEST_F(InputDispatcherTest, CompletionCarriesTheTimeOfItsActivity) {
     for (size_t i = 0; i < observed.size(); ++i) {
         EXPECT_THAT(results[i].status, IsOk());
         ASSERT_TRUE(results[i].dispatched_at.has_value()) << i;
-        EXPECT_EQ(absl::ToUnixNanos(*results[i].dispatched_at),
+        EXPECT_EQ(absl::ToInt64Nanoseconds(*results[i].dispatched_at),
                   observed[i].activity.dispatched_at_nanos());
     }
     for (size_t i = observed.size(); i < results.size(); ++i) {
@@ -1256,7 +1294,7 @@ TEST_F(InputDispatcherTest, PartlyAppliedEventCompletesWithErrorAndTime) {
     ASSERT_TRUE(result.has_value());
     EXPECT_THAT(result->status, StatusIs(absl::StatusCode::kResourceExhausted));
     ASSERT_TRUE(result->dispatched_at.has_value());
-    EXPECT_EQ(absl::ToUnixNanos(*result->dispatched_at),
+    EXPECT_EQ(absl::ToInt64Nanoseconds(*result->dispatched_at),
               observed[0].activity.dispatched_at_nanos());
 }
 
@@ -1276,7 +1314,7 @@ TEST_F(InputDispatcherTest, CallbacksRunOnDeliveryThread) {
 
 TEST_F(InputDispatcherTest, DestructorDeliversQueuedActivity) {
     auto dispatcher = std::make_unique<InputDispatcher>(*loop_, devices_, &keyboard_,
-                                                        ResolveEvdevOnly, &clock_);
+                                                        ResolveEvdevOnly, clock_);
     ActivityRecorder recorder(*loop_);
     absl::Notification first_arrived;
     absl::Notification release_first;
@@ -1410,7 +1448,7 @@ TEST_F(InputDispatcherTest, ShutdownDeliversQueuedActivityAndJoins) {
 TEST_F(InputDispatcherTest, DestructorShutsDownAfterLoopStopped) {
     Completion pending;
     auto dispatcher = std::make_unique<InputDispatcher>(*loop_, devices_, &keyboard_,
-                                                        ResolveEvdevOnly, &clock_);
+                                                        ResolveEvdevOnly, clock_);
     const InputSessionId a = dispatcher->OpenSession({});
     loop_->RunAll();
     dispatcher->DispatchText(a, "x", pending.Callback());
@@ -1427,7 +1465,7 @@ TEST_F(InputDispatcherTest, DestructorShutsDownAfterLoopStopped) {
 TEST_F(InputDispatcherTest, SessionAtCapIsRejectedOnCallingThreadWhileOthersPost) {
     std::array<Completion, 4> done;
     Completion again;
-    InputDispatcher capped(*loop_, devices_, &keyboard_, ResolveEvdevOnly, &clock_,
+    InputDispatcher capped(*loop_, devices_, &keyboard_, ResolveEvdevOnly, clock_,
                            /*max_pending_per_session=*/2);
     const InputSessionId a = capped.OpenSession({});
     const InputSessionId b = capped.OpenSession({});
@@ -1459,7 +1497,7 @@ TEST_F(InputDispatcherTest, SessionAtCapIsRejectedOnCallingThreadWhileOthersPost
 }
 
 TEST_F(InputDispatcherTest, CloseSessionRunsWhenSessionIsAtCap) {
-    InputDispatcher capped(*loop_, devices_, &keyboard_, ResolveEvdevOnly, &clock_,
+    InputDispatcher capped(*loop_, devices_, &keyboard_, ResolveEvdevOnly, clock_,
                            /*max_pending_per_session=*/1);
     const InputSessionId a = capped.OpenSession({});
     loop_->RunAll();
@@ -1473,7 +1511,7 @@ TEST_F(InputDispatcherTest, CloseSessionRunsWhenSessionIsAtCap) {
 }
 
 TEST_F(InputDispatcherTest, KeysWaitForInstalledKeyboard) {
-    InputDispatcher late(*loop_, devices_, /*keyboard=*/nullptr, ResolveEvdevOnly, &clock_);
+    InputDispatcher late(*loop_, devices_, /*keyboard=*/nullptr, ResolveEvdevOnly, clock_);
     const InputSessionId a = late.OpenSession({});
     std::array<Completion, 4> done;
     late.DispatchKey(a, Key(kKeyPress, KEY_A), done[0].Callback());
@@ -1489,6 +1527,522 @@ TEST_F(InputDispatcherTest, KeysWaitForInstalledKeyboard) {
     EXPECT_THAT(done[2].status, IsOk());
     EXPECT_THAT(done[3].status, IsOk());
     EXPECT_THAT(log_.writes, ElementsAre(Down(KEY_B), Up(KEY_B), "text y"));
+}
+
+TEST_F(InputDispatcherTest, SnapshotLoadReleasesAllGuestSlotsAndResetsKeyboardEvenWhenIdle) {
+    // Simulate ghost contacts and stuck stylus keys left in the guest by a loaded snapshot.
+    const EvDevEvent ghost_inner[] = {{EV_KEY, BTN_TOOL_RUBBER, 1},
+                                      {EV_KEY, BTN_STYLUS, 1},
+                                      {EV_ABS, ABS_MT_SLOT, 7},
+                                      {EV_ABS, ABS_MT_TRACKING_ID, 7}};
+    const EvDevEvent ghost_outer[] = {{EV_ABS, ABS_MT_SLOT, 10}, {EV_ABS, ABS_MT_TRACKING_ID, 10}};
+    inner_.guest.ApplyReport(ghost_inner);
+    outer_.guest.ApplyReport(ghost_outer);
+    ASSERT_THAT(inner_.guest.Active(), SizeIs(1));
+    ASSERT_TRUE(inner_.guest.BtnToolRubber());
+    ASSERT_TRUE(inner_.guest.BtnStylus());
+    ASSERT_THAT(outer_.guest.Active(), SizeIs(1));
+
+    dispatcher_.OnSnapshotLoaded();
+    loop_->RunAll();
+
+    std::vector<EvDevEvent> expected_palm;
+    std::vector<EvDevEvent> expected_lift;
+    for (uint32_t slot = 0; slot < static_cast<uint32_t>(kTouchDeviceSlots); ++slot) {
+        std::ranges::copy(Palm(slot), std::back_inserter(expected_palm));
+        std::ranges::copy(Lift(slot), std::back_inserter(expected_lift));
+    }
+    expected_lift.push_back({EV_KEY, BTN_TOOL_RUBBER, 0});
+    expected_lift.push_back({EV_KEY, BTN_STYLUS, 0});
+    EXPECT_THAT(inner_.reports, ElementsAre(expected_palm, expected_lift));
+    EXPECT_THAT(outer_.reports, ElementsAre(expected_palm, expected_lift));
+    EXPECT_THAT(inner_.frames[0],
+                ElementsAre(::testing::AllOf(Field(&GuestContact::slot, 7),
+                                             Field(&GuestContact::tool_type, MT_TOOL_PALM))));
+    EXPECT_THAT(outer_.frames[0],
+                ElementsAre(::testing::AllOf(Field(&GuestContact::slot, 10),
+                                             Field(&GuestContact::tool_type, MT_TOOL_PALM))));
+    EXPECT_THAT(inner_.guest.Active(), IsEmpty());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
+    EXPECT_FALSE(inner_.guest.BtnStylus());
+    EXPECT_THAT(outer_.guest.Active(), IsEmpty());
+    EXPECT_THAT(log_.writes,
+                ElementsAre("touch inner", "touch inner", "touch outer", "touch outer", "reset"));
+    EXPECT_THAT(log_.on_loop_thread, Each(true));
+    EXPECT_THAT(Activities(), IsEmpty());
+}
+
+TEST_F(InputDispatcherTest, SnapshotLoadReleasesHeldContactsAndKeysAndReportsSynthesizedActivity) {
+    const InputSessionId a = Source(1);
+    const InputSessionId b = Source(2);
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.25F, 0.25F}, {1, 0.5F, 0.5F}})), IsOk());
+    devices_.remap[0] = kOuter;  // Foldable folds: display 0 resolves to device 1.
+    ASSERT_THAT(Dispatch(b, Touch(kDown, {{0, 0.75F, 0.75F}})), IsOk());
+    ASSERT_THAT(Dispatch(a, Key(kKeyDown, KEY_B)), IsOk());
+    ASSERT_THAT(Dispatch(a, Key(kKeyDown, KEY_A)), IsOk());
+    ASSERT_THAT(Dispatch(b, Key(kKeyDown, KEY_A)), IsOk());
+    Activities();
+    log_.writes.clear();
+    inner_.reports.clear();
+    outer_.reports.clear();
+
+    dispatcher_.OnSnapshotLoaded();
+    loop_->RunAll();
+
+    static_assert(KEY_A < KEY_B);
+    EXPECT_THAT(inner_.reports, SizeIs(2));
+    EXPECT_THAT(outer_.reports, SizeIs(2));
+    EXPECT_THAT(inner_.guest.Active(), IsEmpty());
+    EXPECT_THAT(outer_.guest.Active(), IsEmpty());
+    // The keyboard's Reset() releases the held keys; nothing is written first.
+    EXPECT_THAT(log_.writes,
+                ElementsAre("touch inner", "touch inner", "touch outer", "touch outer", "reset"));
+    EXPECT_THAT(Activities(),
+                ElementsAre("src1 synthesized POINTER_ACTION_CANCEL display 0 ids 0 1",
+                            "src2 synthesized POINTER_ACTION_CANCEL display 0 ids 0",
+                            absl::StrCat("src1 synthesized KEY_ACTION_UP ", KEY_A),
+                            absl::StrCat("src2 synthesized KEY_ACTION_UP ", KEY_A),
+                            absl::StrCat("src1 synthesized KEY_ACTION_UP ", KEY_B)));
+
+    // Subsequent DOWNs start fresh in slot 0, and released keys are no longer held.
+    devices_.remap.clear();
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0}})), IsOk());
+    ASSERT_THAT(inner_.reports.back(), SizeIs(::testing::Ge(2)));
+    EXPECT_EQ(inner_.reports.back()[0], (EvDevEvent{EV_ABS, ABS_MT_SLOT, 0}));
+    EXPECT_EQ(inner_.reports.back()[1], (EvDevEvent{EV_ABS, ABS_MT_TRACKING_ID, 0}));
+    log_.writes.clear();
+    ASSERT_THAT(Dispatch(a, Key(kKeyUp, KEY_A)), IsOk());
+    ASSERT_THAT(Dispatch(b, Key(kKeyUp, KEY_A)), IsOk());
+    EXPECT_THAT(log_.writes, IsEmpty());
+}
+
+TEST_F(InputDispatcherTest, SnapshotLoadSkipsInactiveDeviceWriteButClearsItsContacts) {
+    const InputSessionId a = Source(1);
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0}})), IsOk());
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1}}, 1)), IsOk());
+    Activities();
+    inner_.reports.clear();
+    outer_.reports.clear();
+    outer_.active = false;
+
+    dispatcher_.OnSnapshotLoaded();
+    loop_->RunAll();
+
+    EXPECT_THAT(inner_.reports, SizeIs(2));
+    EXPECT_THAT(outer_.reports, IsEmpty());
+    EXPECT_THAT(Activities(),
+                ElementsAre("src1 synthesized POINTER_ACTION_CANCEL display 0 ids 0",
+                            "src1 synthesized POINTER_ACTION_CANCEL display 1 ids 1"));
+
+    outer_.active = true;
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1}}, 1)), IsOk());
+    ASSERT_THAT(outer_.reports.back(), SizeIs(::testing::Ge(2)));
+    EXPECT_EQ(outer_.reports.back()[0], (EvDevEvent{EV_ABS, ABS_MT_SLOT, 0}));
+    EXPECT_EQ(outer_.reports.back()[1], (EvDevEvent{EV_ABS, ABS_MT_TRACKING_ID, 0}));
+}
+
+TEST_F(InputDispatcherTest, DisplayRemovedClearsOnlyThatDevicesContactsWithoutWriting) {
+    FakeSink secondary(*loop_, "secondary", log_);
+    devices_.extra[2] = &secondary;
+    const InputSessionId a = Source(1);
+    const InputSessionId b = Source(2);
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.25F, 0.25F}})), IsOk());
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1}, {2}}, 2)), IsOk());
+    devices_.remap[5] = 2;
+    ASSERT_THAT(Dispatch(b, Touch(kDown, {{0}}, 5)), IsOk());
+    Activities();
+    secondary.reports.clear();
+
+    dispatcher_.OnDisplayRemoved(2);
+    loop_->RunAll();
+
+    EXPECT_THAT(secondary.reports, IsEmpty());
+    EXPECT_THAT(Activities(),
+                ElementsAre("src1 synthesized POINTER_ACTION_CANCEL display 2 ids 1 2",
+                            "src2 synthesized POINTER_ACTION_CANCEL display 5 ids 0"));
+
+    // Device 0's contact is intact, and a recreated device 2 cancels its stale
+    // guest slots before starting fresh at slot 0.
+    ASSERT_THAT(Dispatch(a, Touch(kMove, {{0, 0.75F, 0.75F}})), IsOk());
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.75F, 0.75F)));
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1, 0.1F, 0.9F}}, 2)), IsOk());
+    EXPECT_THAT(secondary.guest.Active(), ElementsAre(ContactAt(0.1F, 0.9F)));
+    ASSERT_THAT(secondary.reports.back(), SizeIs(::testing::Ge(2)));
+    EXPECT_EQ(secondary.reports.back()[0], (EvDevEvent{EV_ABS, ABS_MT_SLOT, 0}));
+    EXPECT_EQ(secondary.reports.back()[1], (EvDevEvent{EV_ABS, ABS_MT_TRACKING_ID, 0}));
+}
+
+TEST_F(InputDispatcherTest, DisplayAddedProactivelyCancelsStaleSlotsUnlessDriverReset) {
+    FakeSink secondary(*loop_, "secondary", log_);
+    devices_.extra[2] = &secondary;
+    const InputSessionId a = Source(1);
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1, 0.2F, 0.3F}}, 2)), IsOk());
+    ASSERT_THAT(Dispatch(a, PenTouch(kDown, /*id=*/2, ToolType::TOOL_TYPE_ERASER,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY, 0.4F, 0.5F,
+                                     /*display_id=*/2)),
+                IsOk());
+    EXPECT_THAT(secondary.guest.Active(), SizeIs(2));
+    ASSERT_TRUE(secondary.guest.BtnToolRubber());
+    ASSERT_TRUE(secondary.guest.BtnStylus());
+    secondary.reports.clear();
+
+    devices_.extra.erase(2);
+    dispatcher_.OnDisplayRemoved(2);
+    loop_->RunAll();
+    EXPECT_THAT(secondary.reports, IsEmpty());
+
+    // Recreating display 2 on the same permanent virtio-input device cancels
+    // the previously held guest slots and resets stylus EV_KEY state right when
+    // the display is added.
+    devices_.extra[2] = &secondary;
+    dispatcher_.OnDisplayAdded(2);
+    loop_->RunAll();
+    EXPECT_THAT(secondary.reports, SizeIs(2));
+    EXPECT_THAT(secondary.guest.Active(), IsEmpty());
+    EXPECT_FALSE(secondary.guest.BtnToolRubber());
+    EXPECT_FALSE(secondary.guest.BtnStylus());
+
+    // If the guest driver resets while the display is removed, OnDisplayAdded
+    // drops the stale slot and stylus key record without writing to the fresh
+    // driver.
+    ASSERT_THAT(Dispatch(a, PenTouch(kDown, /*id=*/1, ToolType::TOOL_TYPE_ERASER,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY, 0.2F, 0.3F,
+                                     /*display_id=*/2)),
+                IsOk());
+    devices_.extra.erase(2);
+    dispatcher_.OnDisplayRemoved(2);
+    loop_->RunAll();
+
+    ++secondary.active_generation;
+    secondary.guest = GuestTouchState{};
+    secondary.reports.clear();
+    devices_.extra[2] = &secondary;
+    dispatcher_.OnDisplayAdded(2);
+    loop_->RunAll();
+    EXPECT_THAT(secondary.reports, IsEmpty());
+}
+
+TEST_F(InputDispatcherTest, DisplayRemovedWithNoContactsDoesNothing) {
+    const InputSessionId a = Source(1);
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.25F, 0.25F}})), IsOk());
+    Activities();
+    log_.writes.clear();
+
+    dispatcher_.OnDisplayRemoved(2);
+    loop_->RunAll();
+
+    EXPECT_THAT(log_.writes, IsEmpty());
+    EXPECT_THAT(Activities(), IsEmpty());
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.25F, 0.25F)));
+}
+
+TEST_F(InputDispatcherTest, IdleTimeoutReleasesHeldContactsAndKeysWhileKeepingSessionOpen) {
+    const InputSessionId a = dispatcher_.OpenSession({
+        .source_id = 7,
+        .reject_down_on_held = true,
+        .idle_timeout = absl::Seconds(60),
+    });
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.25F, 0.25F}})), IsOk());
+    ASSERT_THAT(Dispatch(a, Key(kKeyDown, KEY_A)), IsOk());
+    Activities();
+    log_.writes.clear();
+    inner_.reports.clear();
+
+    // 30s < 60s timeout: nothing is released yet.
+    loop_->AdvanceClock(absl::Seconds(30));
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.25F, 0.25F)));
+    EXPECT_THAT(log_.writes, IsEmpty());
+
+    // Activity at t=30s resets the 60s idle deadline to t=90s.
+    ASSERT_THAT(Dispatch(a, Touch(kMove, {{0, 0.5F, 0.5F}})), IsOk());
+    Activities();
+    log_.writes.clear();
+    inner_.reports.clear();
+
+    // At t=60s (30s after the move), the session is still within its 60s timeout.
+    loop_->AdvanceClock(absl::Seconds(30));
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.5F, 0.5F)));
+    EXPECT_THAT(log_.writes, IsEmpty());
+
+    // At t=90s (60s after the move), held contacts and keys are released: the
+    // contact as a two-frame palm cancel, then the key.
+    loop_->AdvanceClock(absl::Seconds(30));
+    EXPECT_THAT(inner_.reports, ElementsAre(Palm(0), Lift(0)));
+    EXPECT_THAT(inner_.guest.Active(), IsEmpty());
+    EXPECT_THAT(log_.writes, ElementsAre("touch inner", "touch inner", Up(KEY_A)));
+    EXPECT_THAT(Activities(), ElementsAre("src7 synthesized POINTER_ACTION_CANCEL display 0 ids 0",
+                                          absl::StrCat("src7 synthesized KEY_ACTION_UP ", KEY_A)));
+
+    // The session remains open and pointer 0 is no longer considered held.
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.75F, 0.75F}})), IsOk());
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.75F, 0.75F)));
+}
+
+TEST_F(InputDispatcherTest, IdleTimerFiringBeforeItsGenerationIsArmedIsStale) {
+    const InputSessionId a = dispatcher_.OpenSession({
+        .source_id = 7,
+        .idle_timeout = absl::Seconds(60),
+    });
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.25F, 0.25F}})), IsOk());
+    Activities();
+
+    // An operation ran, but the loop task that records which generation the
+    // re-armed timer fires for has not. On loops whose Schedule() arms from a
+    // task of its own, the previous deadline can still fire in that window;
+    // it must not release what the operation just held.
+    loop_->AdvanceClock(absl::Seconds(30));
+    dispatcher_.DispatchPointer(a, Touch(kMove, {{0, 0.5F, 0.5F}}), nullptr);
+    ASSERT_TRUE(loop_->RunOne());
+    log_.writes.clear();
+    loop_->AdvanceClock(absl::Seconds(60));
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.5F, 0.5F)));
+    EXPECT_THAT(log_.writes, IsEmpty());
+
+    // The timer stays usable: the next operation arms it again.
+    loop_->RunAll();
+    ASSERT_THAT(Dispatch(a, Touch(kMove, {{0, 0.6F, 0.6F}})), IsOk());
+    loop_->AdvanceClock(absl::Seconds(60));
+    EXPECT_THAT(inner_.guest.Active(), IsEmpty());
+    EXPECT_THAT(Activities(),
+                ElementsAre("src7 POINTER_ACTION_MOVE display 0 ids 0",
+                            "src7 POINTER_ACTION_MOVE display 0 ids 0",
+                            "src7 synthesized POINTER_ACTION_CANCEL display 0 ids 0"));
+}
+
+TEST_F(InputDispatcherTest, IdleTimerFiringAfterShutdownOrDestructionIsIgnored) {
+    auto dispatcher = std::make_unique<InputDispatcher>(*loop_, devices_, &keyboard_,
+                                                        ResolveEvdevOnly, clock_);
+    const InputSessionId a = dispatcher->OpenSession({
+        .source_id = 7,
+        .idle_timeout = absl::Seconds(60),
+    });
+    dispatcher->DispatchPointer(a, Touch(kDown, {{0, 0.25F, 0.25F}}), nullptr);
+    dispatcher->DispatchKey(a, Key(kKeyDown, KEY_A), nullptr);
+    loop_->RunAll();
+    log_.writes.clear();
+
+    // Shut down, so the still-armed timer must leave the dispatcher alone...
+    dispatcher->Shutdown();
+    loop_->AdvanceClock(absl::Seconds(60));
+    EXPECT_THAT(log_.writes, IsEmpty());
+
+    // ...and once it is gone, the timer has nothing to touch.
+    dispatcher.reset();
+    loop_->RunAll();
+    loop_->AdvanceClock(absl::Seconds(60));
+    EXPECT_THAT(log_.writes, IsEmpty());
+}
+
+TEST_F(InputDispatcherTest, SameSessionSamePointerIdOnDifferentDisplaysAreIndependentContacts) {
+    const InputSessionId a = dispatcher_.OpenSession({.source_id = 1, .reject_down_on_held = true});
+
+    // Pointer 0 pressed on display 0 and pointer 0 pressed on display 1 do not
+    // collide or trigger reject_down_on_held.
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.2F, 0.2F}}, /*display_id=*/0)), IsOk());
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.8F, 0.8F}}, /*display_id=*/1)), IsOk());
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.2F, 0.2F)));
+    EXPECT_THAT(outer_.guest.Active(), ElementsAre(ContactAt(0.8F, 0.8F)));
+
+    // Moving each display's pointer 0 updates only that display's device.
+    ASSERT_THAT(Dispatch(a, Touch(kMove, {{0, 0.3F, 0.3F}}, /*display_id=*/0)), IsOk());
+    ASSERT_THAT(Dispatch(a, Touch(kMove, {{0, 0.7F, 0.7F}}, /*display_id=*/1)), IsOk());
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.3F, 0.3F)));
+    EXPECT_THAT(outer_.guest.Active(), ElementsAre(ContactAt(0.7F, 0.7F)));
+
+    // Lifting pointer 0 on display 0 leaves pointer 0 on display 1 active.
+    ASSERT_THAT(Dispatch(a, Touch(kUp, {{0, 0.3F, 0.3F}}, /*display_id=*/0)), IsOk());
+    EXPECT_THAT(inner_.guest.Active(), IsEmpty());
+    EXPECT_THAT(outer_.guest.Active(), ElementsAre(ContactAt(0.7F, 0.7F)));
+
+    ASSERT_THAT(Dispatch(a, Touch(kUp, {{0, 0.7F, 0.7F}}, /*display_id=*/1)), IsOk());
+    EXPECT_THAT(outer_.guest.Active(), IsEmpty());
+}
+
+TEST_F(InputDispatcherTest, PointerlessCancelScopesToRequestedDisplayWhenDisplaysShareTouchDevice) {
+    const InputSessionId a = Source(1);
+    devices_.remap[2] = kInner;  // Display 2 shares the inner touch device with display 0.
+
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.2F, 0.2F}}, /*display_id=*/0)), IsOk());
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.8F, 0.8F}}, /*display_id=*/2)), IsOk());
+    ASSERT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.2F, 0.2F), ContactAt(0.8F, 0.8F)));
+    Activities();
+
+    ASSERT_THAT(Dispatch(a, Touch(PointerAction::POINTER_ACTION_CANCEL, {}, /*display_id=*/0)),
+                IsOk());
+
+    // Only display 0's contact is cancelled; display 2's contact on the shared device survives.
+    EXPECT_THAT(inner_.guest.Active(), ElementsAre(ContactAt(0.8F, 0.8F)));
+    EXPECT_THAT(Activities(), ElementsAre("src1 POINTER_ACTION_CANCEL display 0 ids 0"));
+}
+
+TEST_F(InputDispatcherTest, PointerlessCancelLiftsContactsAcrossPostureRemap) {
+    const InputSessionId a = Source(1);
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.2F, 0.2F}}, /*display_id=*/0)), IsOk());
+    devices_.remap[0] = kOuter;  // The foldable folds mid-gesture while pointer 0 is still held.
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{1, 0.8F, 0.8F}}, /*display_id=*/0)), IsOk());
+    Activities();
+    inner_.reports.clear();
+    outer_.reports.clear();
+
+    ASSERT_THAT(Dispatch(a, Touch(PointerAction::POINTER_ACTION_CANCEL, {}, /*display_id=*/0)),
+                IsOk());
+
+    EXPECT_THAT(inner_.guest.Active(), IsEmpty());
+    EXPECT_THAT(outer_.guest.Active(), IsEmpty());
+    EXPECT_THAT(inner_.reports, SizeIs(2));
+    EXPECT_THAT(outer_.reports, SizeIs(2));
+    EXPECT_THAT(Activities(), ElementsAre("src1 POINTER_ACTION_CANCEL display 0 ids 0 1"));
+}
+
+TEST_F(InputDispatcherTest,
+       SessionResetTrackerRecordsIdleTimeoutSnapshotLoadDisplayRemovalAndDriverReset) {
+    auto tracker = std::make_shared<SessionResetTracker>();
+    const InputSessionId a = dispatcher_.OpenSession({
+        .source_id = 1,
+        .idle_timeout = absl::Seconds(60),
+        .reset_tracker = tracker,
+    });
+    EXPECT_EQ(tracker->Version(), 0U);
+
+    // 1. Driver reset on display 1 records a per-display reset for display 1 only.
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.2F, 0.2F}}, /*display_id=*/0)), IsOk());
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.8F, 0.8F}}, /*display_id=*/1)), IsOk());
+    devices_.ResetDriver(kOuter);
+    loop_->RunAll();
+
+    EXPECT_EQ(tracker->Version(), 1U);
+    auto snap = tracker->ReadSnapshot();
+    EXPECT_EQ(snap.full_generation, 0U);
+    EXPECT_FALSE(snap.display_generations.contains(0));
+    ASSERT_TRUE(snap.display_generations.contains(1));
+    EXPECT_EQ(snap.display_generations.at(1), 1U);
+
+    // 2. Display removal on device 2 records a per-display reset for display 2.
+    FakeSink secondary(*loop_, "secondary", log_);
+    devices_.extra[2] = &secondary;
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.5F, 0.5F}, {1, 0.6F, 0.6F}}, /*display_id=*/2)),
+                IsOk());
+    dispatcher_.OnDisplayRemoved(2);
+    loop_->RunAll();
+
+    EXPECT_EQ(tracker->Version(), 2U);
+    snap = tracker->ReadSnapshot();
+    EXPECT_EQ(snap.full_generation, 0U);
+    ASSERT_TRUE(snap.display_generations.contains(2));
+    EXPECT_EQ(snap.display_generations.at(2), 1U);
+
+    // 3. Idle timeout records a full reset and clears per-display entries.
+    loop_->AdvanceClock(absl::Seconds(60));
+    EXPECT_EQ(tracker->Version(), 3U);
+    snap = tracker->ReadSnapshot();
+    EXPECT_EQ(snap.full_generation, 1U);
+    EXPECT_THAT(snap.display_generations, IsEmpty());
+
+    // 4. Snapshot load records a full reset on every open session.
+    dispatcher_.OnSnapshotLoaded();
+    loop_->RunAll();
+    EXPECT_EQ(tracker->Version(), 4U);
+    snap = tracker->ReadSnapshot();
+    EXPECT_EQ(snap.full_generation, 2U);
+
+    // 5. Explicit CloseSession does not record an extra reset.
+    dispatcher_.CloseSession(a);
+    loop_->RunAll();
+    EXPECT_EQ(tracker->Version(), 4U);
+}
+
+TEST_F(InputDispatcherTest, EraserUpResetsEvKeyStateBeforeFingerTap) {
+    const InputSessionId a = Human();
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kDown, /*id=*/10, ToolType::TOOL_TYPE_ERASER,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY)),
+                IsOk());
+    EXPECT_TRUE(inner_.guest.BtnToolRubber());
+    EXPECT_TRUE(inner_.guest.BtnStylus());
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kUp, /*id=*/10, ToolType::TOOL_TYPE_ERASER,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY)),
+                IsOk());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
+    EXPECT_FALSE(inner_.guest.BtnStylus());
+
+    ASSERT_THAT(Dispatch(a, Touch(kDown, {{0, 0.25F, 0.25F}})), IsOk());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
+    EXPECT_FALSE(inner_.guest.BtnStylus());
+    EXPECT_THAT(inner_.guest.Active(),
+                ElementsAre(Field(&GuestContact::tool_type, MT_TOOL_FINGER)));
+    ASSERT_THAT(Dispatch(a, Touch(kUp, {{0, 0.25F, 0.25F}})), IsOk());
+}
+
+TEST_F(InputDispatcherTest, StylusCancelResetsEvKeyStateInLiftFrame) {
+    const InputSessionId a = Human();
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kDown, /*id=*/10, ToolType::TOOL_TYPE_STYLUS,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY)),
+                IsOk());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
+    EXPECT_TRUE(inner_.guest.BtnStylus());
+
+    ASSERT_THAT(Dispatch(a, PenTouch(PointerAction::POINTER_ACTION_CANCEL, /*id=*/10,
+                                     ToolType::TOOL_TYPE_STYLUS)),
+                IsOk());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
+    EXPECT_FALSE(inner_.guest.BtnStylus());
+}
+
+TEST_F(InputDispatcherTest, SwitchingHeldEraserToFingerResetsEvKeyState) {
+    const InputSessionId a = Human();
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kDown, /*id=*/0, ToolType::TOOL_TYPE_ERASER)), IsOk());
+    EXPECT_TRUE(inner_.guest.BtnToolRubber());
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kMove, /*id=*/0, ToolType::TOOL_TYPE_FINGER)), IsOk());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
+    EXPECT_FALSE(inner_.guest.BtnStylus());
+    ASSERT_THAT(Dispatch(a, Touch(kUp, {{0}})), IsOk());
+}
+
+TEST_F(InputDispatcherTest, CloseSessionResetsHeldEraserEvKeyState) {
+    const InputSessionId a = Human();
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kDown, /*id=*/10, ToolType::TOOL_TYPE_ERASER,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY)),
+                IsOk());
+    ASSERT_TRUE(inner_.guest.BtnToolRubber());
+    ASSERT_TRUE(inner_.guest.BtnStylus());
+
+    dispatcher_.CloseSession(a);
+    loop_->RunAll();
+    EXPECT_THAT(inner_.guest.Active(), IsEmpty());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
+    EXPECT_FALSE(inner_.guest.BtnStylus());
+}
+
+TEST_F(InputDispatcherTest, StylusKeysStaySetUntilLastStylusContactOnDeviceLifts) {
+    const InputSessionId a = Human();
+    const InputSessionId b = Human();
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kDown, /*id=*/10, ToolType::TOOL_TYPE_STYLUS,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY)),
+                IsOk());
+    ASSERT_THAT(Dispatch(b, Touch(kDown, {{0, 0.2F, 0.2F}})), IsOk());
+    EXPECT_TRUE(inner_.guest.BtnStylus());
+
+    // Lifting a concurrent finger contact must not clear the held stylus button.
+    ASSERT_THAT(Dispatch(b, Touch(kUp, {{0, 0.2F, 0.2F}})), IsOk());
+    EXPECT_TRUE(inner_.guest.BtnStylus());
+
+    // A second session touches down a stylus and lifts first; stylus keys stay
+    // active until session `a` also lifts.
+    ASSERT_THAT(Dispatch(b, PenTouch(kDown, /*id=*/10, ToolType::TOOL_TYPE_STYLUS,
+                                     ButtonMask::BUTTON_MASK_STYLUS_PRIMARY)),
+                IsOk());
+    ASSERT_THAT(Dispatch(b, PenTouch(kUp, /*id=*/10, ToolType::TOOL_TYPE_STYLUS)), IsOk());
+    EXPECT_TRUE(inner_.guest.BtnStylus());
+
+    ASSERT_THAT(Dispatch(a, PenTouch(kUp, /*id=*/10, ToolType::TOOL_TYPE_STYLUS)), IsOk());
+    EXPECT_FALSE(inner_.guest.BtnStylus());
+    EXPECT_FALSE(inner_.guest.BtnToolRubber());
 }
 
 }  // namespace

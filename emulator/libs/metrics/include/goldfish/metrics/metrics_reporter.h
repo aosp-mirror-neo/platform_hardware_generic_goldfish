@@ -45,6 +45,13 @@ class MetricsReporter final {
 
     void SetWriter(std::unique_ptr<MetricsWriter> writer);
 
+    // Drains queued events, stops the background worker thread, and destroys the
+    // active MetricsWriter synchronously (flushing/finalizing any open spool file).
+    // After Shutdown(), Report() drops events and SetWriter() destroys the new
+    // writer immediately. Safe to call multiple times, but must not be called from
+    // the worker thread (it would join itself).
+    void Shutdown();
+
     using Callback = std::function<void(android_studio::AndroidStudioEvent&)>;
     void Report(const Callback& callback);
 
@@ -58,11 +65,12 @@ class MetricsReporter final {
     const std::string session_id_;
     google::protobuf::TextFormat::Printer debug_printer_;
 
-    absl::Mutex mutex_;
-    std::unique_ptr<MetricsWriter> writer_ ABSL_GUARDED_BY(mutex_);
+    absl::Mutex shutdown_mutex_;
+    absl::Mutex mutex_ ABSL_ACQUIRED_AFTER(shutdown_mutex_);
+    std::shared_ptr<MetricsWriter> writer_ ABSL_GUARDED_BY(mutex_);
     bool running_ ABSL_GUARDED_BY(mutex_) = false;
     std::queue<MetricsEvent> event_queue_ ABSL_GUARDED_BY(mutex_);
-    std::thread worker_thread_ ABSL_GUARDED_BY(mutex_);
+    std::thread worker_thread_ ABSL_GUARDED_BY(shutdown_mutex_);
 };
 
 }  // namespace goldfish::metrics

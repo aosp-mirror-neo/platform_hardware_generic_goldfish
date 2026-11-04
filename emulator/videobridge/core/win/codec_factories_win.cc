@@ -14,6 +14,7 @@
 #include <mfapi.h>
 #include <mftransform.h>
 
+#include "android/base/scoped_com_initializer.h"
 #include "api/video_codecs/builtin_video_decoder_factory.h"
 #include "api/video_codecs/builtin_video_encoder_factory.h"
 #include "core/win/mf_video_encoder_h264.h"
@@ -25,12 +26,13 @@ namespace {
 
 bool IsHardwareEncoderAvailable() {
     // Initialize Media Foundation temporarily to perform the check
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    if (FAILED(hr)) return false;
+    const android::base::ScopedComInitializer com_init(COINIT_APARTMENTTHREADED);
+    if (!com_init) {
+        return false;
+    }
 
-    hr = MFStartup(MF_VERSION);
+    HRESULT hr = MFStartup(MF_VERSION);
     if (FAILED(hr)) {
-        CoUninitialize();
         return false;
     }
 
@@ -53,7 +55,6 @@ bool IsHardwareEncoderAvailable() {
     }
 
     MFShutdown();
-    CoUninitialize();
 
     return SUCCEEDED(hr) && count > 0;
 }

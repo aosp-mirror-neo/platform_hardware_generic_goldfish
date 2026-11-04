@@ -15,6 +15,7 @@
 
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
@@ -107,6 +108,17 @@ TouchDeviceSink* MultiDisplayTouchDevices::Find(TouchDeviceId device) {
     }
     sink->Bind(*std::move(display));
     return sink.get();
+}
+
+std::vector<TouchDeviceId> MultiDisplayTouchDevices::Devices() {
+    std::vector<TouchDeviceId> devices;
+    for (DisplayId id = 0; id < IMultiDisplay::kMaxDisplays; ++id) {
+        absl::StatusOr<DisplayPtr> display = multi_display_.GetDisplay(id);
+        if (display.ok() && !display->expired()) {
+            devices.push_back(TouchDeviceId{id});
+        }
+    }
+    return devices;
 }
 
 }  // namespace goldfish::grpc::v2

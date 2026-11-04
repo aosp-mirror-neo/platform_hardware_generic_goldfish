@@ -1,7 +1,6 @@
 load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("//emulator/tools:cc_binary_with_manifest.bzl", "cc_binary_with_manifest")
-load("//emulator/tools:plugins.bzl", "collect_plugins")
 
 config_setting(
     name = "opt",
@@ -39,19 +38,15 @@ cc_library(
         ":debug",
         "//emulator/libs/async:async_api",
         "//emulator/libs/system",
+        "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/strings",
-    ],
-)
-
-collect_plugins(
-    name = "binplace",
-    output_dir = ".",
-    plugins = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/time:clock_interface",
     ],
 )
 
@@ -59,11 +54,6 @@ cc_test(
     name = "hang_detector_test",
     size = "small",
     srcs = ["hang_detector_test.cc"],
-    data = [":binplace"],
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
     deps = [
         ":debug",
         ":hang_detector",
@@ -76,8 +66,74 @@ cc_test(
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:status_matchers",
         "@abseil-cpp//absl/strings",
-        "@glib//glib:glib_import",
-        "@glib//gmodule:gmodule_import",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/time:simulated_clock",
+    ],
+)
+
+cc_library(
+    name = "annotation_streambuf",
+    hdrs = ["annotation_streambuf.h"],
+    deps = [
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@crashpad//client",
+    ],
+)
+
+cc_library(
+    name = "annotation_circular_streambuf",
+    hdrs = ["annotation_circular_streambuf.h"],
+    deps = [
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@crashpad//client",
+    ],
+)
+
+cc_library(
+    name = "simple_string_annotation",
+    hdrs = ["simple_string_annotation.h"],
+    deps = [
+        "@abseil-cpp//absl/log:check",
+        "@crashpad//client",
+    ],
+)
+
+cc_library(
+    name = "binary_annotation",
+    hdrs = ["include/android/crashreport/binary_annotation.h"],
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@crashpad//client",
+    ],
+)
+
+cc_library(
+    name = "thread",
+    hdrs = ["include/android/crashreport/thread.h"],
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "looper_registrations",
+    hdrs = ["include/android/crashreport/looper_registrations.h"],
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/synchronization",
+        "@crashpad//client",
     ],
 )
 
@@ -89,27 +145,6 @@ cc_library(
     local_defines = CRASHURL_DEFINES,
     visibility = ["//emulator/crashreport:__subpackages__"],
     deps = [
-        "@crashpad//client",
-        "@crashpad//handler",
-        "@crashpad//snapshot",
-    ],
-)
-
-cc_library(
-    name = "crash_reporter",
-    srcs = [
-        "annotation_streambuf.h",
-        "crash_reporter.cc",
-        "simple_string_annotation.h",
-    ],
-    hdrs = [
-        "include/android/crashreport/crash_reporter.h",
-    ],
-    includes = ["include"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":hang_detector",
-        "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/strings",
         "@crashpad//client",
         "@crashpad//handler",
@@ -119,84 +154,123 @@ cc_library(
 )
 
 cc_library(
+    name = "crash_reporter_testing",
+    hdrs = ["crash_reporter_testing.h"],
+    visibility = ["//visibility:private"],
+)
+
+cc_library(
+    name = "crash_reporter",
+    srcs = ["crash_reporter.cc"],
+    hdrs = ["include/android/crashreport/crash_reporter.h"],
+    # buildifier: leave-alone
+    implementation_deps = select({
+        "@platforms//os:windows": ["@aemu//windows:compat-hdrs"],
+        "//conditions:default": [],
+    }) + [
+        ":annotation_streambuf",
+        ":crash_reporter_testing",
+        ":simple_string_annotation",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/base:no_destructor",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@crashpad//client",
+    ],
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":hang_detector",
+    ],
+)
+
+cc_library(
     name = "crash_system",
     srcs = ["crash_system.cc"],
     hdrs = ["include/android/crashreport/crash_system.h"],
     data = ["@crashpad//handler:crashpad_handler"],
+    # buildifier: leave-alone
+    implementation_deps = select({
+        "@platforms//os:windows": ["@aemu//windows:compat-hdrs"],
+        "//conditions:default": [],
+    }) + [
+        ":crash_uploader",
+        "//emulator/libs/file",
+        "//emulator/libs/process",
+        "//emulator/libs/system",
+        "//emulator/tools:aemu_version",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/strings",
+        "@crashpad//client",
+        "@crashpad//handler",
+        "@crashpad//snapshot",
+        "@crashpad//third_party/mini_chromium:base",
+    ],
     includes = ["include"],
     local_defines = CRASHURL_DEFINES,
     visibility = ["//visibility:public"],
     deps = [
-        ":crash_reporter",
-        ":crash_uploader",
-        "//emulator/libs/system",
-        "//emulator/tools:aemu_version",
-        "@crashpad//client",
-        "@crashpad//handler",
-        "@crashpad//snapshot",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
     ],
 )
 
 cc_library(
     name = "breadcrumb",
-    srcs = [
-        "annotation_circular_streambuf.h",
-        "breadcrumb.cc",
-    ],
-    hdrs = [
-        "include/android/crashreport/binary_annotation.h",
-        "include/android/crashreport/breadcrumb.h",
-        "include/android/crashreport/thread.h",
-    ],
+    srcs = ["breadcrumb.cc"],
+    hdrs = ["include/android/crashreport/breadcrumb.h"],
     includes = ["include"],
     visibility = ["//visibility:public"],
     deps = [
-        "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/log:check",
-        "@abseil-cpp//absl/strings",
-        "@crashpad//client",
+        ":annotation_circular_streambuf",
+        ":binary_annotation",
+        ":thread",
     ],
 )
 
 cc_library(
     name = "breadcrumb_proto",
     srcs = ["breadcrumb_proto.cc"],
-    hdrs = [
-        "include/android/crashreport/breadcrumb_proto.h",
-        "include/android/crashreport/looper_registrations.h",
-    ],
+    hdrs = ["include/android/crashreport/breadcrumb_proto.h"],
     includes = ["include"],
     visibility = ["//visibility:public"],
-    deps = [
-        ":breadcrumb",
+    # buildifier: leave-alone
+    deps = select({
+        "@platforms//os:windows": ["@aemu//windows:compat-hdrs"],
+        "//conditions:default": [],
+    }) + [
+        ":binary_annotation",
+        ":looper_registrations",
+        ":thread",
         "//emulator/libs/proto_data_store",
-        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/synchronization",
-        "@aemu//protos/services/diagnostic:breadcrumb_cc_proto",
-        "@crashpad//client",
+        "@abseil-cpp//absl/time",
     ],
 )
 
 cc_library(
-    name = "detectors",
-    srcs = [
-        "crash_detectors.cc",
-        "timeout_monitor.cc",
+    name = "crash_detectors",
+    srcs = ["crash_detectors.cc"],
+    hdrs = ["include/android/crashreport/crash_detectors.h"],
+    includes = ["include"],
+    deps = [
+        ":hang_detector",
+        "//emulator/libs/system",
     ],
-    hdrs = [
-        "include/android/crashreport/crash_detectors.h",
-        "include/android/crashreport/timeout_monitor.h",
-    ],
+)
+
+cc_library(
+    name = "timeout_monitor",
+    srcs = ["timeout_monitor.cc"],
+    hdrs = ["include/android/crashreport/timeout_monitor.h"],
     includes = ["include"],
     deps = [
         ":crash_reporter",
-        ":hang_detector",
-        "//emulator/libs/system",
         "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/strings",
     ],
 )
 
@@ -207,16 +281,72 @@ alias(
 )
 
 cc_test(
-    name = "crashreport_test",
+    name = "annotation_buffer_test",
     size = "small",
-    srcs = [
-        "annotation_buffer_test.cc",
-        "binary_annotation_test.cc",
-        "breadcrumb_proto_test.cc",
-        "crash_detectors_test.cc",
-        "crash_dump_test.cc",
-        "timeout_monitor_test.cc",
+    srcs = ["annotation_buffer_test.cc"],
+    # buildifier: leave-alone
+    deps = select({
+        "@platforms//os:windows": ["@aemu//windows:compat-hdrs"],
+        "//conditions:default": [],
+    }) + [
+        ":annotation_circular_streambuf",
+        ":annotation_streambuf",
+        ":breadcrumb",
+        "//emulator/libs/test:googletest_main",
     ],
+)
+
+cc_test(
+    name = "binary_annotation_test",
+    size = "small",
+    srcs = ["binary_annotation_test.cc"],
+    # buildifier: leave-alone
+    deps = select({
+        "@platforms//os:windows": ["@aemu//windows:compat-hdrs"],
+        "//conditions:default": [],
+    }) + [
+        ":binary_annotation",
+        ":thread",
+        "//emulator/libs/proto_data_store",
+        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/test:googletest_main",
+        "@aemu//protos/services/diagnostic:breadcrumb_cc_proto",
+    ],
+)
+
+cc_test(
+    name = "breadcrumb_proto_test",
+    size = "small",
+    srcs = ["breadcrumb_proto_test.cc"],
+    # buildifier: leave-alone
+    deps = select({
+        "@platforms//os:windows": ["@aemu//windows:compat-hdrs"],
+        "//conditions:default": [],
+    }) + [
+        ":breadcrumb_proto",
+        ":looper_registrations",
+        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "crash_detectors_test",
+    size = "small",
+    srcs = ["crash_detectors_test.cc"],
+    deps = [
+        ":crash_detectors",
+        "//emulator/libs/system:test-headers",
+        "//emulator/libs/test:googletest_main",
+    ],
+)
+
+cc_test(
+    name = "crash_dump_test",
+    size = "small",
+    srcs = ["crash_dump_test.cc"],
     data = [
         ":crash-me",
         "@crashpad//handler:crashpad_handler",
@@ -225,23 +355,66 @@ cc_test(
         "@platforms//os:macos": ["-undefined error"],
         "//conditions:default": [],
     }),
-    visibility = ["//visibility:public"],
-    deps = [
-        ":breadcrumb",
-        ":breadcrumb_proto",
+    # buildifier: leave-alone
+    deps = select({
+        "@platforms//os:windows": ["@aemu//windows:compat-hdrs"],
+        "//conditions:default": [],
+    }) + [
         ":crash_system",
-        ":detectors",
         "//emulator/libs/process",
-        "//emulator/libs/status_macros",
-        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/system",
         "//emulator/libs/system:bazel_info",
         "//emulator/libs/system:test-headers",
         "//emulator/libs/test:googletest_main",
-        "@abseil-cpp//absl/status:status_matchers",
-        "@abseil-cpp//absl/strings",
-        "@breakpad//src/processor",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/log:globals",
+        "@abseil-cpp//absl/time",
         "@crashpad//client",
-        "@goldfish//emulator/libs/proto_data_store",
+        "@crashpad//handler",
+        "@crashpad//snapshot",
+    ],
+)
+
+cc_test(
+    name = "crash_reporter_test",
+    size = "small",
+    srcs = ["crash_reporter_test.cc"],
+    # buildifier: leave-alone
+    deps = select({
+        "@platforms//os:windows": ["@aemu//windows:compat-hdrs"],
+        "//conditions:default": [],
+    }) + [
+        ":crash_reporter",
+        ":crash_reporter_testing",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/strings",
+        "@crashpad//client",
+    ],
+)
+
+cc_test(
+    name = "crash_system_test",
+    size = "small",
+    srcs = ["crash_system_test.cc"],
+    deps = [
+        ":crash_system",
+        "//emulator/libs/file",
+        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/system:test-headers",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+    ],
+)
+
+cc_test(
+    name = "timeout_monitor_test",
+    size = "small",
+    srcs = ["timeout_monitor_test.cc"],
+    deps = [
+        ":timeout_monitor",
+        "//emulator/libs/test:googletest_main",
     ],
 )
 
@@ -255,7 +428,11 @@ cc_binary_with_manifest(
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
-    deps = [
+    # buildifier: leave-alone
+    deps = select({
+        "@platforms//os:windows": ["@aemu//windows:compat-hdrs"],
+        "//conditions:default": [],
+    }) + [
         ":breadcrumb",
         ":crash_system",
         "//emulator/libs/process",
@@ -270,7 +447,11 @@ cc_binary_with_manifest(
 cc_binary_with_manifest(
     name = "breadcrumb_benchmark",
     srcs = ["breadcrumb_benchmark.cc"],
-    deps = [
+    # buildifier: leave-alone
+    deps = select({
+        "@platforms//os:windows": ["@aemu//windows:compat-hdrs"],
+        "//conditions:default": [],
+    }) + [
         ":breadcrumb_proto",
         "//emulator/plugin/adb-vsock/logger",
         "@aemu//protos/services/diagnostic:breadcrumb_cc_proto",
@@ -281,10 +462,22 @@ cc_binary_with_manifest(
 clang_tidy_test(
     name = "tidy",
     targets = [
-        ":hang_detector",
-        ":crash_reporter",
+        ":annotation_circular_streambuf",
+        ":annotation_streambuf",
+        ":binary_annotation",
         ":breadcrumb",
+        ":breadcrumb_proto",
+        ":crash_reporter",
+        ":crash_reporter_test",
+        ":crash_reporter_testing",
         ":crash_system",
+        ":crash_uploader",
+        ":debug",
+        ":hang_detector",
+        ":looper_registrations",
+        ":simple_string_annotation",
+        ":thread",
+        ":timeout_monitor",
     ],
     tidy_config_file = "//:clang_tidy_config",
 )

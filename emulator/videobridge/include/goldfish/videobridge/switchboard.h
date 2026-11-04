@@ -50,10 +50,14 @@ class Switchboard : public RtcConnection {
      *
      * @param media_provider Optional provider injected to set up audio/video streams for
      * participants.
-     * @param input_sender_factory Optional factory callback for instantiating custom InputSender channels.
+     * @param input_sender_factory Optional factory callback for instantiating custom InputSender
+     * channels.
+     * @param audio_device Optional audio device module that received audio plays into, for
+     * callers that pull it (see GoldfishAudioDeviceModule::PullPlayout()). Null creates one.
      */
     explicit Switchboard(std::shared_ptr<MediaProvider> media_provider = nullptr,
-                         InputSenderFactory input_sender_factory = nullptr);
+                         InputSenderFactory input_sender_factory = nullptr,
+                         ::webrtc::scoped_refptr<GoldfishAudioDeviceModule> audio_device = nullptr);
 
     ~Switchboard() override;
 
@@ -65,7 +69,8 @@ class Switchboard : public RtcConnection {
      * the host's. Behaves identically to the public constructor otherwise.
      */
     Switchboard(std::shared_ptr<MediaProvider> media_provider,
-                InputSenderFactory input_sender_factory, NetworkSubstrate substrate);
+                InputSenderFactory input_sender_factory, NetworkSubstrate substrate,
+                ::webrtc::scoped_refptr<GoldfishAudioDeviceModule> audio_device = nullptr);
 
   public:
     /**

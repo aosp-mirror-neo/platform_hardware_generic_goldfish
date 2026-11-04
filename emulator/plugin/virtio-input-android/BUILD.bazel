@@ -16,6 +16,21 @@ cc_library(
 )
 
 cc_library(
+    name = "config",
+    srcs = [
+        "virtio_input_android_config.c",
+        "virtio_input_android_internal.h",
+    ],
+    hdrs = ["virtio_input_android_config.h"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//emulator/libs/base:array_size",
+        "@pixman//:pixman-1",
+        "@qemu//:qemu-headers-exported",
+    ],
+)
+
+cc_library(
     name = "virtio-input-android",
     srcs = [
         "virtio_input_android.c",
@@ -24,6 +39,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":api",
+        ":config",
         "//emulator/libs/base:array_size",
         "//emulator/libs/logging:absl_c_bridge",
         "@pixman//:pixman-1",
@@ -38,7 +54,10 @@ cc_test(
     srcs = ["virtio_input_android_test.cc"],
     deps = [
         ":api",
+        ":config",
         "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/types:span",
+        "@qemu//:qemu-headers-exported",
     ],
 )
 

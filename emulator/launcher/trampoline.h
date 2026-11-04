@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/functional/function_ref.h"
 #include "absl/status/status.h"
 
 #include "android/goldfish/avd.h"
@@ -28,6 +29,8 @@ namespace android::goldfish {
 bool ShouldTrampolineToQemu2(const absl::StatusOr<std::unique_ptr<android::goldfish::Avd>>& avd,
                              const absl::StatusOr<FeatureFlags>& feature_flags);
 
-absl::Status TrampolineToQemu2(const fs::path& launcher_directory, std::vector<std::string> args);
+absl::Status TrampolineToQemu2(
+        const fs::path& launcher_directory, std::vector<std::string> args,
+        absl::FunctionRef<void()> before_exec = [] {});
 
 }  // namespace android::goldfish

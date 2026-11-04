@@ -27,6 +27,7 @@
 #include "emulator_controller.pb.h"
 #include "goldfish/videobridge/codec_factories.h"
 #include "modules/audio_device/include/fake_audio_device.h"
+#include "mouse_button_mask.h"
 #include "rtc_base/copy_on_write_buffer.h"
 #include "rtc_base/ref_counted_object.h"
 
@@ -342,7 +343,7 @@ void JniRtcReceiver::SendMouseEvent(int x, int y, int button_enum, int action_en
     mouse_event->set_display(0);
     mouse_event->set_x(x);
     mouse_event->set_y(y);
-    mouse_event->set_buttons(button_enum);
+    mouse_event->set_buttons(MouseButtonOrdinalToMask(button_enum));
 
     SendInputEvent(input_event, "SendMouseEvent", "mouse_event");
 }

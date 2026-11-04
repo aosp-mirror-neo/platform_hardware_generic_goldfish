@@ -28,7 +28,11 @@ import grpc
 import pytest
 import webrtc_service_pb2 as rtc_pb
 import webrtc_service_pb2_grpc as rtc_grpc
+from clownfish import companions
 from clownfish.server import ClownfishServer
+
+# Extend default TCP port readiness timeout for ASan companion binaries.
+companions._wait_for_tcp_port.__defaults__ = (30.0,)
 
 _SAMPLE_SDP_OFFER = (
     "v=0\r\n"
@@ -96,14 +100,20 @@ def _decode_grpc_web_first_message(body: bytes) -> bytes:
 class ClownfishCompanionEndToEndTest(unittest.TestCase):
     """Verifies Clownfish with real C++ videobridge, grpc-web-proxy, and aquarium-ui."""
 
-    def setUp(self) -> None:
-        super().setUp()
-        self._tmp = tempfile.TemporaryDirectory()
-        self.server = ClownfishServer(
+    _tmp: tempfile.TemporaryDirectory[str]
+    server: ClownfishServer
+    channel: grpc.Channel
+    rtc: rtc_grpc.RtcServiceStub
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.server = ClownfishServer(
             preset="foldable",
             port=0,
             enable_discovery=True,
-            discovery_dir=self._tmp.name,
+            discovery_dir=cls._tmp.name,
             fps=30.0,
             enable_webrtc=True,
             videobridge_port=0,
@@ -113,15 +123,20 @@ class ClownfishCompanionEndToEndTest(unittest.TestCase):
             enable_aquarium=True,
             aquarium_port=0,
         )
-        self.server.start()
-        self.channel = grpc.insecure_channel(self.server.address)
-        self.rtc = rtc_grpc.RtcServiceStub(self.channel)
+        try:
+            cls.server.start()
+        except Exception:
+            cls._tmp.cleanup()
+            raise
+        cls.channel = grpc.insecure_channel(cls.server.address)
+        cls.rtc = rtc_grpc.RtcServiceStub(cls.channel)
 
-    def tearDown(self) -> None:
-        self.channel.close()
-        self.server.stop()
-        self._tmp.cleanup()
-        super().tearDown()
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.channel.close()
+        cls.server.stop()
+        cls._tmp.cleanup()
+        super().tearDownClass()
 
     def test_webrtc_v2_real_videobridge_jsep_handshake(self) -> None:
         self.assertIsNotNone(self.server.videobridge_address)
@@ -224,6 +239,9 @@ class ClownfishCompanionEndToEndTest(unittest.TestCase):
         rtc_msg_bytes = _decode_grpc_web_first_message(rtc_body)
         rtc_stream_res = rtc_pb.RtcStreamResponse.FromString(rtc_msg_bytes)
         self.assertTrue(rtc_stream_res.handle.session_id)
+        self.rtc.CloseRtcStream(
+            rtc_pb.CloseRtcStreamRequest(handle=rtc_stream_res.handle), timeout=5.0
+        )
 
 
 if __name__ == "__main__":

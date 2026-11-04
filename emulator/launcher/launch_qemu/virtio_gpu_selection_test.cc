@@ -31,10 +31,10 @@ using ::absl_testing::StatusIs;
 using ::goldfish::snapshot::SnapshotGpuDevice;
 using ::testing::HasSubstr;
 
-TEST(VirtioGpuSelectionTest, DefaultsToRutabaga) {
+TEST(VirtioGpuSelectionTest, DefaultsToGfxstream) {
     AndroidOptions opts{};
-    EXPECT_THAT(SelectedVirtioGpuDevice(opts), IsOkAndHolds(VirtioGpuDevice::kRutabaga));
-    EXPECT_EQ(kDefaultVirtioGpuDevice, VirtioGpuDevice::kRutabaga);
+    EXPECT_THAT(SelectedVirtioGpuDevice(opts), IsOkAndHolds(VirtioGpuDevice::kGfxstream));
+    EXPECT_EQ(kDefaultVirtioGpuDevice, VirtioGpuDevice::kGfxstream);
 }
 
 TEST(VirtioGpuSelectionTest, OptionSelectsTheDevice) {

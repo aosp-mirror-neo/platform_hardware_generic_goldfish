@@ -14,12 +14,14 @@
 
 #include "capabilities_service_impl.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <utility>
 
 #include "capabilities_service.pb.h"
 #include "common.pb.h"
+#include "goldfish/audio/pcm_format.h"
 
 #ifdef DeviceCapabilities
 #undef DeviceCapabilities
@@ -28,6 +30,8 @@
 namespace goldfish::grpc::v2 {
 
 using ::android::emulation::v2::AccessMode;
+using ::android::emulation::v2::AudioCapabilities;
+using ::android::emulation::v2::AudioFormatProfile;
 using ::android::emulation::v2::BatteryCapabilities;
 using ::android::emulation::v2::BiometricsCapabilities;
 using ::android::emulation::v2::ChargerSource;
@@ -44,6 +48,7 @@ using ::android::emulation::v2::InputCapabilities;
 using ::android::emulation::v2::InputFeature;
 using ::android::emulation::v2::LocationCapabilities;
 using ::android::emulation::v2::PostureCapabilities;
+using ::android::emulation::v2::SampleFormat;
 using ::android::emulation::v2::ScreenCaptureCapabilities;
 using ::android::emulation::v2::SensorsCapabilities;
 using ::android::emulation::v2::SensorType;
@@ -121,6 +126,36 @@ void PopulateLocationCapabilities(LocationCapabilities* loc_caps) {
     loc_caps->set_fidelity(Fidelity::FIDELITY_HARDWARE);
 }
 
+constexpr std::array<int32_t, 8> kSupportedAudioSampleRatesHz = {8000,  11025, 16000, 22050,
+                                                                 24000, 32000, 44100, 48000};
+constexpr std::array<int32_t, 2> kSupportedAudioChannelCounts = {1, 2};
+
+void PopulateAudioFormatProfile(AudioFormatProfile* profile) {
+    profile->add_supported_formats(SampleFormat::SAMPLE_FORMAT_PCM16_BIT);
+    profile->add_supported_formats(SampleFormat::SAMPLE_FORMAT_F32_BIT);
+    for (int32_t rate_hz : kSupportedAudioSampleRatesHz) {
+        profile->add_supported_sample_rates_hz(rate_hz);
+    }
+    for (int32_t channels : kSupportedAudioChannelCounts) {
+        profile->add_supported_channel_counts(channels);
+    }
+}
+
+void PopulateAudioCapabilities(const HardwareConfig& hw, AudioCapabilities* audio_caps) {
+    audio_caps->set_access_mode(AccessMode::ACCESS_MODE_READ_WRITE);
+    audio_caps->set_fidelity(Fidelity::FIDELITY_HARDWARE);
+    audio_caps->set_supports_wired_headset(true);
+
+    if (hw.hw_audioInput) {
+        PopulateAudioFormatProfile(audio_caps->mutable_microphone_profile());
+        audio_caps->set_max_concurrent_microphone_streams(
+                ::goldfish::audio::kMaxConcurrentMicrophoneStreams);
+    }
+    if (hw.hw_audioOutput) {
+        PopulateAudioFormatProfile(audio_caps->mutable_speaker_profile());
+    }
+}
+
 void PopulatePostureCapabilities(const HardwareConfig& hw, PostureCapabilities* posture_caps) {
     posture_caps->set_access_mode(AccessMode::ACCESS_MODE_READ_WRITE);
     if (hw.hw_sensor_hinge) {
@@ -140,23 +175,23 @@ void PopulatePostureCapabilities(const HardwareConfig& hw, PostureCapabilities* 
 void PopulateSensorsCapabilities(const HardwareConfig& hw, SensorsCapabilities* sensor_caps) {
     sensor_caps->set_access_mode(AccessMode::ACCESS_MODE_READ_WRITE);
     const std::pair<bool, SensorType> sensor_flags[] = {
-            {hw.hw_accelerometer, SensorType::SENSOR_TYPE_ACCELEROMETER},
-            {hw.hw_gyroscope, SensorType::SENSOR_TYPE_GYROSCOPE},
-            {hw.hw_sensors_magnetic_field, SensorType::SENSOR_TYPE_MAGNETOMETER},
-            {hw.hw_sensors_orientation, SensorType::SENSOR_TYPE_ORIENTATION},
-            {hw.hw_sensors_temperature, SensorType::SENSOR_TYPE_AMBIENT_TEMPERATURE},
-            {hw.hw_sensors_proximity, SensorType::SENSOR_TYPE_PROXIMITY},
-            {hw.hw_sensors_light, SensorType::SENSOR_TYPE_LIGHT},
-            {hw.hw_sensors_pressure, SensorType::SENSOR_TYPE_PRESSURE},
-            {hw.hw_sensors_humidity, SensorType::SENSOR_TYPE_RELATIVE_HUMIDITY},
-            {hw.hw_sensors_heart_rate, SensorType::SENSOR_TYPE_HEART_RATE},
-            {hw.hw_sensors_rgbclight, SensorType::SENSOR_TYPE_RGBC_LIGHT},
-            {hw.hw_sensors_wrist_tilt, SensorType::SENSOR_TYPE_WRIST_TILT},
-            {hw.hw_accelerometer_uncalibrated, SensorType::SENSOR_TYPE_ACCELEROMETER_UNCALIBRATED},
-            {hw.hw_sensors_gyroscope_uncalibrated, SensorType::SENSOR_TYPE_GYROSCOPE_UNCALIBRATED},
-            {hw.hw_sensors_magnetic_field_uncalibrated,
-             SensorType::SENSOR_TYPE_MAGNETOMETER_UNCALIBRATED},
-            {hw.hw_sensor_hinge, SensorType::SENSOR_TYPE_HINGE_ANGLE},
+        {hw.hw_accelerometer, SensorType::SENSOR_TYPE_ACCELEROMETER},
+        {hw.hw_gyroscope, SensorType::SENSOR_TYPE_GYROSCOPE},
+        {hw.hw_sensors_magnetic_field, SensorType::SENSOR_TYPE_MAGNETOMETER},
+        {hw.hw_sensors_orientation, SensorType::SENSOR_TYPE_ORIENTATION},
+        {hw.hw_sensors_temperature, SensorType::SENSOR_TYPE_AMBIENT_TEMPERATURE},
+        {hw.hw_sensors_proximity, SensorType::SENSOR_TYPE_PROXIMITY},
+        {hw.hw_sensors_light, SensorType::SENSOR_TYPE_LIGHT},
+        {hw.hw_sensors_pressure, SensorType::SENSOR_TYPE_PRESSURE},
+        {hw.hw_sensors_humidity, SensorType::SENSOR_TYPE_RELATIVE_HUMIDITY},
+        {hw.hw_sensors_heart_rate, SensorType::SENSOR_TYPE_HEART_RATE},
+        {hw.hw_sensors_rgbclight, SensorType::SENSOR_TYPE_RGBC_LIGHT},
+        {hw.hw_sensors_wrist_tilt, SensorType::SENSOR_TYPE_WRIST_TILT},
+        {hw.hw_accelerometer_uncalibrated, SensorType::SENSOR_TYPE_ACCELEROMETER_UNCALIBRATED},
+        {hw.hw_sensors_gyroscope_uncalibrated, SensorType::SENSOR_TYPE_GYROSCOPE_UNCALIBRATED},
+        {hw.hw_sensors_magnetic_field_uncalibrated,
+         SensorType::SENSOR_TYPE_MAGNETOMETER_UNCALIBRATED},
+        {hw.hw_sensor_hinge, SensorType::SENSOR_TYPE_HINGE_ANGLE},
     };
     for (const auto& [enabled, sensor_type] : sensor_flags) {
         if (enabled) {
@@ -180,10 +215,9 @@ void PopulateInputCapabilities(const HardwareConfig& hw, InputCapabilities* inpu
     }
     // TODO(jansene): These should align with what we tell the system image.
     // i.e. features: VirtioMouse, VirtioDualModeMouse
-    // Mouse pointer and relative mouse are intentionally not advertised yet.
-    if (hw.hw_rotaryInput) {
-        input_caps->add_supported_features(InputFeature::INPUT_FEATURE_ROTARY_ENCODER);
-    }
+    // Stylus (MultiTouchInputMapper zeroes tilt without a dedicated tablet
+    // sink), mouse pointer, relative mouse, and rotary encoder are
+    // intentionally not advertised until their guest sinks are wired.
 }
 
 void PopulateVmCapabilities(VmCapabilities* vm_caps) {
@@ -234,6 +268,9 @@ Status CapabilitiesServiceImpl::GetDeviceCapabilities(
     }
     if (hw.hw_gps) {
         PopulateLocationCapabilities(reply->mutable_location());
+    }
+    if (hw.hw_audioOutput || hw.hw_audioInput) {
+        PopulateAudioCapabilities(hw, reply->mutable_audio());
     }
     PopulateSensorsCapabilities(hw, reply->mutable_sensors());
     PopulateInputCapabilities(hw, reply->mutable_input());

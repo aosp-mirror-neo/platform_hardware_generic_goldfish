@@ -24,6 +24,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -45,6 +46,7 @@
 #include "android/goldfish/input_paths.h"
 #include "android/main_help.h"
 #include "android/status/status_macros.h"
+#include "feature_pattern_downloader.h"
 #include "goldfish/async/libuv_event_loop.h"
 #include "goldfish/async/libuv_process_launcher.h"
 #include "goldfish/async/libuv_signal_handlers.h"
@@ -424,8 +426,8 @@ int main(int argc, char** argv) {
     // launcher's own environment to locate the crashpad_handler executable.
     android::base::System::SetEnvironmentVariable("AEMU_CRASHPAD_HANDLER",
                                                   emulator_paths->crashpad_handler_binary.string());
-    if (!android::crashreport::CrashSystem::get().initialize()) {
-        LOG(WARNING) << "Failed to initialize crashreporting.";
+    if (auto status = android::crashreport::CrashSystem::get().initialize(); !status.ok()) {
+        LOG(WARNING) << "Failed to initialize crashreporting: " << status.message();
     }
 
     absl::FailureSignalHandlerOptions options;
@@ -557,6 +559,10 @@ int main(int argc, char** argv) {
             .host_ini_path = emulator_paths->advanced_features,
             .guest_ini_path = (*avd)->GetSystemImagePaths().advanced_features,
             .user_ini_path = user_paths->user_directory / "advancedFeatures.ini",
+            .cached_patterns_path =
+                    user_paths->user_directory / android::goldfish::kCachedFeaturePatternsFileName,
+            .default_patterns_path = emulator_paths->feature_patterns,
+            .emulator_version = goldfish::version::GetEmulatorVersion(),
             .guest_api_level = (*avd)->ApiLevel(),
             .avd_feature_flags = (*avd)->Hw().hw_featureflags,
             .env_feature_flags = android::base::System::Get()->EnvGet("ANDROID_EMULATOR_FEATURES"),
@@ -565,8 +571,9 @@ int main(int argc, char** argv) {
     }
 
     if (android::goldfish::ShouldTrampolineToQemu2(avd, feature_flags)) {
-        auto s = android::goldfish::TrampolineToQemu2(emulator_paths->launcher_directory,
-                                                      std::move(args_copy));
+        auto s = android::goldfish::TrampolineToQemu2(
+                emulator_paths->launcher_directory, std::move(args_copy),
+                [&] { reporter->Shutdown(); });
         LOG(ERROR) << s;
         return 1;
     }
@@ -581,10 +588,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Runs a one-shot update check on a background thread (throttled via
-    // emu-update-last-check.ini) and logs a notice if a newer version is available.
-    // If still in flight when main() exits, ScopedUpdateCheck cancels and joins the thread.
+    // Runs a one-shot update check and server feature pattern refresh on background
+    // threads (throttled via emu-update-last-check.ini and emu-last-feature-flags.protobuf).
+    // If still in flight when main() exits, the scoped handles cancel and join their threads.
     goldfish::update_check::ScopedUpdateCheck update_check;
+    std::jthread feature_pattern_download;
     if (android_build_out.empty()) {
         update_check = goldfish::update_check::StartAsyncUpdateCheck({
             .user_directory = user_paths->user_directory,
@@ -601,6 +609,14 @@ int main(int argc, char** argv) {
             .interval = kUpdateCheckInterval,
             .http_timeout = kUpdateCheckHttpTimeout,
         });
+        if (goldfish::update_check::SdkPackage::Parse(goldfish::version::GetEmulatorVersion(),
+                                                      goldfish::version::GetEmulatorBuildId())
+                    .has_value()) {
+            feature_pattern_download = android::goldfish::StartAsyncFeaturePatternDownload({
+                .cached_patterns_path = user_paths->user_directory /
+                                        android::goldfish::kCachedFeaturePatternsFileName,
+            });
+        }
     }
 
     bool set_qemu_version = true;

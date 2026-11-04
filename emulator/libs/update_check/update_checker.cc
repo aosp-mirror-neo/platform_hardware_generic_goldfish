@@ -61,41 +61,36 @@ std::optional<HostKey> MapHost(std::string_view platform, std::string_view targe
     const bool is_arm64 =
             absl::StartsWith(target_cpu, "arm") || absl::StartsWith(target_cpu, "aarch") ||
             absl::StrContains(target_cpu, "arm64") || absl::StrContains(target_cpu, "aarch64");
-    const bool is_x64 =
-            absl::StartsWith(target_cpu, "x86") || absl::StrContains(target_cpu, "x86_64") ||
-            absl::StrContains(target_cpu, "x64") || absl::StrContains(target_cpu, "amd64") ||
-            target_cpu == "k8";
+    const bool is_x64 = absl::StartsWith(target_cpu, "x86") ||
+                        absl::StrContains(target_cpu, "x86_64") ||
+                        absl::StrContains(target_cpu, "x64") ||
+                        absl::StrContains(target_cpu, "amd64") || target_cpu == "k8";
     if (!is_arm64 && !is_x64) {
         return std::nullopt;
     }
-    const std::string arch = is_arm64 ? "aarch64" : "x64";
-    const std::string url_arch = is_arm64 ? "arm64" : "x86_64";
 
+    std::string os;
+    std::string url_os;
     if (platform == "linux" || absl::StartsWith(platform, "linux_")) {
-        return HostKey{
-            .os = "linux",
-            .arch = arch,
-            .url_os = "Linux",
-            .url_arch = url_arch,
-        };
+        os = "linux";
+        url_os = "Linux";
+    } else if (platform == "windows" || absl::StartsWith(platform, "windows_")) {
+        os = "windows";
+        url_os = "Windows";
+    } else if (platform == "darwin" || platform == "macosx" ||
+               absl::StartsWith(platform, "darwin_")) {
+        os = "macosx";
+        url_os = "Mac";
+    } else {
+        return std::nullopt;
     }
-    if (platform == "windows" || absl::StartsWith(platform, "windows_")) {
-        return HostKey{
-            .os = "windows",
-            .arch = arch,
-            .url_os = "Windows",
-            .url_arch = url_arch,
-        };
-    }
-    if (platform == "darwin" || platform == "macosx" || absl::StartsWith(platform, "darwin_")) {
-        return HostKey{
-            .os = "macosx",
-            .arch = arch,
-            .url_os = "Mac",
-            .url_arch = url_arch,
-        };
-    }
-    return std::nullopt;
+
+    return HostKey{
+        .os = std::move(os),
+        .arch = is_arm64 ? "aarch64" : "x64",
+        .url_os = std::move(url_os),
+        .url_arch = is_arm64 ? "arm64" : "x86_64",
+    };
 }
 
 std::string NormalizeFourPartVersion(std::string_view version) {
@@ -190,13 +185,21 @@ void RecordUpdateCheckTime(const fs::path& user_directory, std::string_view data
     }
 }
 
-absl::StatusOr<std::optional<std::string>> CheckForUpdateImpl(
-        const UpdateCheckOptions& options, goldfish::network::HttpClient& http_client,
-        absl::Time now, const std::function<bool()>& cancel) {
-    const auto running = SdkPackage::Parse(options.emulator_version, options.build_id);
+// Parses the running emulator version and build ID if it is a release build.
+std::optional<SdkPackage> ParseRunningPackage(const UpdateCheckOptions& options) {
+    auto running = SdkPackage::Parse(options.emulator_version, options.build_id);
     if (!running.has_value()) {
         VLOG(1) << "UpdateCheck: skipping check for non-release build (" << options.emulator_version
                 << "-" << options.build_id << ")";
+    }
+    return running;
+}
+
+absl::StatusOr<std::optional<std::string>> CheckForUpdateImpl(
+        const UpdateCheckOptions& options, goldfish::network::HttpClient& http_client,
+        absl::Time now, const std::function<bool()>& cancel) {
+    const auto running = ParseRunningPackage(options);
+    if (!running.has_value()) {
         return std::nullopt;
     }
 
@@ -224,8 +227,8 @@ absl::StatusOr<std::optional<std::string>> CheckForUpdateImpl(
         return xml.status();
     }
 
-    const auto latest = FindLatestPackage(*xml, host->os, host->arch, options.package_prefix,
-                                          options.channel);
+    const auto latest =
+            FindLatestPackage(*xml, host->os, host->arch, options.package_prefix, options.channel);
     if (!latest.ok()) {
         return latest.status();
     }
@@ -251,9 +254,7 @@ absl::StatusOr<std::optional<std::string>> CheckForUpdate(
 }
 
 ScopedUpdateCheck StartAsyncUpdateCheck(UpdateCheckOptions options) {
-    if (!SdkPackage::Parse(options.emulator_version, options.build_id).has_value()) {
-        VLOG(1) << "UpdateCheck: skipping async check for non-release build ("
-                << options.emulator_version << "-" << options.build_id << ")";
+    if (!ParseRunningPackage(options).has_value()) {
         return ScopedUpdateCheck{};
     }
 

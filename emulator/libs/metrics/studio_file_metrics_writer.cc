@@ -101,7 +101,7 @@ StudioFileMetricsWriter::StudioFileMetricsWriter(const fs::path& spool_dir,
                   absl::Seconds(10), absl::Seconds(10))) {}
 
 StudioFileMetricsWriter::~StudioFileMetricsWriter() {
-    max_file_duration_timer_->Cancel();
+    max_file_duration_timer_.reset();
     absl::MutexLock lock(mutex_);
     FinalizeCurrentFile();
 }
@@ -227,6 +227,22 @@ std::vector<std::string> StudioFileMetricsWriter::FinalizeAbandonedSessionFiles(
         }
     }
     return abandoned_sessions;
+}
+
+// static
+void StudioFileMetricsWriter::FinalizeProcessFiles(const fs::path& spool_dir,
+                                                   std::string_view session_id, uint32_t pid) {
+    for (const auto& path : android::base::file::scan_dir(spool_dir, /*fullPath=*/true)) {
+        const std::string filename = path.filename().string();
+        std::string_view matched_session_id;
+        uint32_t matched_pid = 0;
+        if (!RE2::FullMatch(filename, *kOpenFileRegex, &matched_session_id, &matched_pid)) {
+            continue;
+        }
+        if (matched_session_id == session_id && matched_pid == pid) {
+            FinalizeFile(path);
+        }
+    }
 }
 
 }  // namespace goldfish::metrics

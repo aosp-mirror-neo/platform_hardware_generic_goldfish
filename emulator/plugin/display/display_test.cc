@@ -37,6 +37,7 @@
 #include "goldfish/display/frame.h"
 #include "goldfish/display/test/fake_multi_display.h"
 #include "goldfish/sensors/physical_model.h"
+#include "goldfish/system/testing/fake_clocks.h"
 
 using goldfish::async::EventLoop;
 using goldfish::display::Dimensions;
@@ -46,7 +47,6 @@ using goldfish::display::FrameEvent;
 using goldfish::display::FrameId;
 using goldfish::display::IDisplay;
 using goldfish::display::ImageRotation;
-using goldfish::display::MultiTouchType;
 using goldfish::display::ReadRequest;
 using goldfish::display::ReadTarget;
 using goldfish::display::Slot;
@@ -74,9 +74,6 @@ class TestDisplay : public IDisplay {
     TestDisplay(EventLoop* loop, uint8_t id, uint32_t width, uint32_t height)
             : IDisplay(loop, id, width, height) {}
 
-    void SendMultiTouchEvent(uint8_t /*slot*/, int /*x*/, int /*y*/,
-                             MultiTouchType /*type*/) override {}
-    void SendMouseEvent(int /*x*/, int /*y*/, int /*button_mask*/) override {}
     void SendEvDevEvent(uint16_t /*type*/, uint16_t /*code*/, uint32_t /*value*/) override {}
     void SendEvDevReport(EvDevEvents /*events*/) override {}
     void WriteEvDevReportOnLoop(absl::Span<const EvDevEvent> /*events*/) override {}
@@ -384,7 +381,8 @@ TEST_F(DisplayTest, SetRotationEmitsFrameWithUpdatedRotation) {
 
 TEST_F(DisplayTest, MultiDisplayPropagatesPhysicalModelRotationToDisplays) {
     android::goldfish::HardwareConfig hw = android::goldfish::FakeHardwareConfig::GetHwConfig();
-    goldfish::sensors::PhysicalModel physical_model(hw);
+    goldfish::system::testing::FakeVirtualClock virtual_clock;
+    goldfish::sensors::PhysicalModel physical_model(hw, virtual_clock);
     goldfish::display::test::FakeMultiDisplay multi_display(loop_.get());
     auto sub = multi_display.RegisterPhysicalModel(physical_model);
 

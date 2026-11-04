@@ -1,12 +1,226 @@
 load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load(
+    "@qemu//:google/build/qtest.bzl",
+    "QTEST_COPTS",
+    "QTEST_LOCAL_DEFINES",
+    "QTEST_TARGET_COMPATIBLE_WITH",
+)
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
 WEBRTC_COPTS = select({
     "@platforms//os:windows": ["/GR-"],
-    "//conditions:default": ["-fno-rtti"],
+    "//conditions:default": [
+        "-fno-rtti",
+        "-Wno-nullability-completeness",
+    ],
 })
+
+cc_library(
+    name = "virtual_audio_pacer",
+    srcs = ["virtual_audio_pacer.cc"],
+    hdrs = ["include/goldfish/audio/virtual_audio_pacer.h"],
+    includes = ["include"],
+    deps = [
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/numeric:int128",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_test(
+    name = "virtual_audio_pacer_test",
+    size = "small",
+    srcs = ["virtual_audio_pacer_test.cc"],
+    deps = [
+        ":virtual_audio_pacer",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_library(
+    name = "pcm_format",
+    srcs = ["pcm_format.cc"],
+    hdrs = ["include/goldfish/audio/pcm_format.h"],
+    includes = ["include"],
+)
+
+cc_library(
+    name = "pcm_pull_pipeline",
+    srcs = ["pcm_pull_pipeline.cc"],
+    hdrs = ["include/goldfish/audio/pcm_pull_pipeline.h"],
+    copts = WEBRTC_COPTS,
+    includes = ["include"],
+    deps = [
+        ":pcm_format",
+        "@abseil-cpp//absl/log:check",
+        "@webrtc//common_audio",
+    ],
+)
+
+cc_test(
+    name = "pcm_pull_pipeline_test",
+    size = "small",
+    srcs = ["pcm_pull_pipeline_test.cc"],
+    copts = WEBRTC_COPTS,
+    deps = [
+        ":pcm_format",
+        ":pcm_pull_pipeline",
+        "//emulator/libs/test:googletest_main",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "audio_input_mux",
+    srcs = ["audio_input_mux.cc"],
+    hdrs = ["include/goldfish/audio/audio_input_mux.h"],
+    copts = WEBRTC_COPTS,
+    includes = ["include"],
+    deps = [
+        ":pcm_format",
+        ":pcm_pull_pipeline",
+        ":virtual_audio_pacer",
+        "//emulator/plugin/vminterface:vm_lock",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/base:no_destructor",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_test(
+    name = "audio_input_mux_test",
+    size = "small",
+    srcs = ["audio_input_mux_test.cc"],
+    copts = WEBRTC_COPTS,
+    deps = [
+        ":audio_input_mux",
+        ":pcm_format",
+        ":test_bql",
+        ":test_qemu_audio_stub",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/vminterface:vm_lock",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "goldfish_audio_mux_hdrs",
+    hdrs = ["include/goldfish/audio/goldfish_audio_mux.h"],
+    includes = ["include"],
+)
+
+cc_library(
+    name = "goldfish_audio_mux",
+    srcs = ["goldfish_audio_mux.cc"],
+    hdrs = ["include/goldfish/audio/goldfish_audio_mux.h"],
+    copts = WEBRTC_COPTS,
+    includes = ["include"],
+    deps = [
+        ":audio_input_mux",
+        ":goldfish_audio_mux_hdrs",
+        ":pcm_format",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/time",
+        "@qemu//:aemu_func_defs",
+        "@qemu//:qemu-headers-exported",
+    ],
+)
+
+cc_library(
+    name = "qemu_audio_inject",
+    srcs = ["qemu_audio_inject.cc"],
+    hdrs = ["include/goldfish/audio/qemu_audio_inject.h"],
+    copts = WEBRTC_COPTS,
+    includes = ["include"],
+    deps = [
+        ":audio_input_mux",
+        ":goldfish_audio_mux_hdrs",
+        ":pcm_format",
+        "//emulator/plugin/vminterface:vm_lock",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/synchronization",
+        "@qemu//:aemu_func_defs",
+        "@qemu//:qemu-headers-exported",
+    ],
+)
+
+cc_test(
+    name = "qemu_audio_inject_test",
+    size = "small",
+    srcs = ["qemu_audio_inject_test.cc"],
+    copts = WEBRTC_COPTS,
+    deps = [
+        ":audio_input_mux",
+        ":pcm_format",
+        ":qemu_audio_inject",
+        ":test_bql",
+        ":test_qemu_audio_stub",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/vminterface:vm_lock",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_library(
+    name = "webrtc_microphone",
+    srcs = ["webrtc_microphone.cc"],
+    hdrs = ["include/goldfish/audio/webrtc_microphone.h"],
+    includes = ["include"],
+    deps = [
+        ":audio_input_mux",
+        ":pcm_format",
+        ":qemu_audio_inject",
+        "//emulator/libs/async:async_api",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+    ],
+)
+
+cc_test(
+    name = "webrtc_microphone_test",
+    size = "small",
+    srcs = ["webrtc_microphone_test.cc"],
+    deps = [
+        ":audio_input_mux",
+        ":pcm_format",
+        ":qemu_audio_inject",
+        ":test_bql",
+        ":test_qemu_audio_stub",
+        ":webrtc_microphone",
+        "//emulator/libs/async:async_testing",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/vminterface:vm_lock",
+        "@abseil-cpp//absl/base:log_severity",
+        "@abseil-cpp//absl/log:scoped_mock_log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time",
+        "@googletest//:gtest",
+    ],
+)
 
 cc_library(
     name = "qemu_audio_capture",
@@ -14,12 +228,24 @@ cc_library(
     hdrs = ["include/goldfish/audio/qemu_audio_capture.h"],
     includes = ["include"],
     deps = [
+        ":goldfish_audio_mux_hdrs",
         "//emulator/plugin/vminterface:vm_lock",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/status",
         "@qemu//:aemu_func_defs",
         "@qemu//:qemu-headers-exported",
+    ],
+)
+
+cc_library(
+    name = "test_bql",
+    testonly = True,
+    hdrs = ["test_bql.h"],
+    deps = [
+        "//emulator/plugin/vminterface:vm_lock",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/synchronization",
     ],
 )
 
@@ -78,13 +304,104 @@ cc_test(
     ],
 )
 
+# buildifier: leave-alone
+cc_binary(
+    name = "qtest_audio_inject_plugin",
+    testonly = True,
+    srcs = ["qtest_audio_inject_plugin.cc"],
+    copts = WEBRTC_COPTS,
+    linkshared = True,
+    target_compatible_with = QTEST_TARGET_COMPATIBLE_WITH,
+    linkopts = select({
+        "@platforms//os:macos": ["-undefined dynamic_lookup"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":audio_input_mux",
+        ":goldfish_audio_mux",
+        ":pcm_format",
+        ":qemu_audio_inject",
+        "@abseil-cpp//absl/status",
+        "@qemu//:aemu_func_defs",
+        "@qemu//:qemu-headers-exported",
+    ],
+)
+
+# Mirrors qemu_qtest() from @qemu//:google/build/qtest.bzl. The macro itself
+# cannot be called from @goldfish yet because it depends on @qemu//:qemu-headers
+# (private to @qemu) rather than @qemu//:qemu-headers-exported.
+cc_test(
+    name = "virtio_snd_inject_qtest",
+    size = "small",
+    srcs = ["virtio_snd_inject_qtest.c"],
+    args = [
+        "--tap",
+        "-k",
+    ],
+    copts = QTEST_COPTS,
+    data = [
+        ":qtest_audio_inject_plugin",
+        "@qemu//:goldfish_x86_64",
+        "@qemu//:qemu-img",
+        "@qemu//:qemu-keymaps",
+        "@qemu//:qemu-system-x86_64",
+        "@qemu//:qtest-roms",
+    ],
+    env = {
+        "ASAN_OPTIONS": "detect_leaks=0",
+        "QTEST_GOLDFISH_EXTRA_PLUGIN": "$(rootpath :qtest_audio_inject_plugin)",
+        "QTEST_GOLDFISH_PLUGIN": "$(rootpath @qemu//:goldfish_x86_64)",
+        "QTEST_QEMU_BINARY": "$(rootpath @qemu//:qemu-system-x86_64)",
+        "QTEST_QEMU_IMG": "$(rootpath @qemu//:qemu-img)",
+    },
+    linkopts = select({
+        "@platforms//os:macos": [
+            "-framework CoreFoundation",
+            "-framework IOKit",
+        ],
+        "@goldfish_build//platforms:is_linux_aarch64": ["-lrt"],
+        "@goldfish_build//platforms:is_linux_x64": ["-lrt"],
+        "//conditions:default": [],
+    }),
+    linkstatic = True,
+    local_defines = QTEST_LOCAL_DEFINES,
+    target_compatible_with = QTEST_TARGET_COMPATIBLE_WITH,
+    deps = [
+        "@glib//glib",
+        "@glib//gmodule",
+        "@qemu//:libprintstub",
+        "@qemu//:libqemuutil",
+        "@qemu//:libqom",
+        "@qemu//:libqos",
+        "@qemu//:qemu-headers-exported",
+    ] + select({
+        "@goldfish_build//platforms:is_linux_x64": [
+            "@qemu//google/compat/linux:compat",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
 clang_tidy_test(
     name = "tidy",
     targets = [
+        ":audio_input_mux",
+        ":audio_input_mux_test",
+        ":goldfish_audio_mux",
+        ":goldfish_audio_mux_hdrs",
+        ":pcm_format",
+        ":pcm_pull_pipeline",
+        ":pcm_pull_pipeline_test",
         ":qemu_audio_capture",
         ":qemu_audio_capture_test",
+        ":qemu_audio_inject",
+        ":qemu_audio_inject_test",
         ":qemu_audio_source",
         ":qemu_audio_source_test",
+        ":qtest_audio_inject_plugin",
+        ":test_bql",
+        ":virtual_audio_pacer",
+        ":virtual_audio_pacer_test",
     ],
     tidy_config_file = "//:clang_tidy_config",
 )

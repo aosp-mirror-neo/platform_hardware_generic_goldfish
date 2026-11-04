@@ -30,6 +30,8 @@
 #include <mftransform.h>
 #include <windows.h>
 
+#include "android/base/scoped_com_initializer.h"
+
 namespace goldfish::videobridge {
 
 struct H264BitstreamInfo {
@@ -182,6 +184,7 @@ class MFVideoEncoderH264 : public webrtc::VideoEncoder {
     webrtc::VideoCodec codec_settings_ ABSL_GUARDED_BY(mutex_);
 
     // Media Foundation COM Objects
+    const android::base::ScopedComInitializer com_initializer_;
     ComPtr<IMFTransform> encoder_mft_;
     ComPtr<IMFMediaEventGenerator> event_generator_;
     ComPtr<IMFMediaType> input_type_;
@@ -201,7 +204,6 @@ class MFVideoEncoderH264 : public webrtc::VideoEncoder {
     ComPtr<IMFMediaBuffer> output_buffer_;
     ComPtr<IMFSample> output_sample_;
 
-    bool com_initialized_ = false;
     bool is_async_mft_ = false;
     uint32_t pending_input_count_ ABSL_GUARDED_BY(mutex_) = 0;
     uint32_t pending_output_count_ ABSL_GUARDED_BY(mutex_) = 0;

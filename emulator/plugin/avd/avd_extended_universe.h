@@ -40,6 +40,10 @@
 #include "goldfish/metrics/snapshot_metrics.h"
 #include "vcpu_event_loop.h"
 
+extern "C" {
+typedef struct VMChangeStateEntry VMChangeStateEntry;
+}
+
 namespace goldfish::avd {
 
 struct AvdExtendedUniverse : public AvdUniverse {
@@ -55,6 +59,7 @@ struct AvdExtendedUniverse : public AvdUniverse {
 
     void WaitUntilEventLoopsIdle();
     void ShutdownQemuLoop();
+    void OnPreGrpcShutdown() override;
     async::EventLoop& GetQemuEventLoop() override;
     metrics::MetricsReporter& GetMetricsReporter() override;
     android::goldfish::VmOperations& GetVmOperations() override;
@@ -88,12 +93,16 @@ struct AvdExtendedUniverse : public AvdUniverse {
     devices::ConnectorRegistry test_tools_connector_registry;
     avd_universe::battery::ObservableBattery::ScopedCallbackHandle battery_subscription;
     std::unique_ptr<metrics::MetricsReporter> metrics_reporter;
-    std::shared_ptr<async::EventLoop::Timer> metrics_ping_timer;
+    async::EventLoop::ScopedTimer metrics_ping_timer;
 
     std::unique_ptr<metrics::PerfStatReporter> perf_stat_reporter;
-    std::shared_ptr<async::EventLoop::Timer> perf_stat_reporter_task;
+    async::EventLoop::ScopedTimer perf_stat_reporter_task;
 
   private:
+    using DisplayEventSubscription =
+            std::unique_ptr<android::base::eventing::ScopedEventCallback<display::IMultiDisplay,
+                                                                         display::DisplayEvent>>;
+
     absl::Status Initialize();
 
     void OnSaveProps(archive::IWriter&) const;
@@ -106,6 +115,9 @@ struct AvdExtendedUniverse : public AvdUniverse {
 
     void SyncGuestTimeToHost();
 
+    template <typename State>
+    static void OnVmStateChanged(void* opaque, bool running, State state);
+
     metrics::QuickbootMetricsState quickboot_metrics_;
 
     // Declared after the QEMU loop and the multi-display they use, and in
@@ -116,6 +128,9 @@ struct AvdExtendedUniverse : public AvdUniverse {
     std::unique_ptr<::goldfish::grpc::v2::MultiDisplayTouchDevices> touch_devices_;
     std::unique_ptr<::android::emulation::control::keyboard::QemuKeyboardSink> keyboard_sink_;
     std::shared_ptr<::goldfish::grpc::v2::InputDispatcher> input_dispatcher_;
+    DisplayEventSubscription input_display_subscription_;
+    VMChangeStateEntry* vm_state_entry_ = nullptr;
+    bool snapshot_loaded_ = false;
 };
 
 }  // namespace goldfish::avd

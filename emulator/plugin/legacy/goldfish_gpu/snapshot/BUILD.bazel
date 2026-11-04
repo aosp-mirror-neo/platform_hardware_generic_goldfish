@@ -1,0 +1,165 @@
+load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+# Snapshot state and formats: the kRunning/kQuiesced/kSaved/kPreLoaded phase tracker, the
+# VMState meta-blob codec, the gfxstream_render.bin / gfxstream_textures.bin files and their
+# gfxstream::Stream adapters, and the last posted frame that is saved and replayed.
+# Nothing here changes the wire format without a version bump in gpu_snapshot_codec.
+
+package(
+    default_applicable_licenses = ["//emulator:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "snapshot_streams",
+    srcs = ["snapshot_streams.cc"],
+    hdrs = ["include/goldfish/legacy/goldfish_gpu/snapshot/snapshot_streams.h"],
+    includes = ["include"],
+    deps = [
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@gfxstream//host:gfxstream_backend_headers",
+    ],
+)
+
+cc_test(
+    name = "snapshot_streams_test",
+    size = "small",
+    srcs = ["snapshot_streams_test.cc"],
+    deps = [
+        ":snapshot_streams",
+        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/system:test-headers",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/status",
+        "@gfxstream//host:gfxstream_backend_headers",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "gpu_snapshot_codec",
+    srcs = ["gpu_snapshot_codec.cc"],
+    hdrs = ["include/goldfish/legacy/goldfish_gpu/snapshot/gpu_snapshot_codec.h"],
+    includes = ["include"],
+    deps = [
+        ":snapshot_streams",
+        "//emulator/plugin/legacy/goldfish_gpu/api:goldfish_gpu_interface",
+        "@abseil-cpp//absl/functional:function_ref",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@gfxstream//host:gfxstream_backend_headers",
+    ],
+)
+
+cc_test(
+    name = "gpu_snapshot_codec_test",
+    size = "small",
+    srcs = ["gpu_snapshot_codec_test.cc"],
+    deps = [
+        ":gpu_snapshot_codec",
+        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@gfxstream//host:gfxstream_backend_headers",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "gpu_snapshot_files",
+    srcs = ["gpu_snapshot_files.cc"],
+    hdrs = ["include/goldfish/legacy/goldfish_gpu/snapshot/gpu_snapshot_files.h"],
+    includes = ["include"],
+    deps = [
+        ":snapshot_streams",
+        "//emulator/libs/status_macros",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@gfxstream//host:gfxstream_backend_headers",
+    ],
+)
+
+cc_test(
+    name = "gpu_snapshot_files_test",
+    size = "small",
+    srcs = ["gpu_snapshot_files_test.cc"],
+    deps = [
+        ":gpu_snapshot_files",
+        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/system:test-headers",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/legacy/goldfish_gpu/testing:mock_gfxstream",
+        "@abseil-cpp//absl/status",
+        "@gfxstream//host:gfxstream_backend_headers",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "snapshot_phase_tracker",
+    srcs = ["snapshot_phase_tracker.cc"],
+    hdrs = ["include/goldfish/legacy/goldfish_gpu/snapshot/snapshot_phase_tracker.h"],
+    includes = ["include"],
+    deps = ["@abseil-cpp//absl/log"],
+)
+
+cc_test(
+    name = "snapshot_phase_tracker_test",
+    size = "small",
+    srcs = ["snapshot_phase_tracker_test.cc"],
+    deps = [
+        ":snapshot_phase_tracker",
+        "//emulator/libs/test:googletest_main",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "posted_frame_cache",
+    srcs = ["posted_frame_cache.cc"],
+    hdrs = ["include/goldfish/legacy/goldfish_gpu/snapshot/posted_frame_cache.h"],
+    includes = ["include"],
+    deps = [
+        ":gpu_snapshot_codec",
+        "//emulator/plugin/legacy/goldfish_gpu/api:goldfish_gpu_interface",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/synchronization",
+        "@gfxstream//host:gfxstream_backend_headers",
+    ],
+)
+
+cc_test(
+    name = "posted_frame_cache_test",
+    size = "small",
+    srcs = ["posted_frame_cache_test.cc"],
+    deps = [
+        ":posted_frame_cache",
+        "//emulator/libs/test:googletest_main",
+        "@googletest//:gtest",
+    ],
+)
+
+clang_tidy_test(
+    name = "tidy",
+    targets = [
+        ":snapshot_streams",
+        ":snapshot_streams_test",
+        ":gpu_snapshot_codec",
+        ":gpu_snapshot_codec_test",
+        ":gpu_snapshot_files",
+        ":gpu_snapshot_files_test",
+        ":snapshot_phase_tracker",
+        ":snapshot_phase_tracker_test",
+        ":posted_frame_cache",
+        ":posted_frame_cache_test",
+    ],
+    tidy_config_file = "//:clang_tidy_config",
+)

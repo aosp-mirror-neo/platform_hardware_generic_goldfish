@@ -3,7 +3,6 @@ load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_license//rules:license.bzl", "license")
-load("//emulator/tools:plugins.bzl", "collect_plugins")
 
 package(
     default_applicable_licenses = ["//emulator:license"],
@@ -48,8 +47,7 @@ cc_library(
     visibility = ["//visibility:private"],
     deps = [
         ":gfxstream_renderer_headers",
-        "@glib//glib:glib_import",
-        "@glib//gmodule:gmodule_import",
+        "@qemu//:glib-headers",
     ],
 )
 
@@ -65,7 +63,7 @@ cc_library(
     deps = [
         ":gfxstream_backend_loader",
         ":gfxstream_renderer_headers",
-        "@glib//glib:glib_import",
+        "@qemu//:glib-headers",
     ],
 )
 
@@ -191,25 +189,12 @@ _FAKE_INCOMPLETE_RLOCATION = select({
     "//conditions:default": {"GFXSTREAM_FAKE_BACKEND_RLOCATION": "$(rlocationpath :fake_incomplete/libgfxstream_backend.so)"},
 })
 
-collect_plugins(
-    name = "binplace",
-    output_dir = ".",
-    plugins = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
-)
-
 [
     cc_test(
         name = "gfxstream_backend_loader_" + scenario + "_test",
         size = "small",
         srcs = ["gfxstream_backend_loader_test.cc"],
-        data = [":binplace"] + extra_data,
-        dynamic_deps = [
-            "@glib//glib:glib_shared",
-            "@glib//gmodule:gmodule_shared",
-        ],
+        data = extra_data,
         env = {
             "GFXSTREAM_LOADER_TEST_SCENARIO": scenario,
             "ANDROID_EMULATOR_LIBRARY_DIR": "/nonexistent/测试_🚀_é",
@@ -218,8 +203,8 @@ collect_plugins(
             ":gfxstream_backend_loader",
             "//emulator/libs/system:bazel_info",
             "//emulator/libs/test:googletest_main",
-            "@glib//glib:glib_import",
-            "@glib//gmodule:gmodule_import",
+            "@glib//glib",
+            "@glib//gmodule",
             "@googletest//:gtest",
         ],
     )
@@ -236,11 +221,7 @@ cc_test(
     name = "gfxstream_renderer_test",
     size = "small",
     srcs = ["gfxstream_renderer_test.cc"],
-    data = [":binplace"] + _FAKE_COMPLETE_DATA,
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
+    data = _FAKE_COMPLETE_DATA,
     env = _FAKE_COMPLETE_RLOCATION,
     deps = [
         ":fake_gfxstream_backend_headers",
@@ -248,8 +229,8 @@ cc_test(
         ":gfxstream_renderer_headers",
         "//emulator/libs/system:bazel_info",
         "//emulator/libs/test:googletest_main",
-        "@glib//glib:glib_import",
-        "@glib//gmodule:gmodule_import",
+        "@glib//glib",
+        "@glib//gmodule",
         "@googletest//:gtest",
     ],
 )

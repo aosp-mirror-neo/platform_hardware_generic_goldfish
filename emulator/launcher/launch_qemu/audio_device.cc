@@ -21,23 +21,6 @@
 #include <string>
 #include <string_view>
 
-#ifdef _WIN32
-#include <system_error>
-
-// clang-format off
-// IWYU pragma: begin_keep
-#include <windows.h>
-#include <mmsystem.h>
-#include <DSound.h>
-#pragma comment(lib, "Dsound.lib")
-#include <objbase.h>
-#pragma comment(lib, "Ole32.lib")
-
-#include "goldfish/base/intrusive_ptr.h"
-// IWYU pragma: end_keep
-// clang-format on
-#endif
-
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
@@ -47,16 +30,6 @@
 #include "android/goldfish/avd.h"
 #include "goldfish/file/file.h"
 
-#ifdef _WIN32
-void IntrusivePtrAddRef(IUnknown* x) {
-    x->AddRef();
-}
-void IntrusivePtrRelease(IUnknown* x) {
-    x->Release();
-}
-void IntrusivePtrCtor(IUnknown* x) {}
-#endif
-
 namespace android::goldfish {
 
 absl::Status AudioDevice::initialize(const EmulatorConfig& emulator) {
@@ -65,14 +38,17 @@ absl::Status AudioDevice::initialize(const EmulatorConfig& emulator) {
 
 std::vector<std::string> AudioDevice::getQemuParameters(const EmulatorConfig& emulator) const {
     using namespace std::literals;
-    const std::string_view kID = "id=mainaudiodev"sv;
+    const std::string_view kHostId = "id=hostaudiodev"sv;
 
     std::string audioBackend = getAudioBackend(emulator.opts());
     std::string_view audioSettings;
-    if (audioBackend.empty()) {
+    if (emulator.opts().noaudio) {
         audioBackend = "none"s;
         audioSettings = "out.mixing-engine=off,in.mixing-engine=off"sv;
     } else {
+        if (audioBackend.empty()) {
+            audioBackend = "none"s;
+        }
         audioSettings =
                 "out.mixing-engine=on,out.fixed-settings=on,"
                 "out.frequency=48000,out.format=s16,out.channels=2,"
@@ -80,14 +56,18 @@ std::vector<std::string> AudioDevice::getQemuParameters(const EmulatorConfig& em
                 "in.frequency=48000,in.format=s16,in.channels=1"sv;
     }
 
+    // The host microphone stays muted unless the user opts in with -allow-host-audio.
+    const std::string muxDevice =
+            absl::StrCat("goldfish-audio-mux,host-audiodev=hostaudiodev,audiodev-id=mainaudiodev"sv,
+                         emulator.opts().allow_host_audio ? ",allow-host-audio=on"sv : ""sv);
+
     switch (emulator.avd().Arch()) {
     case Avd::CpuArchitecture::kArm:
     case Avd::CpuArchitecture::kX86:
         return {
-            "-audiodev"s,
-            absl::StrFormat("%s,%s,%s", audioBackend, kID, audioSettings),
-            "-device"s,
-            absl::StrCat("virtio-sound-pci,audiodev=mainaudiodev,addr="sv, addr()),
+            "-audiodev"s, absl::StrFormat("%s,%s,%s", audioBackend, kHostId, audioSettings),
+            "-device"s,   muxDevice,
+            "-device"s,   absl::StrCat("virtio-sound-pci,audiodev=mainaudiodev,addr="sv, addr()),
         };
 
     case Avd::CpuArchitecture::kRiscV:
@@ -109,7 +89,10 @@ std::string AudioDevice::getAudioBackend(const AndroidOptions& opts) {
     } else {
         std::string backend = detectHostAudioBackend();
         if (backend.empty()) {
-            LOG(WARNING) << "No audio backend detected, there will be no audio.";
+            LOG(WARNING) << "No host audio backend detected; host audio playback/capture is "
+                            "disabled and QEMU is falling back to the 'none' driver with software "
+                            "mixing enabled (pass '-audio <backend>' to select a host driver, or "
+                            "'-no-audio' to disable audio and suppress this warning).";
         }
         return backend;
     }
@@ -137,71 +120,10 @@ std::string AudioDevice::detectHostAudioBackend() {
     return "pa"s;
 }
 #elif defined(_WIN32)
-using ::goldfish::base::IntrusivePtr;
-
-namespace {
-std::string ToString(HRESULT hr) {
-    return std::system_category().message(hr);
-}
-
-template <class T>
-IntrusivePtr<T> CoCreateInstanceT(REFCLSID rclsid, LPUNKNOWN pUnkOuter, DWORD dwClsContext,
-                                  REFIID riid, const char* type_str) {
-    void* instance = nullptr;
-    HRESULT hr = ::CoCreateInstance(rclsid, pUnkOuter, dwClsContext, riid, &instance);
-    if (FAILED(hr)) {
-        LOG(WARNING) << "Could not create an instance of " << type_str << ": '" << ToString(hr)
-                     << "'";
-        return {};
-    } else if (!instance) {
-        LOG(WARNING) << "Could not create an instance of " << type_str
-                     << ": the system returned NULL with no error";
-        return {};
-    }
-
-    return IntrusivePtr<T>(static_cast<T*>(instance));
-}
-
-struct CallCoUninitialize {
-    ~CallCoUninitialize() { ::CoUninitialize(); }
-};
-}  // namespace
-
-// dsoundaudio.c (dsound_audio_init)
+// audio_wasapi.cc (WasapiRegisterTypes)
 std::string AudioDevice::detectHostAudioBackend() {
     using namespace std::literals;
-
-    if (HRESULT hr = ::CoInitialize(nullptr); FAILED(hr)) {
-        LOG(WARNING) << "CoInitialize failed with '" << ToString(hr) << "'";
-        return {};
-    }
-    const CallCoUninitialize callCoUninitialize;
-
-    const auto dsound = CoCreateInstanceT<IDirectSound>(CLSID_DirectSound, nullptr, CLSCTX_ALL,
-                                                        IID_IDirectSound, "IDirectSound");
-    if (!dsound) {
-        return {};
-    } else if (HRESULT hr = dsound->Initialize(nullptr); FAILED(hr)) {
-        LOG(WARNING) << "IDirectSound::Initialize failed with '" << ToString(hr) << "'";
-        return {};
-    }
-
-    if (HRESULT hr = dsound->SetCooperativeLevel(GetDesktopWindow(), DSSCL_PRIORITY); FAILED(hr)) {
-        LOG(WARNING) << "IDirectSound::SetCooperativeLevel failed with '" << ToString(hr) << "'";
-        return {};
-    }
-
-    const auto dsoundCapture =
-            CoCreateInstanceT<IDirectSoundCapture>(CLSID_DirectSoundCapture, nullptr, CLSCTX_ALL,
-                                                   IID_IDirectSoundCapture, "IDirectSoundCapture");
-    if (!dsoundCapture) {
-        return {};
-    } else if (HRESULT hr = dsoundCapture->Initialize(nullptr); FAILED(hr)) {
-        LOG(WARNING) << "IDirectSoundCapture::Initialize failed with '" << ToString(hr) << "'";
-        return {};
-    }
-
-    return "dsound"s;
+    return "wasapi"s;
 }
 #else
 #error Unexpected platform

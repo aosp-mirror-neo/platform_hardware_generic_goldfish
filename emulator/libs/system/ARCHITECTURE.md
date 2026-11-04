@@ -1,14 +1,16 @@
 # Component: Android System
 
-**Role:** Abstraction layer for Operating System services.
+**Role:** Abstraction layer for Operating System services and specialized monotonic/virtual clocks.
 **Location:** `hardware/generic/goldfish/emulator/libs/system`
-**Namespace:** `android::base`
+**Namespaces:** `android::base`, `goldfish::system`
 
 ## Integration Guide
 | Class / Interface | Bazel Target | Header Path | Description |
 | :--- | :--- | :--- | :--- |
 | `System` | `:system` | `include/android/base/system.h` | Abstract interface for Env vars, Time, Paths, OS Info. |
-| `Clock` | `:clock` | `include/android/base/clock.h` | Abstract interface for time retrieval (`virtual`, `realtime`, `host`). |
+| `SteadyClock` | `:steady_clock` | `include/goldfish/system/steady_clock.h` | Pure interface and `GetRealClock()` accessor for host monotonic elapsed duration (`std::chrono::steady_clock`). |
+| `VirtualClock` | `:virtual_clock` | `include/goldfish/system/virtual_clock.h` | Pure interface for guest virtual uptime (`absl::Duration`). |
+| `FakeSteadyClock`, `FakeVirtualClock` | `:test-headers` | `test-headers/goldfish/system/testing/fake_clocks.h` | Thread-safe fake clocks for deterministic unit tests. |
 | `FdUtil` | `:fd_util` | `include/android/base/fd_util.h` | File descriptor utilities and non-blocking helpers. |
 
 ## Critical Infrastructure

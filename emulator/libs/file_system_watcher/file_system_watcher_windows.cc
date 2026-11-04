@@ -122,6 +122,12 @@ class ReadDirectoryChangesWin32 : public FileSystemWatcher {
 
     bool IsIdle() const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) { return state_ == State::kIdle; }
 
+    // Returns true if the watcher is currently running.
+    bool IsRunning() ABSL_LOCKS_EXCLUDED(mu_) {
+        const absl::MutexLock lock(&mu_);
+        return state_ == State::kRunning;
+    }
+
     void WatchForChanges() {
         absl::Cleanup mark_worker_done = [this] {
             const absl::MutexLock lock(&mu_);
@@ -163,11 +169,8 @@ class ReadDirectoryChangesWin32 : public FileSystemWatcher {
         };
 
         while (true) {
-            {
-                const absl::MutexLock lock(&mu_);
-                if (state_ != State::kRunning) {
-                    return;
-                }
+            if (!IsRunning()) {
+                return;
             }
             ResetEvent(raw_overlap_event);
 
@@ -185,11 +188,8 @@ class ReadDirectoryChangesWin32 : public FileSystemWatcher {
             }
             io_pending = true;
 
-            {
-                const absl::MutexLock lock(&mu_);
-                if (state_ != State::kRunning) {
-                    return;
-                }
+            if (!IsRunning()) {
+                return;
             }
             DWORD wait = WaitForSingleObject(raw_overlap_event, INFINITE);
             if (wait != WAIT_OBJECT_0) {
@@ -197,11 +197,8 @@ class ReadDirectoryChangesWin32 : public FileSystemWatcher {
             }
 
             // Overlap event signaled (either IO completed or CancelIoEx was called).
-            {
-                const absl::MutexLock lock(&mu_);
-                if (state_ != State::kRunning) {
-                    return;
-                }
+            if (!IsRunning()) {
+                return;
             }
 
             DWORD bytes_returned = 0;
@@ -224,11 +221,8 @@ class ReadDirectoryChangesWin32 : public FileSystemWatcher {
                     path_ / Win32UnicodeString::convertToUtf8(
                                     info->FileName, info->FileNameLength / sizeof(wchar_t));
 
-            {
-                const absl::MutexLock lock(&mu_);
-                if (state_ != State::kRunning) {
-                    return;
-                }
+            if (!IsRunning()) {
+                return;
             }
 
             switch (info->Action) {

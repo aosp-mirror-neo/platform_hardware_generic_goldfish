@@ -37,6 +37,7 @@ backed by libuv or QEMU. **Location:** `emulator/libs/async/` **Namespace:** `go
 
 ## Flows & Guides
 
+- [EventLoop & Timer Design](DESIGN.md)
 - [Socket Read Lifecycle](docs/socket_read_flow.md)
 - [Server Connection Lifecycle](docs/server_connection_flow.md)
 - [Backpressure & Flow Control](docs/backpressure_flow.md)

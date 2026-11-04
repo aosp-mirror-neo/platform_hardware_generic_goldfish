@@ -13,10 +13,15 @@
 // limitations under the License.
 #include "goldfish/file/file_atomic.h"
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 #include <gtest/gtest.h>
 
 #include <string>
 
+#include "absl/status/status.h"
 #include "absl/status/status_matchers.h"
 #include "android/base/system.h"
 #include "goldfish/file/file.h"
@@ -24,6 +29,7 @@
 namespace android::base::file {
 
 using ::absl_testing::IsOkAndHolds;
+using ::absl_testing::StatusIs;
 
 class FileAtomicTest : public ::testing::Test {
   protected:
@@ -75,5 +81,26 @@ TEST_F(FileAtomicTest, PrivatePermissions) {
     EXPECT_EQ(perms, fs::perms::owner_read | fs::perms::owner_write);
 #endif
 }
+
+TEST_F(FileAtomicTest, FailsWithInternalErrorIfParentDirectoryMissing) {
+    fs::path target = temp_dir_ / "missing_parent" / "test_file.txt";
+    EXPECT_THAT(CreatePrivateFileExclusive(target, "content"),
+                StatusIs(absl::StatusCode::kInternal));
+}
+
+#ifndef _WIN32
+TEST_F(FileAtomicTest, FailsWithPermissionDeniedIfDirectoryReadOnly) {
+    if (::geteuid() == 0) {
+        GTEST_SKIP() << "Root bypasses POSIX directory permission checks.";
+    }
+    fs::path ro_dir = temp_dir_ / "read_only_dir";
+    ASSERT_TRUE(mkdir(ro_dir, 0500).ok());
+
+    EXPECT_THAT(CreatePrivateFileExclusive(ro_dir / "test_file.txt", "content"),
+                StatusIs(absl::StatusCode::kPermissionDenied));
+
+    ASSERT_TRUE(chmod(ro_dir, 0700).ok());
+}
+#endif
 
 }  // namespace android::base::file

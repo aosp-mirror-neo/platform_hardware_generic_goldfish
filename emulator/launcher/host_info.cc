@@ -34,6 +34,8 @@ void SetDeviceNameIfSupported(T& avd_info, const std::string& hw_device_name) {
         static const auto device_name_map = absl::flat_hash_map<std::string_view, DeviceNameEnum>({
             {"resizable", T::RESIZABLE},
             {"7.6in Foldable", T::FOLDABLE_7_6_IN},
+            {"foldable_4_3", T::FOLDABLE_4_3},
+            {"foldable_1_1", T::FOLDABLE_1_1},
             {"small_phone", T::SMALL_PHONE},
             {"medium_phone", T::MEDIUM_PHONE},
             {"medium_tablet", T::MEDIUM_TABLET},

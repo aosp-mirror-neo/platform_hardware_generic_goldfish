@@ -22,18 +22,13 @@
 #include "goldfish/avd/avd_universe.h"
 #include "goldfish/display/abstract_multi_display.h"
 
-extern "C" {
-struct QemuConsole;
-}
-
 namespace android {
 namespace emulation {
 namespace control {
 
 std::shared_ptr<grpc::Service> getEmulatorController(
-        android::goldfish::VmOperations* vmInterface, QemuConsole* keyboardConsole,
-        ::goldfish::avd::AvdUniverse* avdUniverse,
-        ::goldfish::display::IMultiDisplay* multiDisplay);
+        android::goldfish::VmOperations* vm_interface, ::goldfish::avd::AvdUniverse* avd_universe,
+        ::goldfish::display::IMultiDisplay* multi_display);
 
 }  // namespace control
 }  // namespace emulation

@@ -44,4 +44,12 @@ void fake_qemu_fire_snapshot_progress(const QemuSnapshotProgress* progress);
 
 // Resets all fake QEMU state to its initial values.
 void fake_qemu_reset();
+
+// Enables or disables tracking of per-thread BQL state and unlock counts in
+// fake_qemu_callbacks.cc.
+void fake_qemu_set_bql_tracking(bool enabled);
+
+// Returns the number of times bql_unlock() has been called while BQL tracking
+// is enabled.
+int64_t fake_qemu_bql_unlock_count();
 }

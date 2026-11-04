@@ -34,6 +34,7 @@
 #include "android/emulation/control/absl_status_translate.h"
 #include "android/emulation/control/emulator_grpc_client.h"
 #include "android/goldfish/avd.h"
+#include "android/goldfish/constants.h"
 #include "android/goldfish/input_paths.h"
 #include "android/status/status_macros.h"
 #include "emulator_controller.grpc.pb.h"
@@ -46,6 +47,7 @@
 #include "goldfish/file/file.h"
 #include "goldfish/metrics/metrics_reporter.h"
 #include "goldfish/metrics/snapshot_metrics.h"
+#include "goldfish/metrics/studio_file_metrics_writer.h"
 #include "goldfish/modem_simulator/modem_simulator_service.h"
 #include "goldfish/network/endpoint.h"
 #include "goldfish/timezone/host_timezone.h"
@@ -168,7 +170,8 @@ class Launcher {
                             }
                         });
                     }
-                    if (!use_netsim_ || config_.opts.no_netsim_modem) {
+                    if (!use_netsim_ ||
+                        !UseNetsimModem(config_.opts.no_netsim_modem, config_.avd->ApiLevel())) {
                         config_.event_loop
                                 .Post([this, chardevs]() { init_modem_simulator(chardevs); })
                                 .IgnoreError();
@@ -203,16 +206,17 @@ class Launcher {
             return;
         }
         if (auto* p = emulator_process_.get()) {
-            if (qemu_shutdown_timeout_) {
+            if (qemu_shutdown_requested_) {
                 // If the user has sent another signal, e.g. another INT or TERM, then they
                 // must really want us to exit immediately so don't wait any longer.
                 LOG(WARNING)
                         << "Signal " << signum
                         << " received while already shutting down; sending SIGKILL to emulator";
-                qemu_shutdown_timeout_->Cancel();
+                qemu_shutdown_timeout_.reset();
                 p->Kill(SIGKILL);
                 return;
             }
+            qemu_shutdown_requested_ = true;
             LOG(ERROR) << "Signal received, sending shutdown command to emulator: " << signum;
             if (auto s = send_emulator_grpc_shutdown(ports_.serial_number); !s.ok()) {
                 LOG(WARNING) << "Graceful gRPC shutdown failed; falling back to forceful kill with "
@@ -290,6 +294,10 @@ class Launcher {
                                       ::goldfish::async::EventLoop& event_loop) {
         auto console_controller = std::make_unique<::goldfish::telnet::LegacyConsoleController>(
                 *config_.socket_factory, &event_loop, *config_.metrics_reporter);
+        // -port/-ports skip the free port search, so they may run with only IPv6
+        // loopback (b/505949436).
+        constexpr auto kExplicitPort =
+                ::goldfish::telnet::LegacyConsoleController::LoopbackRequirement::kAnyFamily;
         if (opts.ports) {
             // Format should be console_port,adb_port
             std::vector<std::string_view> parts = absl::StrSplit(opts.ports, ',');
@@ -305,7 +313,7 @@ class Launcher {
                 return absl::InvalidArgumentError(
                         absl::StrCat("Failed to parse ADB port number from -ports: ", opts.ports));
             }
-            if (auto s = console_controller->Start(ports_.serial_number); !s.ok()) {
+            if (auto s = console_controller->Start(ports_.serial_number, kExplicitPort); !s.ok()) {
                 return s;
             }
         } else if (opts.port) {
@@ -317,7 +325,7 @@ class Launcher {
             }
             ports_.serial_number = port;
             ports_.adb_port = port + 1;
-            if (auto s = console_controller->Start(port); !s.ok()) {
+            if (auto s = console_controller->Start(port, kExplicitPort); !s.ok()) {
                 return s;
             }
         } else {
@@ -398,12 +406,25 @@ class Launcher {
 
     void emulator_exit(int64_t exit_status, int term_signal) {
         LOG(INFO) << "emulator exited with status " << exit_status << ", signal " << term_signal;
+        qemu_shutdown_requested_ = false;
         qemu_shutdown_timeout_.reset();
-        emulator_exit_status_ = exit_status;
+        emulator_exit_status_ = static_cast<int>(exit_status);
         emulator_process_.reset();
 
-        // Send a final ping with the crash status.
-        if (exit_status == 0 && term_signal == 0) {
+        // Send a final ping with the crash status and finalize QEMU's .open
+        // spool files on clean exit.
+        // NOTE(b/476380758): Temporarily gate FinalizeProcessFiles on clean
+        // QEMU exits here so crashed QEMU .open spool files stay on disk for
+        // next-launch crash recovery until live crash classification lands in a
+        // follow-up CL in this stack.
+        if (exit_status == 0 && term_signal == 0 && config_.metrics_reporter) {
+            if (config_.metrics_writer_config.type ==
+                        ::goldfish::metrics::MetricsWriterType::kStudio &&
+                qemu_pid_ > 0 && !config_.metrics_writer_config.studio_spool_dir.empty()) {
+                ::goldfish::metrics::StudioFileMetricsWriter::FinalizeProcessFiles(
+                        config_.metrics_writer_config.studio_spool_dir,
+                        config_.metrics_reporter->session_id(), static_cast<uint32_t>(qemu_pid_));
+            }
             config_.metrics_reporter->Report([](android_studio::AndroidStudioEvent& event) {
                 event.mutable_emulator_details()->set_crashes(kMetricsCrashesNone);
             });
@@ -448,7 +469,8 @@ class Launcher {
                         [this](int64_t status, int signal) { emulator_exit(status, signal); });
                 s.ok()) {
                 emulator_process_ = *std::move(s);
-                LOG(INFO) << "Running emulator as pid: " << emulator_process_->GetPid();
+                qemu_pid_ = emulator_process_->GetPid();
+                LOG(INFO) << "Running emulator as pid: " << qemu_pid_;
                 report_host_info_metrics(emulator);
                 report_quickboot_metrics(emulator);
             } else {
@@ -509,6 +531,10 @@ class Launcher {
             console_controller_.reset();
         }
 
+        if (config_.metrics_reporter) {
+            config_.metrics_reporter->Shutdown();
+        }
+
         if (netsimd_connection_) {
             netsimd_connection_->Disconnect();
             netsimd_connection_.reset();
@@ -544,15 +570,17 @@ class Launcher {
     std::unique_ptr<::goldfish::async::ManagedProcess> fishtank_process_;
     std::unique_ptr<::goldfish::async::ManagedProcess> netsimd_process_;
     std::unique_ptr<::goldfish::async::ManagedProcess> emulator_process_;
-    std::shared_ptr<::goldfish::async::EventLoop::Timer> qemu_shutdown_timeout_;
+    ::goldfish::async::EventLoop::ScopedTimer qemu_shutdown_timeout_;
     std::shared_ptr<ModemSimulatorService> modem_simulator_service_;
 
     int emulator_exit_status_ = 0;
+    int64_t qemu_pid_ = 0;
     absl::Status startup_status_ = absl::OkStatus();
 
     std::thread shutdown_thread_;
 
     std::atomic<bool> shutting_down_{false};
+    bool qemu_shutdown_requested_ = false;
 };
 
 }  // namespace

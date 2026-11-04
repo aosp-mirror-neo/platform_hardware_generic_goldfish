@@ -121,6 +121,7 @@ cc_library(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     deps = [
+        "//emulator/libs/windows:scoped_com_initializer",
         "@abseil-cpp//absl/synchronization",
         "@libyuv",
         "@webrtc//api:scoped_refptr",
@@ -475,6 +476,7 @@ cc_library(
         "@platforms//os:macos": [":videobridge_codecs_objc"],
         "@platforms//os:windows": [
             ":videobridge_codecs_win",
+            "//emulator/libs/windows:scoped_com_initializer",
             "@webrtc//api/video_codecs:builtin_video_decoder_factory",
             "@webrtc//api/video_codecs:builtin_video_encoder_factory",
         ],
@@ -546,7 +548,7 @@ cc_library(
     srcs = [
         "core/event_forwarder.cc",
         "core/event_forwarder.h",
-        "core/goldfish_audio_device_module.h",
+        "core/goldfish_audio_device_module.cc",
         "core/grpc_input_sender.cc",
         "core/grpc_input_sender.h",
         "core/in_process_input_sender.cc",
@@ -563,6 +565,7 @@ cc_library(
     ],
     hdrs = [
         "include/goldfish/videobridge/codec_factories.h",
+        "include/goldfish/videobridge/goldfish_audio_device_module.h",
         "include/goldfish/videobridge/in_process_audio_source.h",
         "include/goldfish/videobridge/in_process_input_sender.h",
         "include/goldfish/videobridge/in_process_video_source.h",
@@ -614,6 +617,7 @@ cc_test(
     deps = [
         ":videobridge_core",
         "//emulator/libs/test:googletest_main",
+        "@googletest//:gtest",
     ],
 )
 
@@ -731,6 +735,28 @@ cc_test(
 )
 
 cc_test(
+    name = "remote_audio_test",
+    size = "small",
+    srcs = [
+        "core/participant.h",
+        "core/remote_audio_test.cc",
+        "core/virtual_network_fixture.h",
+    ],
+    copts = WEBRTC_COPTS,
+    linkopts = WEBRTC_LINKOPTS,
+    deps = [
+        ":in_process_audio_source",
+        ":videobridge_core",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@nlohmann_json//:singleheader-json",
+        "@webrtc//rtc_base:rtc_base_tests_utils",
+    ],
+)
+
+cc_test(
     name = "mf_video_encoder_h264_test",
     size = "small",
     srcs = ["core/win/mf_video_encoder_h264_test.cc"],
@@ -766,6 +792,7 @@ cc_test(
         ":videobridge_codecs",
         ":videobridge_codecs_win",
         "//emulator/libs/test:googletest_main",
+        "//emulator/libs/windows:scoped_com_initializer",
         "@ffmpeg",
         "@ffmpeg//:ffmpeg_headers",
         "@libyuv",
@@ -1122,6 +1149,7 @@ clang_tidy_test(
         ":grpc_audio_source_test",
         ":grpc_audio_source_perf",
         ":grpc_input_sender_test",
+        ":in_process_input_sender_test",
         ":nvenc_loader",
         ":nvenc_loader_test",
         ":nvenc_video_encoder",

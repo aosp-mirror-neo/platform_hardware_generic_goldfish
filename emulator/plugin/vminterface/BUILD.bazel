@@ -1,6 +1,5 @@
 load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("//emulator/tools:plugins.bzl", "collect_plugins")
 
 # buildifier: disable=no-hdrs-no-alwayslink
 cc_library(
@@ -64,7 +63,6 @@ cc_library(
         "//emulator/libs/metrics:snapshot_metrics",
         "//emulator/libs/snapshot:snapshot_store",
         "//emulator/libs/status_macros",
-        "//emulator/libs/system:clock",
         "//emulator/plugin/avd:avd_info",
         "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/cleanup",
@@ -75,6 +73,7 @@ cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/time:clock_interface",
         "@qemu//:qemu-headers-exported",
     ],
 )
@@ -95,7 +94,6 @@ cc_library(
         "//emulator/libs/metrics:snapshot_metrics",
         "//emulator/libs/snapshot:snapshot_store",
         "//emulator/libs/status_macros",
-        "//emulator/libs/system:clock",
         "//emulator/plugin/avd:fake_avd_universe",
         "//emulator/plugin/display:test-display",
         "@abseil-cpp//absl/base:core_headers",
@@ -107,6 +105,7 @@ cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/time:clock_interface",
     ],
 )
 
@@ -130,25 +129,11 @@ cc_library(
     ],
 )
 
-collect_plugins(
-    name = "binplace",
-    output_dir = ".",
-    plugins = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
-)
-
 cc_test(
     name = "vminterface_unittests",
     size = "small",
     testonly = True,
     srcs = ["vm_test.cc"],
-    data = [":binplace"],
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
     includes = ["test"],
     visibility = ["//visibility:public"],
     deps = [
@@ -160,7 +145,6 @@ cc_test(
         "//emulator/libs/file",
         "//emulator/libs/snapshot:snapshot_store",
         "//emulator/libs/status_macros:status_matcher_macros",
-        "//emulator/libs/system:clock",
         "//emulator/libs/system:test-headers",
         "//emulator/libs/test:googletest_main",
         "//emulator/plugin/avd:fake_avd_universe",
@@ -171,8 +155,9 @@ cc_test(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
-        "@glib//glib:glib_import",
-        "@glib//gmodule:gmodule_import",
+        "@abseil-cpp//absl/time:simulated_clock",
+        "@glib//glib",
+        "@glib//gmodule",
     ],
 )
 

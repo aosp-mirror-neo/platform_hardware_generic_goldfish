@@ -128,5 +128,25 @@ TEST_F(DispatcherSessionTest, RejectsWithoutACallback) {
     EXPECT_THAT(dispatcher_->calls, IsEmpty());
 }
 
+TEST_F(DispatcherSessionTest, SharesResetTrackerWithOpenedSessionOptions) {
+    DispatcherSession session(dispatcher_, {});
+    ASSERT_TRUE(dispatcher_->opened_with.has_value());
+    ASSERT_NE(dispatcher_->opened_with->reset_tracker, nullptr);
+    EXPECT_EQ(session.ResetTracker().Version(), 0U);
+
+    dispatcher_->opened_with->reset_tracker->RecordDisplayReset(2);
+    EXPECT_EQ(session.ResetTracker().Version(), 1U);
+    const auto snapshot1 = session.ResetTracker().ReadSnapshot();
+    EXPECT_EQ(snapshot1.full_generation, 0U);
+    ASSERT_TRUE(snapshot1.display_generations.contains(2));
+    EXPECT_EQ(snapshot1.display_generations.at(2), 1U);
+
+    dispatcher_->opened_with->reset_tracker->RecordFullReset();
+    EXPECT_EQ(session.ResetTracker().Version(), 2U);
+    const auto snapshot2 = session.ResetTracker().ReadSnapshot();
+    EXPECT_EQ(snapshot2.full_generation, 1U);
+    EXPECT_THAT(snapshot2.display_generations, IsEmpty());
+}
+
 }  // namespace
 }  // namespace goldfish::grpc::v2

@@ -61,7 +61,7 @@ class IdleInterceptorFactory : public ServerInterceptorFactoryInterface {
     std::chrono::seconds timeout_;
     std::atomic<uint64_t> termination_unix_time_;
     std::atomic<uint64_t> active_requests_;
-    std::shared_ptr<EventLoop::Timer> timeout_checker_;
+    EventLoop::ScopedTimer timeout_checker_;
 };
 
 }  // namespace android::control::interceptor

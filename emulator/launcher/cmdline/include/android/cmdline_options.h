@@ -229,8 +229,8 @@ OPT_PARAM(shared_net_id, "<number>", "join the shared network, using IP address 
 OPT_PARAM_OBSOLETE(nand_limits, "<nlimits>")
 
 OPT_PARAM(gpu, "<mode>", "set hardware OpenGLES emulation mode")
-OPT_PARAM(virtio_gpu_device, "<rutabaga|gfxstream>",
-          "select the virtio-gpu device that drives gfxstream (default: rutabaga)")
+OPT_PARAM(virtio_gpu_device, "<gfxstream|rutabaga>",
+          "select the virtio-gpu device that drives gfxstream (default: gfxstream)")
 OPT_PARAM(vulkan_validation, "<mode>", "Vulkan validation mode (off|print|fail|crash)")
 OPT_PARAM(vulkan_validation_include_filter, "<filters>",
           "Comma-separated list of app/engine filters to include for Vulkan validation")
@@ -344,7 +344,8 @@ OPT_FLAG(no_guest_angle, "Disable ANGLE as the guest system GLES driver.")
 OPT_FLAG(no_vulkan_composition, "Disable Vulkan host compositon.")
 
 OPT_PARAM(systemui_renderer, "<option list>",
-          "Set guest side renderer backend. Available options: skiagl, skiavk, skiavkthreaded")
+          "Set guest side renderer backend. Available options: skiagl, skiavk, skiavkthreaded, "
+          "graphite")
 
 OPT_FLAG(not_in_bazel, "Run as if not in bazel build environment.")
 

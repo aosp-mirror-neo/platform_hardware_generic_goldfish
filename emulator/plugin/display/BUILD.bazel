@@ -1,6 +1,6 @@
 load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("//emulator/tools:plugins.bzl", "collect_plugins")
+load("//emulator/tools:cc_binary_with_manifest.bzl", "cc_binary_with_manifest")
 
 cc_library(
     name = "write_png",
@@ -13,15 +13,60 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "image_writer_test_utils",
+    testonly = True,
+    hdrs = ["image_writer_test_utils.h"],
+    deps = [
+        "@abseil-cpp//absl/time",
+    ],
+)
+
 cc_test(
     name = "write_png_test",
     size = "small",
     srcs = ["write_png_test.cc"],
     deps = [
+        ":image_writer_test_utils",
         ":write_png",
         "//emulator/libs/test:googletest_main",
         "@abseil-cpp//absl/time",
         "@libpng//:png",
+    ],
+)
+
+# Windows release builds link with /GUARD:CF (enabling CF_LONGJUMP_TABLE_PRESENT in PE
+# LoadConfig). Compiling setjmp call sites with /guard:cf emits .gljmp$y entries so
+# longjmp from libjpeg error_exit is registered as a valid Control Flow Guard target.
+_WINDOWS_CFG_COPTS = select({
+    "@platforms//os:windows": ["/guard:cf"],
+    "//conditions:default": [],
+})
+
+cc_library(
+    name = "write_jpeg",
+    srcs = ["write_jpeg.cc"],
+    hdrs = ["include/goldfish/display/write_jpeg.h"],
+    copts = _WINDOWS_CFG_COPTS,
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@libjpeg_turbo//:jpeg",
+    ],
+)
+
+cc_test(
+    name = "write_jpeg_test",
+    size = "small",
+    srcs = ["write_jpeg_test.cc"],
+    copts = _WINDOWS_CFG_COPTS,
+    deps = [
+        ":image_writer_test_utils",
+        ":write_jpeg",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/base:config",
+        "@abseil-cpp//absl/time",
+        "@libjpeg_turbo//:jpeg",
     ],
 )
 
@@ -182,6 +227,31 @@ cc_library(
     ],
 )
 
+cc_test(
+    name = "webm_encoder_test",
+    size = "small",
+    srcs = ["webm_encoder_test.cc"],
+    deps = [
+        ":video_recorder",
+        "//emulator/libs/file",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_binary_with_manifest(
+    name = "webm_encoder_perf",
+    testonly = True,
+    srcs = ["webm_encoder_perf.cc"],
+    tags = ["benchmark"],
+    deps = [
+        ":video_recorder",
+        "//emulator/libs/file",
+        "@google_benchmark//:benchmark",
+        "@google_benchmark//:benchmark_main",
+    ],
+)
+
 cc_library(
     name = "test-display",
     testonly = True,
@@ -205,15 +275,8 @@ cc_library(
         ":abstract_multi_display",
         ":primary_display",
         "//emulator/plugin/virtio-input-android:api",
-    ],
-)
-
-collect_plugins(
-    name = "binplace",
-    output_dir = ".",
-    plugins = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
+        "@glib//glib",
+        "@glib//gmodule",
     ],
 )
 
@@ -230,11 +293,6 @@ cc_test(
         "pixman_image_generator_test.cc",
         "qemu_display_test.cc",
     ],
-    data = [":binplace"],
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
     visibility = ["//visibility:public"],
     deps = [
         ":display",
@@ -247,18 +305,26 @@ cc_test(
         "//emulator/libs/hardware_config:fake_hardware_config",
         "//emulator/libs/sensors:physical_model",
         "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/system:test-headers",
         "//emulator/libs/test:googletest_main",
         "@abseil-cpp//absl/functional:any_invocable",
         "@abseil-cpp//absl/log:scoped_mock_log",
         "@abseil-cpp//absl/status:status_matchers",
+        "@glib//glib",
+        "@glib//gmodule",
     ],
 )
 
 clang_tidy_test(
     name = "tidy",
     targets = [
+        ":image_writer_test_utils",
         ":primary_display",
         ":video_recorder",
+        ":webm_encoder_perf",
+        ":webm_encoder_test",
+        ":write_jpeg",
+        ":write_jpeg_test",
         ":write_png",
         ":write_png_test",
         ":base",

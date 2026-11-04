@@ -57,6 +57,8 @@ namespace goldfish::netsim {
 
 namespace {
 
+PacketTransportFactory create_transport = nullptr;
+
 struct NetsimNetdev {
     DeviceClass parent_class;
     ChipKind chip_kind{ChipKind::kWifi};
@@ -217,7 +219,9 @@ void netsim_netdev_realize(DeviceState* dev, Error** errp) {
     auto* s = reinterpret_cast<NetsimNicState*>(nc);
 
     s->netsim = new NetsimState;
-    s->netsim->transport = CreatePacketTransport([nc](Packet& packet) {
+    const PacketTransportFactory factory =
+            create_transport != nullptr ? create_transport : &CreatePacketTransport;
+    s->netsim->transport = factory([nc](Packet& packet) {
         bql_lock();
         bool delivered = netsim_netdev_send(nc, packet);
         bql_unlock();
@@ -242,10 +246,11 @@ void netsim_netdev_realize(DeviceState* dev, Error** errp) {
 void netsim_netdev_unrealize(DeviceState* dev) {
     VLOG(1) << "Unrealizing netsim netdev: " << dev->id;
 
-    NetClientState* nc;
-    nc = qemu_find_netdev(dev->id);
+    NetClientState* nc = qemu_find_netdev(dev->id);
     if (nc == nullptr) {
-        LOG(ERROR) << "Can't find netdev to delete: " << dev->id;
+        // During qemu_cleanup(), net_cleanup() destroys netdevs before
+        // deletable_cleanup() unrealizes deletable QOM devices.
+        VLOG(1) << "Netdev already cleaned up: " << dev->id;
         return;
     }
     qemu_del_net_client(nc);
@@ -287,6 +292,10 @@ const TypeInfo netsim_netdev_type_info = {
 
 void netsim_netdev_register_types(void) {
     type_register_static(&goldfish::netsim::netsim_netdev_type_info);
+}
+
+void SetNetsimNetdevPacketTransportFactoryForTesting(PacketTransportFactory factory) {
+    create_transport = factory;
 }
 
 }  // namespace goldfish::netsim

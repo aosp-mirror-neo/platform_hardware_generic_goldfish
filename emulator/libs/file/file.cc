@@ -63,6 +63,15 @@ absl::StatusOr<fs::path> make_canonical(const fs::path& path) noexcept {
             absl::StrCat("Failed to make path canonical: ", path.string(), " - ", ec.message()));
 }
 
+absl::StatusOr<fs::path> read_symlink(const fs::path& path) noexcept {
+    std::error_code ec;
+    if (fs::path target = fs::read_symlink(path, ec); !ec) {
+        return target;
+    }
+    return absl::InternalError(
+            absl::StrCat("Failed to read symlink: ", path.string(), " - ", ec.message()));
+}
+
 bool exists(const fs::path& path) noexcept {
     std::error_code ec;
     // Ignore EC - false is returned when there's an error too.
@@ -138,6 +147,19 @@ absl::StatusOr<StorageCapacity> file_size(const fs::path& path) noexcept {
     }
     return absl::InternalError(
             absl::StrCat("Failed to get size of: ", path.string(), " - ", ec.message()));
+}
+
+absl::StatusOr<StorageCapacity> free_space(const fs::path& path) noexcept {
+    std::error_code ec;
+    if (fs::space_info info = fs::space(path, ec); !ec) {
+        if (info.available == static_cast<std::uintmax_t>(-1)) {
+            return absl::InternalError(
+                    absl::StrCat("Failed to determine free space of: ", path.string()));
+        }
+        return StorageCapacity(static_cast<StorageCapacity::ValueType>(info.available));
+    }
+    return absl::InternalError(
+            absl::StrCat("Failed to get free space of: ", path.string(), " - ", ec.message()));
 }
 
 absl::StatusOr<absl::Time> last_write_time(const fs::path& path) noexcept {

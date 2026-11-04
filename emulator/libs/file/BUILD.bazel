@@ -15,6 +15,13 @@ cc_library(
         "include/goldfish/file/file_atomic.h",
         "include/goldfish/file/storage_capacity.h",
     ],
+    implementation_deps = select({
+        "@platforms//os:windows": [],
+        "//conditions:default": [
+            ":posix_fd_io",
+            ":scoped_fd",
+        ],
+    }),
     includes = ["include"],
     linkopts = select({
         "@platforms//os:windows": ["-DEFAULTLIB:advapi32.lib"],
@@ -29,6 +36,7 @@ cc_library(
         "@abseil-cpp//absl/algorithm:container",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
     ] + select({
@@ -39,6 +47,126 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+cc_library(
+    name = "scoped_fd",
+    hdrs = select({
+        "@platforms//os:windows": [],
+        "//conditions:default": ["include/goldfish/file/scoped_fd.h"],
+    }),
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//emulator/libs/base",
+        "//emulator/libs/system:eintr_wrapper",
+    ],
+)
+
+cc_library(
+    name = "posix_fd_io",
+    srcs = select({
+        "@platforms//os:windows": [],
+        "//conditions:default": ["posix_fd_io.cc"],
+    }),
+    hdrs = select({
+        "@platforms//os:windows": [],
+        "//conditions:default": ["posix_fd_io.h"],
+    }),
+    visibility = ["//visibility:private"],
+    deps = [
+        "//emulator/libs/system:eintr_wrapper",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_library(
+    name = "file_lock",
+    srcs = [
+        "file_lock_common.cc",
+        "file_lock_internal.h",
+    ] + select({
+        "@platforms//os:windows": ["file_lock_win.cc"],
+        "//conditions:default": ["file_lock_posix.cc"],
+    }),
+    hdrs = ["include/goldfish/file/file_lock.h"],
+    implementation_deps = [
+        ":file",
+        "//emulator/libs/system:eintr_wrapper",
+        "@abseil-cpp//absl/base:no_destructor",
+        "@abseil-cpp//absl/cleanup",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+    ] + select({
+        "@platforms//os:windows": ["//emulator/libs/windows:win32_utils"],
+        "//conditions:default": [
+            ":posix_fd_io",
+            ":scoped_fd",
+        ],
+    }),
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//emulator/libs/base",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/time:clock_interface",
+    ] + select({
+        "@platforms//os:windows": [
+            "//emulator/libs/windows:scoped_file_handle",
+            "@aemu//windows:compat-hdrs",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+cc_library(
+    name = "shared_file_lock",
+    srcs = [
+        "shared_file_lock_common.cc",
+        "shared_file_lock_internal.h",
+    ] + select({
+        "@platforms//os:windows": ["shared_file_lock_win.cc"],
+        "//conditions:default": ["shared_file_lock_posix.cc"],
+    }),
+    hdrs = ["include/goldfish/file/shared_file_lock.h"],
+    implementation_deps = [
+        "//emulator/libs/system:eintr_wrapper",
+        "@abseil-cpp//absl/strings",
+    ] + select({
+        "@platforms//os:windows": ["//emulator/libs/windows:win32_utils"],
+        "//conditions:default": [],
+    }),
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//emulator/libs/base",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/time:clock_interface",
+    ] + select({
+        "@platforms//os:windows": [
+            "//emulator/libs/windows:scoped_file_handle",
+            "@aemu//windows:compat-hdrs",
+        ],
+        "//conditions:default": [":scoped_fd"],
+    }),
+)
+
+cc_library(
+    name = "auto_advancing_clock",
+    testonly = True,
+    hdrs = ["include/goldfish/file/testing/auto_advancing_clock.h"],
+    includes = ["include"],
+    visibility = ["//emulator:__subpackages__"],
+    deps = [
+        "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/time:simulated_clock",
+    ],
 )
 
 cc_test(
@@ -53,12 +181,71 @@ cc_test(
         ":file",
         "//emulator/libs/system:test-headers",
         "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:status_matchers",
+    ] + select({
+        "@platforms//os:windows": [],
+        "//conditions:default": [":scoped_fd"],
+    }),
+)
+
+cc_test(
+    name = "file_lock_test",
+    size = "small",
+    srcs = [
+        "file_lock_test.cc",
+        "lock_test_utils.h",
+    ],
+    data = ["//emulator/libs/process:sleep_emu"],
+    deps = [
+        ":auto_advancing_clock",
+        ":file",
+        ":file_lock",
+        "//emulator/libs/process",
+        "//emulator/libs/system:bazel_info",
+        "//emulator/libs/system:test-headers",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/time:simulated_clock",
+    ],
+)
+
+cc_test(
+    name = "shared_file_lock_test",
+    size = "small",
+    srcs = [
+        "lock_test_utils.h",
+        "shared_file_lock_test.cc",
+    ],
+    data = ["//emulator/libs/process:sleep_emu"],
+    deps = [
+        ":auto_advancing_clock",
+        ":file",
+        ":shared_file_lock",
+        "//emulator/libs/process",
+        "//emulator/libs/system:bazel_info",
+        "//emulator/libs/system:test-headers",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
     ],
 )
 
 clang_tidy_test(
     name = "tidy",
-    targets = [":file"],
+    targets = [
+        ":file",
+        ":file_lock",
+        ":file_lock_test",
+        ":posix_fd_io",
+        ":scoped_fd",
+        ":shared_file_lock",
+        ":shared_file_lock_test",
+    ],
     tidy_config_file = "//:clang_tidy_config",
 )

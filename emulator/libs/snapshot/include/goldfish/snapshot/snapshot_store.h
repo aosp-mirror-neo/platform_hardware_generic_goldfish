@@ -63,8 +63,10 @@ namespace goldfish::snapshot {
 //   4 -> 5: avd_universe::gps::Location added an accuracy field (8-byte
 //           double), altering the avd_info VMState binary layout.
 //   (5, b/576450291): bits [15..14] became the SnapshotGpuDevice field. Not a
-//           base bump: virtio-gpu-rutabaga stays the default and snapshots it
-//           wrote before the field existed read as device 0 = rutabaga.
+//           base bump: snapshots written before the field existed read as
+//           device 0 = rutabaga, so switching the default to
+//           virtio-gpu-gfxstream (device 1) cold-boots them cleanly while
+//           -virtio-gpu-device rutabaga continues to match device 0.
 inline constexpr int kSnapshotVersionBase = 5;
 static_assert(kSnapshotVersionBase > 0 && kSnapshotVersionBase < (1 << 14),
               "Base snapshot version does not fit in 14 bits.");

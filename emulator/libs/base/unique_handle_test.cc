@@ -20,9 +20,6 @@
 using goldfish::base::UniqueHandle;
 
 struct StatelessIntDeleter {
-    struct Empty {};
-    explicit StatelessIntDeleter(Empty) {}
-    StatelessIntDeleter() = default;
     void operator()(int x) const {}
 };
 
@@ -49,19 +46,15 @@ struct StatefulIntDeleter {
 };
 
 struct NothrowMoveDeleter {
-    struct Empty {};
     void operator()(int) const {}
     NothrowMoveDeleter() = default;
-    explicit NothrowMoveDeleter(Empty) {}
     NothrowMoveDeleter(NothrowMoveDeleter&&) noexcept = default;
     NothrowMoveDeleter& operator=(NothrowMoveDeleter&&) noexcept = default;
 };
 
 struct ThrowingMoveDeleter {
-    struct Empty {};
     void operator()(int) const {}
     ThrowingMoveDeleter() = default;
-    explicit ThrowingMoveDeleter(Empty) {}
     ThrowingMoveDeleter(ThrowingMoveDeleter&&) noexcept(false) {}
     ThrowingMoveDeleter& operator=(ThrowingMoveDeleter&&) noexcept(false) { return *this; }
 };

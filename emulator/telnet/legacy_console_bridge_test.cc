@@ -238,6 +238,7 @@ TEST_F(LegacyConsoleBridgeTest, GeoFixSucceedsWithValidCoordinates) {
                          google::protobuf::Empty* response) {
                 EXPECT_DOUBLE_EQ(request.longitude(), 12.3);
                 EXPECT_DOUBLE_EQ(request.latitude(), 45.6);
+                EXPECT_EQ(request.satellites(), 4);
                 return grpc::Status::OK;
             });
     ctx->mock_stub = std::move(mock_stub);
@@ -246,6 +247,31 @@ TEST_F(LegacyConsoleBridgeTest, GeoFixSucceedsWithValidCoordinates) {
 
     ASSERT_TRUE(result.ok()) << result.status().message();
     EXPECT_EQ(*result, "");
+}
+
+TEST_F(LegacyConsoleBridgeTest, GeoFixForwardsExplicitSatelliteCountIncludingZero) {
+    auto ctx = CreateContext();
+    ctx->authenticated = true;
+
+    auto mock_stub = std::make_unique<android::emulation::control::MockEmulatorControllerStub>();
+    EXPECT_CALL(*mock_stub, setGps(_, _, _))
+            .WillOnce([](grpc::ClientContext* context,
+                         const android::emulation::control::GpsState& request,
+                         google::protobuf::Empty* response) {
+                EXPECT_DOUBLE_EQ(request.longitude(), 12.3);
+                EXPECT_DOUBLE_EQ(request.latitude(), 45.6);
+                EXPECT_DOUBLE_EQ(request.altitude(), 10.0);
+                EXPECT_EQ(request.satellites(), 0);
+                return grpc::Status::OK;
+            });
+    ctx->mock_stub = std::move(mock_stub);
+
+    auto result = (*bridge_)("geo fix 12.3 45.6 10.0 0", *ctx);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+
+    auto invalid = (*bridge_)("geo fix 12.3 45.6 10.0 13", *ctx);
+    EXPECT_FALSE(invalid.ok());
+    EXPECT_EQ(invalid.status().code(), absl::StatusCode::kInvalidArgument);
 }
 
 TEST_F(LegacyConsoleBridgeTest, FingerTouchSendsGrpcRequest) {

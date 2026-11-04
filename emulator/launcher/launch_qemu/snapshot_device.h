@@ -105,6 +105,9 @@ class SnapshotDevice : public Device {
     // <avd>/snapshots.qcow2, the image attached as the VM-state node. Empty
     // when snapshots are disabled (-no-snapshot) and no such image exists yet.
     const std::filesystem::path& vmstate_image() const { return vmstate_image_; }
+    // Whether vmstate_image() is attached read-only because it is not
+    // writable. Snapshots can then be loaded but not saved.
+    bool vmstate_read_only() const { return vmstate_read_only_; }
 
     static std::string_view get_snapshot_name(const EmulatorConfig& emulator);
     static bool are_snapshots_enabled(const EmulatorConfig& emulator);
@@ -129,6 +132,7 @@ class SnapshotDevice : public Device {
     std::string snapshot_name_;
     std::filesystem::path vmstate_image_;
     bool strict_snapshot_load_ = false;
+    bool vmstate_read_only_ = false;
     bool snapshots_enabled_ = true;
     int snapshot_version_ = SnapshotVersionFor(kDefaultVirtioGpuDevice);
     LoadStatus load_status_ = LoadStatus::kSkippedOldSnapshot;

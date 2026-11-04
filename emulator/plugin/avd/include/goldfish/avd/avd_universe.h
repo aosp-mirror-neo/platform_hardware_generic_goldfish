@@ -33,6 +33,7 @@
 #include "goldfish/display/abstract_multi_display.h"
 #include "goldfish/sensors/physical_model.h"
 #include "goldfish/snapshottable/snapshottable.h"
+#include "goldfish/system/virtual_clock.h"
 
 namespace goldfish::avd {
 
@@ -89,18 +90,31 @@ struct AvdUniverse : public snapshottable::Snapshottable {
     /**
      * @brief Applies the input of every input session to the guest.
      * @return A thread-safe dispatcher, shared with input clients that may
-     *     outlive the universe, such as WebRTC channels. It is shut down when
-     *     the gRPC server stops at emulator exit, or at the latest when the
+     *     outlive the universe, such as WebRTC channels. It is shut down by
+     *     `OnPreGrpcShutdown()` at emulator exit, or at the latest when the
      *     universe is destroyed.
      */
     virtual std::shared_ptr<::goldfish::grpc::v2::IInputDispatcher> GetInputDispatcher() = 0;
+
+    /**
+     * @brief Stops what in-flight RPCs may wait on, before the gRPC server
+     * shuts down at emulator exit.
+     *
+     * Called on the QEMU main thread with the BQL held, once the QEMU main
+     * loop has exited and no longer runs `GetQemuEventLoop()`. Implementations
+     * shut down that loop, so that RPCs waiting on it do not block the server
+     * shutdown, and then `GetInputDispatcher()`; without a gRPC server, they
+     * do so when destroyed. Does nothing by default.
+     */
+    virtual void OnPreGrpcShutdown() {}
 
     void SetGenericSnapshotInProgress(bool in_progress) {
         generic_snapshot_in_progress_ = in_progress;
     }
     bool IsGenericSnapshotInProgress() const { return generic_snapshot_in_progress_; }
 
-    explicit AvdUniverse(std::unique_ptr<AvdProperties> props);
+    AvdUniverse(std::unique_ptr<AvdProperties> props,
+                const ::goldfish::system::VirtualClock& virtual_clock);
     AvdUniverse(const AvdUniverse&) = delete;
     AvdUniverse(AvdUniverse&&) = delete;
     AvdUniverse& operator=(const AvdUniverse&) = delete;

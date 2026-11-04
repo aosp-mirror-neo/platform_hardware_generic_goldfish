@@ -30,6 +30,7 @@
 #include "android/emulation/control/keyboard/key_code_resolver.h"
 #include "android/goldfish/qemu_vm_operations.h"
 #include "android/goldfish/vm_interface.h"
+#include "emulator/plugin/vminterface/vm_lock.h"
 #include "goldfish/adb/adb_host_server.h"
 #include "goldfish/archive/collections/string.h"
 #include "goldfish/archive/reader.h"
@@ -40,6 +41,7 @@
 #include "goldfish/devices/vehicle/vehicle_device.h"
 #include "goldfish/display/abstract_multi_display.h"
 #include "goldfish/snapshot/snapshot_store.h"
+#include "goldfish/system/qemu_virtual_clock.h"
 #include "goldfish/tools/aemu_version.h"
 #include "goldfish/vsock/clear.h"
 
@@ -49,6 +51,7 @@
 extern "C" {
 #include "hw/core/qdev.h"
 #include "system/reset.h"
+#include "system/runstate.h"
 #include "qemu/main-loop.h"
 #include "ui/console.h"
 }
@@ -114,7 +117,16 @@ absl::StatusOr<std::unique_ptr<AvdExtendedUniverse>> AvdExtendedUniverse::Create
 }
 
 AvdExtendedUniverse::AvdExtendedUniverse(Private, std::unique_ptr<AvdProperties> props)
-        : AvdUniverse(std::move(props)) {}
+        : AvdUniverse(std::move(props), ::goldfish::system::GetQemuVirtualClock()) {}
+
+template <>
+void AvdExtendedUniverse::OnVmStateChanged(void* opaque, bool running, RunState /*state*/) {
+    auto* self = static_cast<AvdExtendedUniverse*>(opaque);
+    if (running && self->snapshot_loaded_) {
+        self->snapshot_loaded_ = false;
+        self->input_dispatcher_->OnSnapshotLoaded();
+    }
+}
 
 absl::Status AvdExtendedUniverse::Initialize() {
     auto& avd_universe = *this;
@@ -184,9 +196,10 @@ absl::Status AvdExtendedUniverse::Initialize() {
     avd_universe.GetGuestStatus().SetGrpcNotificationChannel(
             &avd_universe.GetGrpcNotificationChannel());
 
-    DEVS::sensor::ISensorDevice::RegisterDevice(&avd_universe.GetSensorsPhysicalModel(), registry,
-                                                avd_props.avd_type, avd_props.avd_api,
-                                                avd_props.hw_config, client_loop, qemu_loop.get());
+    DEVS::sensor::ISensorDevice::RegisterDevice(
+            &avd_universe.GetSensorsPhysicalModel(), registry, avd_props.avd_type,
+            avd_props.avd_api, avd_props.hw_config, client_loop, qemu_loop.get(),
+            ::goldfish::system::GetQemuVirtualClock());
     DEVS::clipboard::IClipboardDevice::RegisterDevice(&avd_universe.GetClipboardChannel(), registry,
                                                       client_loop, qemu_loop.get());
     DEVS::vehicle::IVehicleDevice::RegisterDevice(&avd_universe.GetVehicleChannel(), registry,
@@ -246,6 +259,18 @@ absl::Status AvdExtendedUniverse::Initialize() {
     avd_universe.input_dispatcher_ = std::make_shared<::goldfish::grpc::v2::InputDispatcher>(
             *qemu_loop, *avd_universe.touch_devices_, /*keyboard=*/nullptr,
             android::emulation::control::keyboard::ResolveEvdevKeyCode);
+    avd_universe.input_display_subscription_ = android::base::eventing::MakeScopedCallback(
+            *avd_universe.multi_display,
+            [dispatcher = avd_universe.input_dispatcher_](const display::DisplayEvent& event) {
+                if (event.IsAddedEvent()) {
+                    if (auto display = event.Display().lock()) {
+                        dispatcher->OnDisplayAdded(display->Id());
+                    }
+                } else if (event.IsDeletedEvent()) {
+                    dispatcher->OnDisplayRemoved(event.DisplayId());
+                }
+            });
+    avd_universe.vm_state_entry_ = qemu_add_vm_change_state_handler(OnVmStateChanged, this);
 
     // Initialize the battery to a default state and register it.
     avd_universe.battery_subscription = DEVS::battery::RegisterBattery(
@@ -255,12 +280,8 @@ absl::Status AvdExtendedUniverse::Initialize() {
 }
 
 AvdExtendedUniverse::~AvdExtendedUniverse() {
-    if (metrics_ping_timer) {
-        metrics_ping_timer->Cancel();
-    }
-    if (perf_stat_reporter_task) {
-        perf_stat_reporter_task->Cancel();
-    }
+    metrics_ping_timer.reset();
+    perf_stat_reporter_task.reset();
 
     goldfish::vsock::clear();
 
@@ -276,6 +297,11 @@ AvdExtendedUniverse::~AvdExtendedUniverse() {
         }
     }
 
+    if (vm_state_entry_ != nullptr) {
+        qemu_del_vm_change_state_handler(vm_state_entry_);
+    }
+    input_display_subscription_.reset();
+
     if (qemu_event_loop) {
         WaitUntilEventLoopsIdle();
         ShutdownQemuLoop();
@@ -284,6 +310,9 @@ AvdExtendedUniverse::~AvdExtendedUniverse() {
     // Input clients that outlive the universe may still hold the dispatcher.
     if (input_dispatcher_) {
         input_dispatcher_->Shutdown();
+    }
+    if (metrics_reporter) {
+        metrics_reporter->Shutdown();
     }
 }
 
@@ -312,6 +341,15 @@ void AvdExtendedUniverse::WaitUntilEventLoopsIdle() {
 }
 
 void AvdExtendedUniverse::ShutdownQemuLoop() {
+    switch (qemu_event_loop->GetState()) {
+    case async::LooperStatusEvent::State::kShuttingDown:
+    case async::LooperStatusEvent::State::kFinished:
+        return;
+    case async::LooperStatusEvent::State::kNotStarted:
+    case async::LooperStatusEvent::State::kRunning:
+    case async::LooperStatusEvent::State::kPaused:
+        break;
+    }
     auto f = qemu_event_loop->Shutdown();
     // In the current Qemu implementation, we are already running on the Qemu main thread and so
     // shutdown will have run serially.
@@ -320,6 +358,18 @@ void AvdExtendedUniverse::ShutdownQemuLoop() {
     }
     auto s = f.get();
     LOG_IF(QFATAL, !s.ok()) << "Qemu loop shutdown failed: " << s;
+}
+
+void AvdExtendedUniverse::OnPreGrpcShutdown() {
+    DCHECK(bql_locked()) << "OnPreGrpcShutdown() needs the BQL to run the tasks still queued on "
+                            "the QEMU loop; call it from a QEMU main loop exit notifier";
+    // Runs the queued tasks and fails later posts, so RPCs waiting on the loop return instead of
+    // blocking the gRPC server shutdown.
+    ShutdownQemuLoop();
+
+    // Without the BQL, as it runs completion callbacks.
+    android::goldfish::ScopedVmUnlock unlock;
+    input_dispatcher_->Shutdown();
 }
 
 async::EventLoop& AvdExtendedUniverse::GetQemuEventLoop() {
@@ -460,6 +510,7 @@ void AvdExtendedUniverse::OnSavePhysicalState(archive::IWriter& writer) const {
 }
 
 void AvdExtendedUniverse::OnPreLoad() {
+    snapshot_loaded_ = false;
     quickboot_metrics_.op_start_time = absl::Now();
 }
 
@@ -710,6 +761,7 @@ void AvdExtendedUniverse::SyncGuestTimeToHost() {
 }
 
 absl::Status AvdExtendedUniverse::OnPostLoad() {
+    snapshot_loaded_ = true;
     guest_status_.OnPostLoad();
 
     if (props_->snapshot_update_time) {

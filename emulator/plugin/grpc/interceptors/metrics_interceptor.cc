@@ -17,8 +17,14 @@
 
 #include <zlib.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <string>
+#include <vector>
+
 #include "absl/log/log.h"
 
+#include "goldfish/async/event_loop.h"
 #include "goldfish/metrics/metrics_reporter.h"
 #include "goldfish/metrics/studio_stats_wrapper.h"
 
@@ -44,6 +50,43 @@ void FillPercentiles(const Percentiles& perc, android_studio::PercentileEstimato
 }
 
 }  // namespace
+
+MetricsInterceptorFactory::MetricsInterceptorFactory(::goldfish::metrics::MetricsReporter& reporter,
+                                                     ::goldfish::async::EventLoop* event_loop)
+        : reporter_(reporter) {
+    if (event_loop != nullptr) {
+        flush_timer_ = event_loop->ScheduleRepeating(
+                [this]() {
+                    ReportMetrics();
+                    return true;
+                },
+                kFlushInterval, kFlushInterval);
+    }
+}
+
+MetricsInterceptorFactory::~MetricsInterceptorFactory() {
+    flush_timer_.reset();
+    ReportMetrics();
+}
+
+void MetricsInterceptorFactory::ReportMetrics() {
+    // Move the interval's metrics out under the lock and report them after releasing it, so
+    // Record() on gRPC threads never waits for the reporter. Every moved entry was created by
+    // Record() in this interval, so idle methods are not reported.
+    absl::flat_hash_map<std::string, MethodMetrics> server_metrics;
+    absl::flat_hash_map<std::string, MethodMetrics> client_metrics;
+    {
+        absl::MutexLock lock(mutex_);
+        server_metrics.swap(server_metrics_);
+        client_metrics.swap(client_metrics_);
+    }
+    for (const auto& [name, metrics] : server_metrics) {
+        ReportMethodMetrics(name, metrics, /*is_server=*/true);
+    }
+    for (const auto& [name, metrics] : client_metrics) {
+        ReportMethodMetrics(name, metrics, /*is_server=*/false);
+    }
+}
 
 void MetricsInterceptorFactory::ReportMethodMetrics(const std::string& name,
                                                     const MethodMetrics& metrics, bool is_server) {

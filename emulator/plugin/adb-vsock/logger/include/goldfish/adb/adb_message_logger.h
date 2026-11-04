@@ -15,15 +15,20 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "goldfish/devices/cable/cable.h"
 
 namespace goldfish::adb {
+
+// Maximum number of characters or bytes logged per ADB packet payload.
+inline constexpr size_t kMaxDataLogLength = 512;
 
 template <size_t N>
 constexpr uint32_t MakeAdbCommand(const char (&s)[N]) {
@@ -116,7 +121,7 @@ class AdbMessageLogger {
      */
     AdbMessageLogger(std::string prefix, bool to_guest, bool verbose)
             : prefix_(std::move(prefix)), to_guest_(to_guest), verbose_(verbose) {
-        snippet_accumulator_.reserve(512);
+        snippet_accumulator_.reserve(kMaxDataLogLength);
     }
     ~AdbMessageLogger();
 
@@ -136,6 +141,9 @@ class AdbMessageLogger {
     void SetCallback(AdbPacketCallback* callback) { callback_ = callback; }
 
   private:
+    void ReportOutOfSync(std::string_view summary, const std::string& reason);
+    void EmitPacket(const char* snippet_data, size_t snippet_size);
+
     const std::string prefix_;
     bool out_of_sync_{false};
     const bool to_guest_;

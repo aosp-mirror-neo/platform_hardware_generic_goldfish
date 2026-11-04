@@ -209,6 +209,7 @@ emulator/fishtank/vcruntime140.dll
 emulator/fishtank/vcruntime140_1.dll
 emulator/lib/
 emulator/lib/advancedFeatures.ini
+emulator/lib/emu-original-feature-flags.protobuf
 emulator/lib/emulator_access.json
 emulator/lib/qemu/
 emulator/lib/qemu/gfxstream_backend.dll
@@ -217,8 +218,6 @@ emulator/lib/qemu/rutabaga_ffi.dll
 emulator/lib/qemu/rutabaga_ffi.dll.lib
 emulator/lib64/
 emulator/lib64/d3dcompiler_47.dll
-emulator/lib64/glib_shared.dll
-emulator/lib64/gmodule_shared.dll
 emulator/lib64/libEGL.dll
 emulator/lib64/libGLESv2.dll
 emulator/lib64/libshadertranslator.dll
@@ -234,6 +233,7 @@ emulator/lib64/vulkan/vk_swiftshader_icd.json
 emulator/lib64/vulkan/vk_swiftshader.dll
 emulator/lib64/vulkan/vulkan-1.dll
 emulator/msvcp140.dll
+emulator/msvcp140_atomic_wait.dll
 emulator/notice.md
 emulator/sbom.spdx.json
 emulator/share/

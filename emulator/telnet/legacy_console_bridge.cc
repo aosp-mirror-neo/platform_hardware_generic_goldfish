@@ -641,20 +641,18 @@ LegacyConsoleBridge::LegacyConsoleBridge(int port, std::filesystem::path token_p
                    return absl::InvalidArgumentError("Longitude must be between -180 and 180.");
                }
 
-               ASSIGN_OR_RETURN(auto stub, ctx.EmulatorControllerStub());
-
                android::emulation::control::GpsState request;
                request.set_longitude(longitude);
                request.set_latitude(latitude);
                if (altitude) {
                    request.set_altitude(*altitude);
                }
-               if (satellites) {
-                   if (*satellites < 0 || *satellites > 12) {
-                       return absl::InvalidArgumentError("Satellites must be between 0 and 12.");
-                   }
-                   request.set_satellites(*satellites);
+               constexpr int kDefaultGeoFixSatellites = 4;
+               const int num_satellites = satellites.value_or(kDefaultGeoFixSatellites);
+               if (num_satellites < 0 || num_satellites > 12) {
+                   return absl::InvalidArgumentError("Satellites must be between 0 and 12.");
                }
+               request.set_satellites(num_satellites);
                if (velocity) {
                    // Convert knots to m/s
                    request.set_speed(*velocity * 0.514444);
@@ -665,6 +663,7 @@ LegacyConsoleBridge::LegacyConsoleBridge(int port, std::filesystem::path token_p
                    }
                    request.set_bearing(*heading);
                }
+               ASSIGN_OR_RETURN(auto stub, ctx.EmulatorControllerStub());
                ASSIGN_OR_RETURN(auto context, ctx.NewContext());
                google::protobuf::Empty unused;
                return GrpcStatusToAbslStatus(stub->setGps(context.get(), request, &unused));

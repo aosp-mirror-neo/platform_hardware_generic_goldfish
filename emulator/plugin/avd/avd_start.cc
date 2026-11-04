@@ -28,7 +28,6 @@
 #include "absl/strings/str_format.h"
 #include "absl/time/clock.h"
 
-#include "android/base/qemu_clock.h"
 #include "android/goldfish/ini_file.h"
 #include "avd_extended_universe.h"
 #include "avd_start_internal.h"
@@ -144,9 +143,6 @@ void avd_info_realize(DeviceState* dev, Error** errp) {
     DCHECK(avd_info);
 
     VLOG(1) << "Device configuration, AVD name: '" << avd_info->mutable_props->avd_name << "'";
-
-    // Set the system clock to the QEMU implementation.
-    android::base::IClock::Set(std::make_unique<android::base::QemuClock>());
 
     if (auto s = ValidateAvdProps(*avd_info->mutable_props); !s.ok()) {
         error_setg(errp, "%s", s.ToString().c_str());

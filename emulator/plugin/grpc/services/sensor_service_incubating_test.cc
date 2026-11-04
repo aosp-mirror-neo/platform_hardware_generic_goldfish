@@ -23,6 +23,7 @@
 #include "absl/time/time.h"
 
 #include "android/goldfish/fake_hardware_config.h"
+#include "goldfish/system/testing/fake_clocks.h"
 #include "sensor_service.grpc.pb.h"
 
 namespace android {
@@ -39,7 +40,7 @@ class SensorServiceIncubatingTest : public ::testing::Test {
   protected:
     void SetUp() override {
         mHw = android::goldfish::FakeHardwareConfig::GetHwConfig();
-        mPhysicalModel = std::make_unique<PhysicalModel>(mHw);
+        mPhysicalModel = std::make_unique<PhysicalModel>(mHw, virtual_clock_);
         mService = std::make_unique<SensorServiceIncubatingImpl>(*mPhysicalModel);
 
         grpc::ServerBuilder builder;
@@ -78,6 +79,7 @@ class SensorServiceIncubatingTest : public ::testing::Test {
     }
 
     android::goldfish::HardwareConfig mHw;
+    ::goldfish::system::testing::FakeVirtualClock virtual_clock_;
     std::unique_ptr<PhysicalModel> mPhysicalModel;
     std::unique_ptr<SensorServiceIncubatingImpl> mService;
     std::unique_ptr<grpc::Server> mServer;

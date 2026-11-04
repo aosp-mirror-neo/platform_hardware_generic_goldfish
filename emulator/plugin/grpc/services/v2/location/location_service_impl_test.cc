@@ -32,6 +32,7 @@
 #include "goldfish/async/testing/test_event_loop.h"
 #include "goldfish/async/threaded_event_loop.h"
 #include "goldfish/avd_universe/gps/location.h"
+#include "goldfish/system/testing/fake_clocks.h"
 #include "test/grpc_v2_service_test.h"
 
 namespace goldfish::grpc::v2 {
@@ -64,13 +65,11 @@ class LocationServiceTest : public ::testing::Test {
         if (!options.event_loop) {
             options.event_loop = event_loop_.get();
         }
-        options.now_fn = [this]() {
-            return absl::FromUnixNanos(now_nanos_.load(std::memory_order_relaxed));
-        };
+        options.clock = clock_;
         service_ = std::make_unique<LocationServiceImpl>(observable_location_, std::move(options));
     }
 
-    std::atomic<int64_t> now_nanos_{1'000'000'000LL};
+    ::goldfish::system::testing::FakeSteadyClock clock_{absl::Nanoseconds(1'000'000'000LL)};
     std::unique_ptr<TestEventLoop> event_loop_ = TestEventLoop::Create("LocationTestLoop");
     ObservableLocation observable_location_;
     std::unique_ptr<LocationServiceImpl> service_;
@@ -94,7 +93,7 @@ TEST_F(LocationServiceTest, GetLocationStateReturnsDefaultGoogleplexFix) {
 }
 
 TEST_F(LocationServiceTest, UpdateLocationStateAppliesPartialAndZeroValueMutations) {
-    now_nanos_.store(2'500'000'000LL);
+    clock_.Set(absl::Nanoseconds(2'500'000'000LL));
     UpdateLocationStateRequest update_req;
     update_req.set_latitude(52.3676);
     update_req.set_longitude(4.9041);
@@ -117,7 +116,7 @@ TEST_F(LocationServiceTest, UpdateLocationStateAppliesPartialAndZeroValueMutatio
     EXPECT_EQ(update_reply.timestamp_nanos(), 2'500'000'000LL);
 
     // Explicit zero values (e.g., satellite_count = 0 for tunnel fix loss) and negative altitude.
-    now_nanos_.store(3'000'000'000LL);
+    clock_.Set(absl::Nanoseconds(3'000'000'000LL));
     UpdateLocationStateRequest tunnel_req;
     tunnel_req.set_satellite_count(0);
     tunnel_req.set_speed_meters_per_second(0.0F);
