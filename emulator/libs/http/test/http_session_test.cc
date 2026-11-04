@@ -823,4 +823,26 @@ TEST_F(HttpSessionTest, ResetClearsStateOnLoopAndOffLoopThread) {
     EXPECT_GE(logged_entries[1].duration, absl::ZeroDuration());
 }
 
+TEST_F(HttpSessionTest, CommitCurrentHeaderInsertsUniqueAndAppendsCaseInsensitiveDuplicates) {
+    bool handler_called = false;
+    router_->AddRoute(HttpMethod::kGet, "/headers", [&](const HttpRequest& req) {
+        handler_called = true;
+        EXPECT_EQ(req.GetHeader("Accept"), "application/json, text/plain; charset=utf-8");
+        EXPECT_EQ(req.GetHeader("accept"), "application/json, text/plain; charset=utf-8");
+        EXPECT_EQ(req.GetHeader("X-Emulator-Label"), "Pixel_9_Pro_エミュレータ");
+        EXPECT_EQ(req.GetHeader("X-Empty"), "");
+        return HttpResponse::String("ok", 200, "text/plain");
+    });
+
+    auto session = CreateSession();
+    EXPECT_TRUE(
+            session->OnDataReceived("GET /headers HTTP/1.1\r\n"
+                                    "Host: localhost\r\n"
+                                    "Accept: application/json\r\n"
+                                    "ACCEPT: text/plain; charset=utf-8\r\n"
+                                    "X-Emulator-Label: Pixel_9_Pro_エミュレータ\r\n"
+                                    "X-Empty: \r\n\r\n"));
+    EXPECT_TRUE(handler_called);
+}
+
 }  // namespace goldfish::http
