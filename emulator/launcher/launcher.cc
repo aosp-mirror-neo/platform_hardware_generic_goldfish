@@ -292,6 +292,10 @@ class Launcher {
                                       ::goldfish::async::EventLoop& event_loop) {
         auto console_controller = std::make_unique<::goldfish::telnet::LegacyConsoleController>(
                 *config_.socket_factory, &event_loop, *config_.metrics_reporter);
+        // -port/-ports skip the free port search, so they may run with only IPv6
+        // loopback (b/505949436).
+        constexpr auto kExplicitPort =
+                ::goldfish::telnet::LegacyConsoleController::LoopbackRequirement::kAnyFamily;
         if (opts.ports) {
             // Format should be console_port,adb_port
             std::vector<std::string_view> parts = absl::StrSplit(opts.ports, ',');
@@ -307,7 +311,7 @@ class Launcher {
                 return absl::InvalidArgumentError(
                         absl::StrCat("Failed to parse ADB port number from -ports: ", opts.ports));
             }
-            if (auto s = console_controller->Start(ports_.serial_number); !s.ok()) {
+            if (auto s = console_controller->Start(ports_.serial_number, kExplicitPort); !s.ok()) {
                 return s;
             }
         } else if (opts.port) {
@@ -319,7 +323,7 @@ class Launcher {
             }
             ports_.serial_number = port;
             ports_.adb_port = port + 1;
-            if (auto s = console_controller->Start(port); !s.ok()) {
+            if (auto s = console_controller->Start(port, kExplicitPort); !s.ok()) {
                 return s;
             }
         } else {

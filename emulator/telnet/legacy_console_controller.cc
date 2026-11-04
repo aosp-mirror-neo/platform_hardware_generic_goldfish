@@ -17,6 +17,7 @@
 #include <utility>
 
 #include "absl/log/log.h"
+#include "absl/strings/str_cat.h"
 
 #include "console_server.h"
 #include "goldfish/network/endpoint.h"
@@ -30,7 +31,7 @@ LegacyConsoleController::LegacyConsoleController(
         goldfish::metrics::MetricsReporter& metrics_reporter)
         : factory_(factory), main_loop_(main_loop), metrics_reporter_(metrics_reporter) {}
 
-absl::Status LegacyConsoleController::Start(int port) {
+absl::Status LegacyConsoleController::Start(int port, LoopbackRequirement requirement) {
     using ::goldfish::network::Endpoint;
     using ::goldfish::network::kIPv4LoopbackAddress;
     using ::goldfish::network::kIPv6LoopbackAddress;
@@ -59,18 +60,26 @@ absl::Status LegacyConsoleController::Start(int port) {
         if (status.ok()) {
             any_success = true;
         } else {
-            // TODO(jansene): Currently we require IPv4 to be available.
+            // TODO(jansene): Free port selection requires IPv4 to be available.
             // See b/505949436.
-            if (inst.name == "IPv4") {
+            if (inst.name == "IPv4" && requirement == LoopbackRequirement::kRequireIpv4) {
+                servers_.clear();
                 return absl::NotFoundError("Unable to bind to IPv4 port");
             }
+            // The port was chosen explicitly, so a host with only one loopback
+            // family (e.g. an IPv6-only sandbox has no 127.0.0.1) can still run
+            // as long as the other family is listening.
+            LOG(WARNING) << "Unable to start " << inst.name << " console server on port " << port
+                         << ": " << status;
             inst.server.reset();
         }
         servers_.push_back(std::move(inst));
     }
 
     if (!any_success) {
-        return absl::InternalError("Failed to start both IPv4 and IPv6 console servers.");
+        servers_.clear();
+        return absl::NotFoundError(
+                absl::StrCat("Unable to bind the console to IPv4 or IPv6 loopback port ", port));
     }
 
     handler_ = std::move(handler);
