@@ -961,6 +961,38 @@ TEST_F(LauncherTest, DefaultConfigUsesNetsimModem) {
                 testing::Not(testing::Contains(testing::HasSubstr("socket,id=modem"))));
 }
 
+// API < kNetsimModemMinApiLevel images ship a radio HAL that aborts on
+// netsimd's modem (empty operator strings while unregistered), so they use the
+// in-process modem simulator even when netsim is on; netsim still carries
+// Wi-Fi/Bluetooth.
+TEST_F(LauncherTest, Api36UsesModemSimulatorEvenWithNetsim) {
+    auto avd = CreateMockAvd();
+    EXPECT_CALL(*avd, ApiLevel()).WillRepeatedly(testing::Return(kNetsimModemMinApiLevel - 1));
+    opts.no_netsim = false;
+    opts.no_netsim_modem = false;
+    EmulatorPorts ports{.serial_number = 5554, .adb_port = 5555};
+    ChardevEndpoints chardev_endpoints{.netsim = "localhost:1234",
+                                       .modem_simulator = "localhost:5678"};
+    LaunchQemu emulator{EmulatorConfig{
+        ports, chardev_endpoints, {}, user_paths, emulator_paths, *avd, opts, feature_flags}};
+
+    auto launch_config = emulator.launch_config();
+    ASSERT_TRUE(launch_config.ok()) << launch_config.status();
+    EXPECT_THAT(
+            launch_config->args,
+            testing::Contains(testing::HasSubstr("socket,id=modem,nodelay=on,reconnect-ms=100,")));
+    EXPECT_THAT(launch_config->args, testing::Not(testing::Contains("netsim-cellular,id=modem")));
+    EXPECT_THAT(launch_config->args, testing::Contains(testing::HasSubstr("user,id=eth0")));
+    EXPECT_THAT(launch_config->args, testing::Contains("netsim-bt,id=bluetooth"));
+}
+
+TEST(UseNetsimModemTest, OnlyFromMinApiLevelAndWhenNotDisabled) {
+    EXPECT_TRUE(UseNetsimModem(/*no_netsim_modem_opt=*/false, kNetsimModemMinApiLevel));
+    EXPECT_TRUE(UseNetsimModem(false, kNetsimModemMinApiLevel + 1));
+    EXPECT_FALSE(UseNetsimModem(false, kNetsimModemMinApiLevel - 1));
+    EXPECT_FALSE(UseNetsimModem(true, kNetsimModemMinApiLevel));
+}
+
 TEST_F(LauncherTest, FallbackConfigUsesModemSimulatorWhenNoNetsimModem) {
     auto avd = CreateMockAvd();
     opts.no_netsim = false;

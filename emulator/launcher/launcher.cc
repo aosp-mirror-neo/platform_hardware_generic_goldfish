@@ -34,6 +34,7 @@
 #include "android/emulation/control/absl_status_translate.h"
 #include "android/emulation/control/emulator_grpc_client.h"
 #include "android/goldfish/avd.h"
+#include "android/goldfish/constants.h"
 #include "android/goldfish/input_paths.h"
 #include "android/status/status_macros.h"
 #include "emulator_controller.grpc.pb.h"
@@ -169,7 +170,8 @@ class Launcher {
                             }
                         });
                     }
-                    if (!use_netsim_ || config_.opts.no_netsim_modem) {
+                    if (!use_netsim_ ||
+                        !UseNetsimModem(config_.opts.no_netsim_modem, config_.avd->ApiLevel())) {
                         config_.event_loop
                                 .Post([this, chardevs]() { init_modem_simulator(chardevs); })
                                 .IgnoreError();

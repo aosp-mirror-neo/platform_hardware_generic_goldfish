@@ -692,6 +692,7 @@ cc_library(
     srcs = ["launcher.cc"],
     hdrs = ["launcher.h"],
     deps = [
+        ":constants",
         ":feature_flags",
         ":host_info",
         ":input_paths",

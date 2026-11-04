@@ -22,4 +22,18 @@ constexpr int kMinSupportedApiLevel = 31;
 // goldfish_address_space.
 constexpr int kVirtioReadyApiLevel = 37;
 
+// Minimum Android API level whose goldfish radio HAL
+// (android.hardware.radio-service.ranchu) works with netsimd's cellular modem.
+// Earlier images abort on the empty operator strings netsimd returns while
+// unregistered (unguarded `operatorNumeric.substr(3)` in getMcc()/getMnc()),
+// so they use the in-process modem simulator, as the classic emulator did.
+constexpr int kNetsimModemMinApiLevel = 37;
+
+// Whether telephony goes through netsimd's cellular modem (otherwise the
+// launcher starts the in-process modem simulator). `api_level` is
+// `Avd::ApiLevel()`.
+constexpr bool UseNetsimModem(bool no_netsim_modem_opt, int api_level) {
+    return !no_netsim_modem_opt && api_level >= kNetsimModemMinApiLevel;
+}
+
 }  // namespace android::goldfish
