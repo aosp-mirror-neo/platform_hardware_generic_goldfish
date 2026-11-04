@@ -202,6 +202,10 @@ TEST(VirtioInputAndroidConfigTest, AdvertisesStylusRubberKeysAndSignedDegreeRang
     EXPECT_EQ(max_val, 10);
 
     EXPECT_FALSE(virtio_input_android_get_abs_range(ABS_RZ, &min_val, &max_val));
+
+    constexpr uint8_t kExpectedSwBitmap =
+            (1U << SW_LID) | (1U << SW_HEADPHONE_INSERT) | (1U << SW_MICROPHONE_INSERT);
+    EXPECT_EQ(virtio_input_android_ev_sw_bitmap(), kExpectedSwBitmap);
 }
 
 }  // namespace

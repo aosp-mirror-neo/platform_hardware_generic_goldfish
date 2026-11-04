@@ -26,6 +26,11 @@
 
 #include "goldfish/base/array_size.h"
 
+// The EV_SW bitmap: SW_LID (fold/unfold) plus the wired headset jack switches.
+enum {
+    kEvSwBits = (1 << SW_LID) | (1 << SW_HEADPHONE_INSERT) | (1 << SW_MICROPHONE_INSERT),
+};
+
 static const struct virtio_input_config kVirtioAndroidConfig[] = {
     {
         .select = VIRTIO_INPUT_CFG_ABS_INFO,
@@ -120,13 +125,13 @@ static const struct virtio_input_config kVirtioAndroidConfig[] = {
         .u.abs.max = const_le32(MTS_PRESSURE_RANGE_MAX),
     },
     {
-        // Needed for fold/unfold (EV_SW)
+        // Fold/unfold and wired headset jack switches (EV_SW).
         .select = VIRTIO_INPUT_CFG_EV_BITS,
         .subsel = EV_SW,
         .size = 1,
         .u.bitmap =
                 {
-                    1,
+                    kEvSwBits,
                 },
     },
     {/* end of list */},
@@ -165,6 +170,16 @@ const unsigned short* virtio_input_android_ev_abs_codes(size_t* count) {
         *count = ARRAY_SIZE(kEvAbsCodes);
     }
     return kEvAbsCodes;
+}
+
+uint8_t virtio_input_android_ev_sw_bitmap(void) {
+    for (size_t i = 0; kVirtioAndroidConfig[i].select != 0; ++i) {
+        if (kVirtioAndroidConfig[i].select == VIRTIO_INPUT_CFG_EV_BITS &&
+            kVirtioAndroidConfig[i].subsel == EV_SW && kVirtioAndroidConfig[i].size > 0) {
+            return kVirtioAndroidConfig[i].u.bitmap[0];
+        }
+    }
+    return 0;
 }
 
 bool virtio_input_android_get_abs_range(uint8_t axis, int32_t* min_out, int32_t* max_out) {

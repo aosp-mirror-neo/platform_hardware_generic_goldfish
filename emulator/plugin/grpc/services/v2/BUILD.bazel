@@ -607,8 +607,10 @@ cc_library(
         "//emulator/plugin/avd:avd_properties",
         "//emulator/plugin/avd:avd_universe",
         "//emulator/plugin/avd:global_event_loop",
+        "//emulator/plugin/display",
         "//emulator/plugin/vminterface",
         "@grpc//:grpc++",
+        "@qemu//:qemu-headers-exported",
     ],
 )
 

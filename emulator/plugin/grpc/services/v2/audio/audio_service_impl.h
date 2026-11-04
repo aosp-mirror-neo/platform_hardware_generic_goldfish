@@ -17,6 +17,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -104,8 +105,10 @@ class AudioServiceImpl final : public AudioServiceBase {
     using StreamMicrophoneAudioResponse = ::android::emulation::v2::StreamMicrophoneAudioResponse;
     using StreamSpeakerAudioRequest = ::android::emulation::v2::StreamSpeakerAudioRequest;
     using UpdateAudioStateRequest = ::android::emulation::v2::UpdateAudioStateRequest;
+    using WiredHeadset = ::android::emulation::v2::WiredHeadset;
 
     using MicrophoneSink = std::function<absl::Status(const AudioChunk&)>;
+    using SetHeadsetSwitchesFn = std::function<void(bool headphone, bool microphone)>;
     using SleepFn = std::function<void(absl::Duration)>;
 
     static constexpr int32_t kDefaultSpeakerSampleRateHz = 48000;
@@ -131,6 +134,7 @@ class AudioServiceImpl final : public AudioServiceBase {
         bool read_only{false};
         AudioBackend* audio_backend{nullptr};
         MicrophoneSink microphone_sink{nullptr};
+        SetHeadsetSwitchesFn set_headset_switches{nullptr};
         std::reference_wrapper<const ::goldfish::system::SteadyClock> clock{
                 ::goldfish::system::SteadyClock::GetRealClock()};
         SleepFn sleep_fn{[](absl::Duration d) { absl::SleepFor(d); }};
@@ -365,7 +369,11 @@ class AudioServiceImpl final : public AudioServiceBase {
     };
 
     bool HasAudioSubsystem() const { return options_.has_audio_output || options_.has_audio_input; }
+    ::grpc::Status CheckWritable(absl::string_view operation) const;
     ::grpc::Status CheckMicrophoneWritable(absl::string_view operation) const;
+    ::grpc::Status UpdateMicrophone(const ::goldfish::audio::AudioInputStateMutation& mutation,
+                                    ::goldfish::audio::AudioInputStateSnapshot* updated) const
+            ABSL_LOCKS_EXCLUDED(bind_serialize_mutex_, state_binding_mutex_);
     std::shared_ptr<::goldfish::audio::AudioInputMux> BindActiveMux() const
             ABSL_LOCKS_EXCLUDED(bind_serialize_mutex_, state_binding_mutex_);
     std::shared_ptr<::goldfish::audio::AudioInputMux> GetBoundMux() const
@@ -391,6 +399,7 @@ class AudioServiceImpl final : public AudioServiceBase {
     const Options options_;
     const ::goldfish::system::SteadyClock& clock_;
     std::shared_ptr<SinkMuxState> sink_mux_state_;
+    std::atomic<WiredHeadset> wired_headset_{WiredHeadset::WIRED_HEADSET_DISCONNECTED};
     mutable AudioStateEventSource state_events_;
 
     mutable absl::Mutex bind_serialize_mutex_;

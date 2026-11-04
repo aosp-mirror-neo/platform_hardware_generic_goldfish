@@ -109,10 +109,11 @@ class V1InputTranslator {
     std::vector<::android::emulation::v2::InputEvent> TranslateKeyboard(
             const ::android::emulation::control::KeyboardEvent& event) const;
 
-    // Buffers raw v1 AndroidEvent (type, code, value) tuples per display and
-    // flushes them to IDisplay::SendEvDevReport upon receiving EV_SYN/SYN_REPORT,
-    // dropping multi-touch slot state codes that would corrupt InputDispatcher's
-    // multi-touch slot tracking.
+    // Buffers deprecated v1 AndroidEvent wired-headset switch tuples
+    // (EV_SW SW_HEADPHONE_INSERT and SW_MICROPHONE_INSERT) per display and
+    // flushes them to IDisplay::SendEvDevReport upon receiving EV_SYN/SYN_REPORT.
+    // All other AndroidEvent types and codes are dropped so raw evdev cannot
+    // bypass InputDispatcher's multi-touch slot and held-key tracking.
     absl::Status DispatchAndroidEvent(const ::android::emulation::control::AndroidEvent& event);
 
     // Translates a polymorphic v1 InputEvent envelope. If the envelope carries
