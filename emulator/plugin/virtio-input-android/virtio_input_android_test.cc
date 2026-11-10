@@ -24,6 +24,12 @@
 #include <utility>
 #include <vector>
 
+#include "absl/types/span.h"
+
+#include "standard-headers/linux/input-event-codes.h"
+#include "standard-headers/linux/input.h"
+#include "virtio_input_android_config.h"
+
 struct VirtIOInputHID {
     int placeholder = 0;
 };
@@ -153,6 +159,53 @@ TEST(VirtioInputAndroidEventsTest, CallbackCanRegisterAndRemovePeerListenerWitho
 
     virtio_input_android_notify_active_changed(&dev, 12);
     EXPECT_THAT(peer_observed, ElementsAre(11));
+}
+
+TEST(VirtioInputAndroidConfigTest, AdvertisesStylusRubberKeysAndSignedDegreeRanges) {
+    size_t key_count = 0;
+    const unsigned short* keys = virtio_input_android_ev_key_codes(&key_count);
+    EXPECT_THAT(absl::MakeConstSpan(keys, key_count),
+                ::testing::UnorderedElementsAre(BTN_TOOL_RUBBER, BTN_STYLUS));
+
+    size_t abs_count = 0;
+    const unsigned short* abs_codes = virtio_input_android_ev_abs_codes(&abs_count);
+    EXPECT_THAT(absl::MakeConstSpan(abs_codes, abs_count),
+                ::testing::AllOf(::testing::Contains(ABS_MT_ORIENTATION),
+                                 ::testing::Contains(ABS_TILT_X), ::testing::Contains(ABS_TILT_Y),
+                                 ::testing::Contains(ABS_MT_TOOL_TYPE),
+                                 ::testing::Contains(ABS_MT_PRESSURE)));
+
+    int32_t min_val = 0;
+    int32_t max_val = 0;
+    ASSERT_TRUE(virtio_input_android_get_abs_range(ABS_MT_ORIENTATION, &min_val, &max_val));
+    EXPECT_EQ(min_val, -90);
+    EXPECT_EQ(max_val, 90);
+
+    ASSERT_TRUE(virtio_input_android_get_abs_range(ABS_TILT_X, &min_val, &max_val));
+    EXPECT_EQ(min_val, -90);
+    EXPECT_EQ(max_val, 90);
+
+    ASSERT_TRUE(virtio_input_android_get_abs_range(ABS_TILT_Y, &min_val, &max_val));
+    EXPECT_EQ(min_val, -90);
+    EXPECT_EQ(max_val, 90);
+
+    ASSERT_TRUE(virtio_input_android_get_abs_range(ABS_MT_TOOL_TYPE, &min_val, &max_val));
+    EXPECT_EQ(min_val, 0);
+    EXPECT_EQ(max_val, MT_TOOL_MAX);
+
+    ASSERT_TRUE(virtio_input_android_get_abs_range(ABS_MT_PRESSURE, &min_val, &max_val));
+    EXPECT_EQ(min_val, 0);
+    EXPECT_EQ(max_val, 0x400);
+
+    ASSERT_TRUE(virtio_input_android_get_abs_range(ABS_MT_SLOT, &min_val, &max_val));
+    EXPECT_EQ(min_val, 0);
+    EXPECT_EQ(max_val, 10);
+
+    EXPECT_FALSE(virtio_input_android_get_abs_range(ABS_RZ, &min_val, &max_val));
+
+    constexpr uint8_t kExpectedSwBitmap =
+            (1U << SW_LID) | (1U << SW_HEADPHONE_INSERT) | (1U << SW_MICROPHONE_INSERT);
+    EXPECT_EQ(virtio_input_android_ev_sw_bitmap(), kExpectedSwBitmap);
 }
 
 }  // namespace

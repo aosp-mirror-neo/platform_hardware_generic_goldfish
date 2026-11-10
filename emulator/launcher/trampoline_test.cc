@@ -17,6 +17,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <cstdio>
 #include <fstream>
 #include <memory>
 
@@ -299,8 +300,14 @@ TEST(TrampolineDeathTest, trampolineToQemu2Success) {
     fs::copy_file(mock_src, dest, fs::copy_options::overwrite_existing);
     fs::permissions(dest, fs::perms::owner_all | fs::perms::group_exec | fs::perms::others_exec);
 
-    EXPECT_EXIT(android::goldfish::TrampolineToQemu2(launcher_dir, {}).IgnoreError(),
-                ::testing::ExitedWithCode(42), "");
+    EXPECT_EXIT(android::goldfish::TrampolineToQemu2(launcher_dir, {},
+                                                     [] {
+                                                         std::fprintf(stderr,
+                                                                      "BEFORE_EXEC_CALLED\n");
+                                                         std::fflush(stderr);
+                                                     })
+                        .IgnoreError(),
+                ::testing::ExitedWithCode(42), "BEFORE_EXEC_CALLED");
 }
 
 TEST(TrampolineDeathTest, trampolineToQemu2ArgsForwarded) {
@@ -325,7 +332,10 @@ TEST(TrampolineTest, trampolineToQemu2BinaryNotExists) {
     fs::path temp_dir = sys.GetTempRoot()->Path();
     fs::path launcher_dir = temp_dir / "nested" / "bin";
 
-    auto status = android::goldfish::TrampolineToQemu2(launcher_dir, {});
+    bool before_exec_called = false;
+    auto status = android::goldfish::TrampolineToQemu2(launcher_dir, {},
+                                                       [&] { before_exec_called = true; });
+    EXPECT_FALSE(before_exec_called);
     EXPECT_TRUE(absl::IsNotFound(status)) << status;
     EXPECT_THAT(status.message(), ::testing::HasSubstr("Legacy emulator binary not found at"));
     EXPECT_THAT(status.message(), ::testing::HasSubstr("sdkmanager --install emulator"));
@@ -345,7 +355,10 @@ TEST(TrampolineTest, trampolineToQemu2BinaryNotExecutable) {
     fs::copy_file(mock_src, dest, fs::copy_options::overwrite_existing);
     fs::permissions(dest, fs::perms::owner_read | fs::perms::owner_write);
 
-    auto status = android::goldfish::TrampolineToQemu2(launcher_dir, {});
+    bool before_exec_called = false;
+    auto status = android::goldfish::TrampolineToQemu2(launcher_dir, {},
+                                                       [&] { before_exec_called = true; });
+    EXPECT_FALSE(before_exec_called);
     EXPECT_TRUE(absl::IsPermissionDenied(status)) << status;
     EXPECT_THAT(status.message(), ::testing::HasSubstr("Cannot execute legacy emulator binary at"));
     EXPECT_THAT(status.message(), ::testing::HasSubstr("sdkmanager --install emulator"));

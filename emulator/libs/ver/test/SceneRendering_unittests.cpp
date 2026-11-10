@@ -28,6 +28,9 @@
 #include <thread>
 #include <vector>
 
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
+
 #include "Renderer.h"
 #include "TestUtils.h"
 #include "android/base/system.h"
@@ -295,24 +298,30 @@ TEST_P(PosterSideBySideTest, PosterSideBySide) {
     ASSERT_NE(fbData, nullptr);
     ASSERT_EQ(fbSize, (uint64_t)width * height * 4);
 
-    // Allow background loader thread to load textures and process queue
-    // TODO(virtualscene) Remove this and use loader events to signal when ready
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // Poll until the background loader thread finishes decoding both poster
+    // textures and the scene renders them, instead of relying on a fixed sleep
+    // that flakes under ASAN + software Lavapipe (b/579560086).
+    constexpr absl::Duration kTextureLoadTimeout = absl::Seconds(10);
+    constexpr absl::Duration kTexturePollInterval = absl::Milliseconds(10);
+    constexpr uint64_t kRgbaBytesPerPixel = 4;
+    constexpr char kPosterSideBySideGolden[] = "scene_poster_side_by_side_golden.png";
 
-    ver_scene_update(scene, true);
-    rendered = ver_render_view(scene, view, []() {}, nullptr);
-    ASSERT_TRUE(rendered);
+    const absl::Time deadline = absl::Now() + kTextureLoadTimeout;
+    while (absl::Now() < deadline) {
+        ver_scene_update(scene, true);
+        rendered = ver_render_view(scene, view, []() {}, nullptr);
+        ASSERT_TRUE(rendered);
 
-    // Render frame 3 so that replaced textures are drawn
-    ver_scene_update(scene, true);
-    rendered = ver_render_view(scene, view, []() {}, nullptr);
-    ASSERT_TRUE(rendered);
+        ver_render_view_get_framebuffer(view, &fbData, &fbSize);
+        ASSERT_NE(fbData, nullptr);
+        ASSERT_EQ(fbSize, static_cast<uint64_t>(width) * height * kRgbaBytesPerPixel);
+        if (compareWithGolden(fbData, width, height, kPosterSideBySideGolden)) {
+            break;
+        }
+        absl::SleepFor(kTexturePollInterval);
+    }
 
-    ver_render_view_get_framebuffer(view, &fbData, &fbSize);
-    ASSERT_NE(fbData, nullptr);
-    ASSERT_EQ(fbSize, (uint64_t)width * height * 4);
-
-    verifyOrCompareWithGolden(fbData, width, height, "scene_poster_side_by_side_golden.png",
+    verifyOrCompareWithGolden(fbData, width, height, kPosterSideBySideGolden,
                               "scene_poster_side_by_side");
 
     ver_destroy_render_view(view);

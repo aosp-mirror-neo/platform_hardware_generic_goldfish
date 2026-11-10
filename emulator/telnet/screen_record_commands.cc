@@ -13,6 +13,7 @@
 // limitations under the License.
 #include "screen_record_commands.h"
 
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
 
@@ -29,6 +30,7 @@
 
 #include "android/emulation/control/absl_status_translate.h"
 #include "android/emulation/control/screen_recording_constants.h"
+#include "android/status/status_macros.h"
 #include "legacy_console_bridge.h"
 #include "screen_recording_service.grpc.pb.h"
 #include "screen_recording_service.pb.h"
@@ -46,6 +48,36 @@ using android::emulation::control::kMinVideoBitrate;
 
 namespace {
 
+absl::Status FileIoErrorToStatus(int err, absl::string_view message) {
+    if (err != 0) {
+        return absl::ErrnoToStatus(err, message);
+    }
+    return absl::InternalError(message);
+}
+
+absl::StatusOr<uint32_t> ParseDisplayId(ArgStream& args, std::string_view example) {
+    if (args.Empty()) {
+        return absl::InvalidArgumentError(
+                absl::StrCat("Missing value for '--display': expected a non-negative integer "
+                             "display ID (e.g., '",
+                             example, "')."));
+    }
+    const std::string raw_display = args.Peek();
+    const absl::StatusOr<int> display_id = args.NextInt();
+    if (!display_id.ok()) {
+        return absl::InvalidArgumentError(
+                absl::StrCat("Invalid '--display' value '", raw_display,
+                             "': expected a non-negative integer display ID (e.g., '", example,
+                             "'): ", display_id.status().message()));
+    }
+    if (*display_id < 0) {
+        return absl::InvalidArgumentError(absl::StrCat(
+                "Invalid '--display' value ", *display_id,
+                ": display ID must be a non-negative integer (e.g., '", example, "')."));
+    }
+    return static_cast<uint32_t>(*display_id);
+}
+
 absl::Status ParseRecordingInfo(ArgStream& args, RecordingInfo* request) {
     std::string filename;
 
@@ -54,65 +86,109 @@ absl::Status ParseRecordingInfo(ArgStream& args, RecordingInfo* request) {
         if (token.starts_with("--")) {
             args.Next();  // consume option
             if (token == "--size") {
-                std::string size_str = args.Next();
-                std::vector<std::string_view> parts = absl::StrSplit(size_str, 'x');
-                if (parts.size() != 2) {
+                if (args.Empty()) {
                     return absl::InvalidArgumentError(
-                            absl::StrCat("Invalid size '", size_str, "', must be width x height"));
+                            "Missing value for '--size': expected '<width>x<height>' in pixels "
+                            "(e.g., '--size 1280x720').");
                 }
-                uint32_t width, height;
-                if (!absl::SimpleAtoi(parts[0], &width) || !absl::SimpleAtoi(parts[1], &height)) {
+                const std::string size_str = args.Next();
+                const std::vector<std::string_view> parts = absl::StrSplit(size_str, 'x');
+                uint32_t width = 0;
+                uint32_t height = 0;
+                if (parts.size() != 2 || !absl::SimpleAtoi(parts[0], &width) ||
+                    !absl::SimpleAtoi(parts[1], &height)) {
                     return absl::InvalidArgumentError(
-                            absl::StrCat("Invalid size '", size_str, "', must be width x height"));
+                            absl::StrCat("Invalid '--size' value '", size_str,
+                                         "', must be width x height in pixels (e.g., '--size "
+                                         "1280x720')."));
                 }
                 if (width == 0 || height == 0) {
-                    return absl::InvalidArgumentError(
-                            absl::StrCat("Invalid size ", width, "x", height,
-                                         ", width and height may not be zero"));
+                    return absl::InvalidArgumentError(absl::StrCat(
+                            "Invalid '--size' value ", width, "x", height,
+                            ", width and height may not be zero; specify positive pixel "
+                            "dimensions (e.g., '--size 1280x720')."));
                 }
                 request->set_width(width);
                 request->set_height(height);
             } else if (token == "--bit-rate") {
-                std::string rate_str = args.Next();
+                if (args.Empty()) {
+                    return absl::InvalidArgumentError(absl::StrCat(
+                            "Missing value for '--bit-rate': expected an integer bit rate in bps "
+                            "or with an 'M' (Mbps) suffix within [",
+                            kMinVideoBitrate, ", ", kMaxVideoBitrate,
+                            "] bps (e.g., '--bit-rate 4M')."));
+                }
+                const std::string rate_str = args.Next();
                 std::string_view rate_view(rate_str);
-                const uint32_t multiplier = absl::ConsumeSuffix(&rate_view, "M") ? 1000000U : 1U;
-                uint32_t bit_rate;
-                if (!absl::SimpleAtoi(rate_view, &bit_rate)) {
-                    return absl::InvalidArgumentError("Invalid bit-rate value.");
+                const uint64_t multiplier =
+                        absl::ConsumeSuffix(&rate_view, "M") ? 1000000ULL : 1ULL;
+                uint32_t raw_bit_rate = 0;
+                if (rate_view.empty() || !absl::SimpleAtoi(rate_view, &raw_bit_rate)) {
+                    return absl::InvalidArgumentError(absl::StrCat(
+                            "Invalid '--bit-rate' value '", rate_str,
+                            "': expected an integer bit rate in bps or with an 'M' (Mbps) suffix "
+                            "within [",
+                            kMinVideoBitrate, ", ", kMaxVideoBitrate,
+                            "] bps (e.g., '--bit-rate 4M' or '--bit-rate 4000000')."));
                 }
-                bit_rate *= multiplier;
+                const uint64_t bit_rate = static_cast<uint64_t>(raw_bit_rate) * multiplier;
                 if (bit_rate < kMinVideoBitrate || bit_rate > kMaxVideoBitrate) {
-                    return absl::InvalidArgumentError(
-                            absl::StrCat("Bit rate ", bit_rate, "bps outside acceptable range [",
-                                         kMinVideoBitrate, ",", kMaxVideoBitrate, "]"));
+                    return absl::InvalidArgumentError(absl::StrCat(
+                            "Bit rate ", bit_rate, "bps outside acceptable range [",
+                            kMinVideoBitrate, ",", kMaxVideoBitrate, "] (e.g., '--bit-rate 4M')"));
                 }
-                request->set_bit_rate(bit_rate);
+                request->set_bit_rate(static_cast<uint32_t>(bit_rate));
             } else if (token == "--time-limit") {
-                auto val = args.NextInt();
-                if (!val.ok()) return val.status();
-                uint32_t time_limit = *val;
-                if (time_limit == 0 || time_limit > kMaxTimeLimit) {
-                    return absl::InvalidArgumentError(absl::StrCat("Time limit ", time_limit,
+                if (args.Empty()) {
+                    return absl::InvalidArgumentError(absl::StrCat(
+                            "Missing value for '--time-limit': expected an integer duration in "
+                            "seconds within [1, ",
+                            kMaxTimeLimit, "] (e.g., '--time-limit 180')."));
+                }
+                const std::string raw_time_limit = args.Peek();
+                const absl::StatusOr<int> time_limit = args.NextInt();
+                if (!time_limit.ok()) {
+                    return absl::InvalidArgumentError(absl::StrCat(
+                            "Invalid '--time-limit' value '", raw_time_limit,
+                            "': expected an integer duration in seconds within [1, ", kMaxTimeLimit,
+                            "] (e.g., '--time-limit 180'): ", time_limit.status().message()));
+                }
+                if (*time_limit <= 0 || static_cast<uint32_t>(*time_limit) > kMaxTimeLimit) {
+                    return absl::InvalidArgumentError(absl::StrCat("Time limit ", *time_limit,
                                                                    "s outside acceptable range [1,",
                                                                    kMaxTimeLimit, "]"));
                 }
-                request->set_time_limit(time_limit);
+                request->set_time_limit(static_cast<uint32_t>(*time_limit));
             } else if (token == "--fps") {
-                auto val = args.NextInt();
-                if (!val.ok()) return val.status();
-                uint32_t fps = *val;
-                if (fps == 0 || fps > kMaxFPS) {
-                    return absl::InvalidArgumentError(absl::StrCat(
-                            "FPS ", fps, "ds outside acceptable range [1,", kMaxFPS, "]"));
+                if (args.Empty()) {
+                    return absl::InvalidArgumentError(
+                            absl::StrCat("Missing value for '--fps': expected an integer frame "
+                                         "rate in [1, ",
+                                         kMaxFPS, "] fps (e.g., '--fps 24')."));
                 }
-                request->set_fps(fps);
+                const std::string raw_fps = args.Peek();
+                const absl::StatusOr<int> fps = args.NextInt();
+                if (!fps.ok()) {
+                    return absl::InvalidArgumentError(
+                            absl::StrCat("Invalid '--fps' value '", raw_fps,
+                                         "': expected an integer frame rate in [1, ", kMaxFPS,
+                                         "] fps (e.g., '--fps 24'): ", fps.status().message()));
+                }
+                if (*fps <= 0 || static_cast<uint32_t>(*fps) > kMaxFPS) {
+                    return absl::InvalidArgumentError(
+                            absl::StrCat("FPS ", *fps, "fps outside acceptable range [1,", kMaxFPS,
+                                         "] (e.g., '--fps 24')"));
+                }
+                request->set_fps(static_cast<uint32_t>(*fps));
             } else if (token == "--display") {
-                auto val = args.NextInt();
-                if (!val.ok()) return val.status();
-                request->set_display(*val);
+                ASSIGN_OR_RETURN(const uint32_t display_id, ParseDisplayId(args, "--display 0"));
+                request->set_display(display_id);
             } else {
                 return absl::InvalidArgumentError(
-                        "Invalid arguments (see help screenrecord start).");
+                        absl::StrCat("Unknown option '", token,
+                                     "' for 'screenrecord start'. Supported options are '--size', "
+                                     "'--bit-rate', '--time-limit', '--fps', and '--display' "
+                                     "(see 'help screenrecord start')."));
             }
         } else {
             filename = std::string(args.Remaining());
@@ -121,7 +197,9 @@ absl::Status ParseRecordingInfo(ArgStream& args, RecordingInfo* request) {
     }
 
     if (filename.empty()) {
-        return absl::InvalidArgumentError("Must provide an output filename");
+        return absl::InvalidArgumentError(
+                "Must provide an output filename. Usage: 'screenrecord start [options] <filename>' "
+                "(see 'help screenrecord start').");
     }
 
     request->set_file_name(filename);
@@ -137,12 +215,12 @@ absl::Status ParseScreenshotArgs(ArgStream& args, uint32_t* display, std::filesy
         if (token.starts_with("--")) {
             args.Next();  // consume option
             if (token == "--display") {
-                auto val = args.NextInt();
-                if (!val.ok()) return val.status();
-                *display = *val;
+                ASSIGN_OR_RETURN(*display, ParseDisplayId(args, "--display 0"));
             } else {
-                return absl::InvalidArgumentError(
-                        "Invalid arguments (see help screenrecord screenshot).");
+                return absl::InvalidArgumentError(absl::StrCat(
+                        "Unknown option '", token,
+                        "' for 'screenrecord screenshot'. Supported option is '--display <id>' "
+                        "(see 'help screenrecord screenshot')."));
             }
         } else {
             path_str = std::string(args.Remaining());
@@ -179,9 +257,14 @@ void RegisterScreenRecordCommands(CommandRegistryBuilder::NodeBuilder& screenrec
                         ASSIGN_OR_RETURN(auto context, NewRecordingContext(ctx));
 
                         RecordingInfo response;
-                        auto status = stub->StartRecording(context.get(), request, &response);
+                        const grpc::Status status =
+                                stub->StartRecording(context.get(), request, &response);
                         if (!status.ok()) {
-                            return GrpcStatusToAbslStatus(status);
+                            const absl::Status translated = GrpcStatusToAbslStatus(status);
+                            return absl::Status(
+                                    translated.code(),
+                                    absl::StrCat("Failed to start screen recording to '",
+                                                 request.file_name(), "': ", translated.message()));
                         }
 
                         return absl::OkStatus();
@@ -196,65 +279,99 @@ void RegisterScreenRecordCommands(CommandRegistryBuilder::NodeBuilder& screenrec
                 ASSIGN_OR_RETURN(auto context_list, NewRecordingContext(ctx));
                 RecordingInfo list_request;
                 android::emulation::control::incubating::RecordingInfoList list_response;
-                auto status =
+                const grpc::Status status =
                         stub->ListRecordings(context_list.get(), list_request, &list_response);
                 if (!status.ok()) {
-                    return absl::InternalError("Failed to list recordings.");
+                    const absl::Status translated = GrpcStatusToAbslStatus(status);
+                    return absl::Status(translated.code(),
+                                        absl::StrCat("Failed to list active screen recordings: ",
+                                                     translated.message()));
                 }
 
                 // Stop each active recording
+                absl::Status first_error = absl::OkStatus();
                 for (const auto& info : list_response.recordings()) {
                     if (info.state() == android::emulation::control::incubating::RecordingInfo::
                                                 RECORDER_STATE_RECORDING) {
                         ASSIGN_OR_RETURN(auto context_stop, NewRecordingContext(ctx));
                         RecordingInfo stop_response;
-                        auto status_stop =
+                        const grpc::Status status_stop =
                                 stub->StopRecording(context_stop.get(), info, &stop_response);
                         if (!status_stop.ok()) {
-                            LOG(WARNING) << "Failed to stop recording: " << info.file_name();
+                            const absl::Status translated = GrpcStatusToAbslStatus(status_stop);
+                            LOG(WARNING) << "Failed to stop screen recording '" << info.file_name()
+                                         << "' on display " << info.display() << ": " << translated;
+                            if (first_error.ok()) {
+                                first_error = absl::Status(
+                                        translated.code(),
+                                        absl::StrCat("Failed to stop screen recording '",
+                                                     info.file_name(), "' on display ",
+                                                     info.display(), ": ", translated.message()));
+                            }
                         }
                     }
                 }
 
-                return absl::OkStatus();
+                return first_error;
             });
 
-    screenrecord.On("screenshot" /* do_screenrecord_screenshot */, "Take a screenshot",
-                    "'screenrecord screenshot [options] <dirname>'\r\n"
-                    "\r\nTakes a single screenshot of emulator's display "
-                    "and saves the resulting PNG in <dirname>.\r\n"
-                    "\r\nOptions:\r\n"
-                    "  --display ID\r\n"
-                    "    Set display to take screenshot. Default is the device's "
-                    "main display ID = 0\r\n",
-                    [](LegacyConsoleBridge::ConsoleContext& ctx, ArgStream& args) -> absl::Status {
-                        uint32_t display;
-                        std::filesystem::path path;
-                        RETURN_IF_ERROR(ParseScreenshotArgs(args, &display, &path));
+    screenrecord.On(
+            "screenshot" /* do_screenrecord_screenshot */, "Take a screenshot",
+            "'screenrecord screenshot [options] <dirname>'\r\n"
+            "\r\nTakes a single screenshot of emulator's display "
+            "and saves the resulting PNG in <dirname>.\r\n"
+            "\r\nOptions:\r\n"
+            "  --display ID\r\n"
+            "    Set display to take screenshot. Default is the device's "
+            "main display ID = 0\r\n",
+            [](LegacyConsoleBridge::ConsoleContext& ctx, ArgStream& args) -> absl::Status {
+                uint32_t display;
+                std::filesystem::path path;
+                RETURN_IF_ERROR(ParseScreenshotArgs(args, &display, &path));
 
-                        ASSIGN_OR_RETURN(auto stub, ctx.EmulatorControllerStub());
-                        ASSIGN_OR_RETURN(auto context, ctx.NewContext());
+                ASSIGN_OR_RETURN(auto stub, ctx.EmulatorControllerStub());
+                ASSIGN_OR_RETURN(auto context, ctx.NewContext());
 
-                        android::emulation::control::ImageFormat request;
-                        request.set_format(android::emulation::control::ImageFormat::PNG);
-                        request.set_display(display);
+                android::emulation::control::ImageFormat request;
+                request.set_format(android::emulation::control::ImageFormat::PNG);
+                request.set_display(display);
 
-                        android::emulation::control::Image response;
-                        auto status = stub->getScreenshot(context.get(), request, &response);
-                        if (!status.ok()) {
-                            return GrpcStatusToAbslStatus(status);
-                        }
+                android::emulation::control::Image response;
+                const grpc::Status status = stub->getScreenshot(context.get(), request, &response);
+                if (!status.ok()) {
+                    const absl::Status translated = GrpcStatusToAbslStatus(status);
+                    return absl::Status(translated.code(),
+                                        absl::StrCat("Failed to capture screenshot for display ",
+                                                     display, ": ", translated.message()));
+                }
 
-                        std::ofstream file(path, std::ios::binary);
-                        if (!file.is_open()) {
-                            return absl::InternalError(absl::StrCat(
-                                    "Failed to open file for writing: ", path.string()));
-                        }
-                        file.write(response.image().data(), response.image().size());
-                        file.close();
+                errno = 0;
+                std::ofstream file(path, std::ios::binary);
+                if (!file.is_open()) {
+                    const int err = errno;
+                    return FileIoErrorToStatus(
+                            err,
+                            absl::StrCat("Failed to open screenshot output file '", path.string(),
+                                         "' for writing. Verify that the target directory "
+                                         "exists and is writable"));
+                }
+                errno = 0;
+                file.write(response.image().data(),
+                           static_cast<std::streamsize>(response.image().size()));
+                file.flush();
+                if (!file.good()) {
+                    const int err = errno;
+                    return FileIoErrorToStatus(
+                            err,
+                            absl::StrCat("Failed to write screenshot data (",
+                                         response.image().size(), " bytes) to '", path.string(),
+                                         "'. Check available disk space and file "
+                                         "permissions"));
+                }
+                file.close();
 
-                        return absl::OkStatus();
-                    });
+                return absl::OkStatus();
+            });
 }
 
 }  // namespace goldfish::telnet

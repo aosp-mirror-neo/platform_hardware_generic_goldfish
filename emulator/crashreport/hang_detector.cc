@@ -28,9 +28,9 @@
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/clock_interface.h"
 #include "absl/time/time.h"
 
-#include "android/base/clock.h"
 #include "android/crashreport/debug.h"
 #include "goldfish/async/event_loop.h"
 
@@ -44,7 +44,7 @@ class LoopWatcher {
   public:
     LoopWatcher(std::string loop_name, ::goldfish::async::EventLoop& event_loop,
                 absl::Duration hang_timeout, absl::Duration hang_check_timeout,
-                const android::base::IClock* clock, HangDetector::ActivePredicate is_active)
+                absl::Clock& clock, HangDetector::ActivePredicate is_active)
             : loop_name_(std::move(loop_name))
             , timeout_(hang_timeout)
             , hang_check_timeout_(hang_check_timeout)
@@ -77,7 +77,7 @@ class LoopWatcher {
     }
 
     void CancelHangCheck() {
-        std::shared_ptr<::goldfish::async::EventLoop::Timer> timer;
+        ::goldfish::async::EventLoop::ScopedTimer timer;
         std::unique_ptr<android::base::eventing::ScopedEventCallback<
                 ::goldfish::async::EventLoop, ::goldfish::async::LooperStatusEvent>>
                 state_subscription;
@@ -86,11 +86,6 @@ class LoopWatcher {
             timer = std::move(timer_);
             state_subscription = std::move(state_subscription_);
             is_task_running_ = false;
-        }
-
-        state_subscription.reset();
-        if (timer) {
-            timer->Cancel();
         }
     }
 
@@ -108,7 +103,7 @@ class LoopWatcher {
             return;
         }
 
-        const absl::Time now = clock_->Now(base::ClockType::kRealtime);
+        const absl::Time now = clock_.TimeNow();
         if (is_task_running_) {
             // Heuristic: If the looper watcher itself took much longer than
             // mTimeout to fire again, it's possible there was a system-wide
@@ -155,7 +150,7 @@ class LoopWatcher {
 
     void ScheduleHangCheckLocked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
         is_task_running_ = true;
-        last_check_time_ = clock_->Now(base::ClockType::kRealtime);
+        last_check_time_ = clock_.TimeNow();
         // 0 means run as soon as possible.
         if (timer_) {
             timer_->Schedule(absl::ZeroDuration());
@@ -170,12 +165,12 @@ class LoopWatcher {
     const std::string loop_name_;
     const absl::Duration timeout_;
     const absl::Duration hang_check_timeout_;
-    const android::base::IClock* const clock_;
+    absl::Clock& clock_;
     const HangDetector::ActivePredicate is_active_;
 
     absl::Mutex mutex_;
     ::goldfish::async::EventLoop& event_loop_;
-    std::shared_ptr<::goldfish::async::EventLoop::Timer> timer_ ABSL_GUARDED_BY(mutex_);
+    ::goldfish::async::EventLoop::ScopedTimer timer_ ABSL_GUARDED_BY(mutex_);
     std::unique_ptr<android::base::eventing::ScopedEventCallback<
             ::goldfish::async::EventLoop, ::goldfish::async::LooperStatusEvent>>
             state_subscription_ ABSL_GUARDED_BY(mutex_);
@@ -187,12 +182,12 @@ class LoopWatcher {
 class PredicateWatcher {
   public:
     PredicateWatcher(std::string name, HangDetector::HangPredicate check,
-                     absl::Duration hang_check_timeout, const android::base::IClock* clock)
+                     absl::Duration hang_check_timeout, absl::Clock& clock)
             : name_(std::move(name))
             , hang_check_timeout_(hang_check_timeout)
             , clock_(clock)
             , check_(std::move(check))
-            , last_check_time_(clock_->Now(base::ClockType::kRealtime)) {}
+            , last_check_time_(clock_.TimeNow()) {}
 
     ~PredicateWatcher() { Cancel(); }
 
@@ -219,11 +214,11 @@ class PredicateWatcher {
         }
         if (android::base::IsDebuggerAttached()) {
             hang_count_ = 0;
-            last_check_time_ = clock_->Now(base::ClockType::kRealtime);
+            last_check_time_ = clock_.TimeNow();
             return;
         }
 
-        const absl::Time now = clock_->Now(base::ClockType::kRealtime);
+        const absl::Time now = clock_.TimeNow();
         if (now < last_check_time_ + hang_check_timeout_) {
             return;
         }
@@ -248,7 +243,7 @@ class PredicateWatcher {
   private:
     const std::string name_;
     const absl::Duration hang_check_timeout_;
-    const android::base::IClock* const clock_;
+    absl::Clock& clock_;
 
     absl::Mutex mutex_;
     HangDetector::HangPredicate check_ ABSL_GUARDED_BY(mutex_);
@@ -258,11 +253,10 @@ class PredicateWatcher {
 
 class HangDetectorImpl : public HangDetector {
   public:
-    HangDetectorImpl(HangCallback hang_callback, Timing timing,
-                     std::unique_ptr<android::base::IClock> clock)
+    HangDetectorImpl(HangCallback hang_callback, Timing timing, absl::Clock& clock)
             : hang_callback_(std::move(hang_callback))
             , timing_(std::move(timing))
-            , clock_(std::move(clock))
+            , clock_(clock)
             , worker_thread_([this]() { WorkerThread(); }) {}
 
     ~HangDetectorImpl() override { Stop(); }
@@ -275,7 +269,7 @@ class HangDetectorImpl : public HangDetector {
         }
         loop_watchers_.emplace_back(std::make_shared<LoopWatcher>(
                 std::move(loop_name), event_loop, task_timeout, timing_.hang_check_timeout,
-                clock_.get(), std::move(is_active)));
+                clock_, std::move(is_active)));
         loop_watchers_.back()->StartHangCheck();
     }
 
@@ -317,7 +311,7 @@ class HangDetectorImpl : public HangDetector {
                 replaced = std::move(it->second);
             }
             predicate_watchers_[name] = std::make_shared<PredicateWatcher>(
-                    name, std::move(check), timing_.hang_check_timeout, clock_.get());
+                    name, std::move(check), timing_.hang_check_timeout, clock_);
         }
 
         if (replaced) {
@@ -399,7 +393,7 @@ class HangDetectorImpl : public HangDetector {
 
     const HangCallback hang_callback_;
     const Timing timing_;
-    const std::unique_ptr<android::base::IClock> clock_;
+    absl::Clock& clock_;
 
     std::vector<std::shared_ptr<LoopWatcher>> loop_watchers_ ABSL_GUARDED_BY(mutex_);
     absl::flat_hash_map<std::string, std::shared_ptr<PredicateWatcher>> predicate_watchers_
@@ -415,9 +409,8 @@ class HangDetectorImpl : public HangDetector {
 }  // namespace
 
 std::unique_ptr<HangDetector> HangDetector::Create(HangCallback hang_callback, Timing timing,
-                                                   std::unique_ptr<android::base::IClock> clock) {
-    return std::make_unique<HangDetectorImpl>(std::move(hang_callback), std::move(timing),
-                                              std::move(clock));
+                                                   absl::Clock& clock) {
+    return std::make_unique<HangDetectorImpl>(std::move(hang_callback), std::move(timing), clock);
 }
 
 }  // namespace android::crashreport

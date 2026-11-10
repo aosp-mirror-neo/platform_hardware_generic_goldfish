@@ -2,6 +2,7 @@
 
 #include "android/base/bazel_info.h"
 #include "android/cmdline_definitions.h"
+#include "android/goldfish/constants.h"
 #include "emulator_config.h"
 #include "mock_avd.h"
 
@@ -19,7 +20,7 @@ class FakeEmulator {
             , mMockAvd(std::make_unique<MockAvd>()) {
         ON_CALL(*mMockAvd, GetSystemImagePaths())
                 .WillByDefault(testing::ReturnRef(mSystemImagePaths));
-        ON_CALL(*mMockAvd, ApiLevel()).WillByDefault(testing::Return(37));
+        ON_CALL(*mMockAvd, ApiLevel()).WillByDefault(testing::Return(kVirtioReadyApiLevel));
         using S = android_studio::EmulatorFeatureFlagState;
         mFeatureFlags = FeatureFlags::CreateForTesting({
             S::MINIGBM,

@@ -331,6 +331,38 @@ TEST(CpuReadPipelineTest, RgbaAlphaIsAlwaysOpaque) {
     }
 }
 
+TEST(CpuReadPipelineTest, RgbaVectorTailWidthsAndUnalignedStridesAreBitExact) {
+    constexpr uint32_t kWidths[] = {1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12,
+                                    13, 14, 15, 16, 17, 31, 32, 33, 63, 64, 65};
+    for (uint32_t width : kWidths) {
+        for (uint32_t height : {1U, 3U}) {
+            for (size_t src_padding : {size_t{0}, size_t{3}}) {
+                const TestFrame frame =
+                        MakeNoiseFrame({width, height}, /*seed=*/width * 7 + height, src_padding);
+                for (size_t dst_padding : {size_t{0}, size_t{5}}) {
+                    for (ImageRotation rotation :
+                         {ImageRotation::kRotation0, ImageRotation::kRotation180}) {
+                        const ReadRequest read{
+                            .crop = Rect{0, 0, width, height},
+                            .rotation = rotation,
+                            .output = {width, height},
+                        };
+                        Destination dst({width, height}, ReadFormat::kRgba8888, dst_padding);
+                        ASSERT_THAT(CpuReadPipeline(frame.pixels(), read, dst.target()), IsOk())
+                                << Describe(read, ReadFormat::kRgba8888);
+                        EXPECT_TRUE(dst.PaddingIntact()) << Describe(read, ReadFormat::kRgba8888);
+                        const ReadOutput actual = dst.Pixels();
+                        EXPECT_EQ(MaxAbsDiff(actual, ReferenceRead(frame.pixels(), read,
+                                                                   ReadFormat::kRgba8888)),
+                                  0)
+                                << Describe(read, ReadFormat::kRgba8888);
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST(CpuReadPipelineTest, Rgb888KeepsMemoryOrder) {
     TestFrame frame({1, 1}, /*row_padding=*/0);
     frame.SetPixel(0, 0, {10, 20, 30, 40});

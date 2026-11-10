@@ -15,7 +15,6 @@
 #include "input/input_service_impl.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -36,7 +35,6 @@
 #include "absl/time/time.h"
 
 #include "android/emulation/control/absl_status_translate.h"
-#include "android/emulation/control/keyboard/key_conversion.h"
 #include "android/emulation/control/simple_async_grpc.h"
 
 namespace goldfish::grpc::v2 {
@@ -44,11 +42,7 @@ namespace goldfish::grpc::v2 {
 namespace {
 
 using ::android::emulation::control::AbslStatusToGrpcStatus;
-using ::android::emulation::control::keyboard::android_keycode_to_evdev;
-using ::android::emulation::v2::AxisType;
 using ::android::emulation::v2::InputEvent;
-using ::android::emulation::v2::KeyEvent;
-using ::android::emulation::v2::PointerEvent;
 using ::android::emulation::v2::SendInputEventsResponse;
 using DispatchResult = IInputDispatcher::DispatchResult;
 
@@ -197,15 +191,17 @@ class DispatchedEvents : public std::enable_shared_from_this<DispatchedEvents> {
             ABSL_LOCKS_EXCLUDED(results_mutex_) {
         absl::MutexLock results_lock(results_mutex_);
         if (first_dispatched_.has_value()) {
-            response.set_first_event_dispatched_at_nanos(absl::ToUnixNanos(first_dispatched_->at));
-            response.set_last_event_dispatched_at_nanos(absl::ToUnixNanos(last_dispatched_->at));
+            response.set_first_event_dispatched_at_nanos(
+                    absl::ToInt64Nanoseconds(first_dispatched_->at));
+            response.set_last_event_dispatched_at_nanos(
+                    absl::ToInt64Nanoseconds(last_dispatched_->at));
         }
     }
 
   private:
     struct Dispatched {
         int index;
-        absl::Time at;
+        absl::Duration at;
     };
 
     void Record(int index, int32_t source_id, DispatchResult result)
@@ -269,48 +265,18 @@ class DispatchedEvents : public std::enable_shared_from_this<DispatchedEvents> {
                             rpc)};
 }
 
-absl::Status ValidateKeyIdentifier(const KeyEvent& key) {
-    switch (key.key_identifier_case()) {
-    case KeyEvent::kDomCode:
-        if (key.dom_code().empty()) {
-            return absl::InvalidArgumentError(
-                    "Invalid KeyEvent.dom_code '': must be a non-empty W3C UI Events "
-                    "KeyboardEvent.code string (e.g., 'KeyA', 'Enter', 'ArrowUp').");
-        }
-        return absl::OkStatus();
-    case KeyEvent::kAndroidKeycode:
-        if (android_keycode_to_evdev(key.android_keycode()) == 0) {
-            return absl::InvalidArgumentError(absl::StrFormat(
-                    "Invalid KeyEvent.android_keycode '%d': must be a supported Android "
-                    "system keycode (3=HOME, 4=BACK, 24=VOLUME_UP, 25=VOLUME_DOWN, 26=POWER, "
-                    "27=CAMERA, 82=MENU, 84=SEARCH, 187=APP_SWITCH). Use KeyEvent.dom_code "
-                    "(e.g., 'KeyA') or KeyEvent.evdev_code for general keyboard keys.",
-                    key.android_keycode()));
-        }
-        return absl::OkStatus();
-    case KeyEvent::kEvdevCode:
-        if (key.evdev_code() <= 0) {
-            return absl::InvalidArgumentError(absl::StrFormat(
-                    "Invalid KeyEvent.evdev_code '%d': must be a positive Linux evdev KEY_* "
-                    "code (e.g., 30 for KEY_A, 116 for KEY_POWER).",
-                    key.evdev_code()));
-        }
-        return absl::OkStatus();
-    case KeyEvent::KEY_IDENTIFIER_NOT_SET:
-        break;
-    }
-    return absl::InvalidArgumentError(
-            "Missing KeyEvent.key_identifier: set one of 'dom_code' (e.g., 'KeyA'), "
-            "'android_keycode' (e.g., 3 for HOME), or 'evdev_code' (e.g., 30 for KEY_A).");
-}
-
 }  // namespace
 
 InputServiceImpl::InputServiceImpl(std::shared_ptr<IInputDispatcher> dispatcher,
                                    IMultiDisplay& multi_display, Options options)
         : dispatcher_(std::move(dispatcher))
-        , multi_display_(multi_display)
-        , options_(std::move(options)) {
+        , options_(std::move(options))
+        , clock_(options_.clock.get())
+        , validator_(multi_display,
+                     V2InputValidator::Options{.hw_sensor_hinge = options_.hw_sensor_hinge,
+                                               .hw_keyboard = options_.hw_keyboard,
+                                               .hw_rotary_input = options_.hw_rotary_input,
+                                               .max_touch_points = options_.max_touch_points}) {
     DCHECK(dispatcher_ != nullptr);
 }
 
@@ -321,117 +287,7 @@ int32_t InputServiceImpl::DeriveSourceIdFromClientId(absl::string_view client_id
 }
 
 absl::Status InputServiceImpl::ValidateInputEvent(const InputEvent& event) const {
-    if (event.timestamp_nanos() < 0) {
-        return absl::InvalidArgumentError(absl::StrFormat(
-                "Invalid InputEvent.timestamp_nanos '%d': must be >= 0 (or omit timestamp_nanos "
-                "for immediate dispatch).",
-                event.timestamp_nanos()));
-    }
-
-    switch (event.event_case()) {
-    case InputEvent::kPointer:
-        return ValidatePointerEvent(event.pointer());
-    case InputEvent::kKey:
-        if (!options_.hw_keyboard) {
-            return absl::FailedPreconditionError(
-                    "Cannot dispatch KeyEvent: hardware keyboard support (hw.keyboard) is disabled "
-                    "on this device. Enable hw.keyboard in the device hardware configuration or "
-                    "check that CapabilitiesService reports INPUT_FEATURE_KEYBOARD.");
-        }
-        return ValidateKeyIdentifier(event.key());
-    case InputEvent::kAxis: {
-        const auto& axis = event.axis();
-        if (axis.axis() == AxisType::AXIS_TYPE_UNSPECIFIED) {
-            return absl::InvalidArgumentError(
-                    "Invalid AxisEvent.axis 'AXIS_TYPE_UNSPECIFIED': must specify a valid "
-                    "AxisType such as 'AXIS_TYPE_ROTARY_ENCODER'.");
-        }
-        if (!std::isfinite(axis.value())) {
-            return absl::InvalidArgumentError(absl::StrFormat(
-                    "Invalid AxisEvent.value '%g': must be a finite number.", axis.value()));
-        }
-        if (axis.axis() == AxisType::AXIS_TYPE_ROTARY_ENCODER && !options_.hw_rotary_input) {
-            return absl::FailedPreconditionError(
-                    "Cannot dispatch AxisEvent for 'AXIS_TYPE_ROTARY_ENCODER': rotary encoder "
-                    "input (hw.rotaryInput) is disabled on this device. Enable hw.rotaryInput in "
-                    "the device hardware configuration or check that CapabilitiesService reports "
-                    "INPUT_FEATURE_ROTARY_ENCODER.");
-        }
-        return absl::OkStatus();
-    }
-    case InputEvent::kText:
-        if (!options_.hw_keyboard) {
-            return absl::FailedPreconditionError(
-                    "Cannot dispatch TextEvent: keyboard/IME text input (hw.keyboard) is disabled "
-                    "on this device. Enable hw.keyboard in the device hardware configuration or "
-                    "check that CapabilitiesService reports INPUT_FEATURE_KEYBOARD.");
-        }
-        return absl::OkStatus();
-    case InputEvent::EVENT_NOT_SET:
-        break;
-    }
-    return absl::InvalidArgumentError(
-            "Missing InputEvent.event payload: set one of 'pointer', 'key', 'axis', or 'text'.");
-}
-
-absl::Status InputServiceImpl::ValidatePointerEvent(const PointerEvent& pointer) const {
-    if (pointer.display_id() < 0) {
-        return absl::InvalidArgumentError(absl::StrFormat(
-                "Invalid PointerEvent.display_id '%d': must be >= 0 (use '0' for the primary "
-                "display).",
-                pointer.display_id()));
-    }
-    if (static_cast<size_t>(pointer.display_id()) >= IMultiDisplay::kMaxDisplays) {
-        return absl::InvalidArgumentError(absl::StrFormat(
-                "Cannot dispatch PointerEvent to display_id '%d': exceeds maximum supported "
-                "display_id '%d'. Specify '0' for the primary display, or query "
-                "CapabilitiesService for active secondary display IDs.",
-                pointer.display_id(), IMultiDisplay::kMaxDisplays - 1));
-    }
-    const auto display = multi_display_.GetActiveDisplay(
-            static_cast<uint32_t>(pointer.display_id()), options_.hw_sensor_hinge);
-    if (!display.ok()) {
-        return absl::InvalidArgumentError(absl::StrFormat(
-                "Cannot dispatch PointerEvent to display_id '%d': %s. Specify '0' for the primary "
-                "display, or query CapabilitiesService for active secondary display IDs.",
-                pointer.display_id(), display.status().message()));
-    }
-
-    // NaN and infinity have no evdev representation.
-    if (!std::isfinite(pointer.scroll_x()) || !std::isfinite(pointer.scroll_y())) {
-        return absl::InvalidArgumentError(absl::StrFormat(
-                "Invalid PointerEvent scroll (scroll_x='%g', scroll_y='%g'): must be finite "
-                "numbers.",
-                pointer.scroll_x(), pointer.scroll_y()));
-    }
-    const int32_t max_touch_points = std::min(options_.max_touch_points, kDefaultMaxTouchPoints);
-    for (int i = 0; i < pointer.pointers_size(); ++i) {
-        const PointerEvent::Pointer& p = pointer.pointers(i);
-        if (p.pointer_id() < 0 || p.pointer_id() >= max_touch_points) {
-            return absl::InvalidArgumentError(absl::StrFormat(
-                    "Invalid Pointer.pointer_id '%d' at pointers[%d]: must be in range [0, %d].",
-                    p.pointer_id(), i, max_touch_points - 1));
-        }
-        const std::pair<absl::string_view, float> fields[] = {
-            {"x", p.x()},
-            {"y", p.y()},
-            {"pressure", p.pressure()},
-            {"size", p.size()},
-            {"orientation_radians", p.orientation_radians()},
-            {"tilt_radians", p.tilt_radians()},
-            {"delta_x", p.delta_x()},
-            {"delta_y", p.delta_y()},
-        };
-        for (const auto& [field, value] : fields) {
-            if (!std::isfinite(value)) {
-                return absl::InvalidArgumentError(absl::StrFormat(
-                        "Invalid Pointer.%s '%g' for pointer_id '%d' at pointers[%d]: must be a "
-                        "finite number.",
-                        field, value, p.pointer_id(), i));
-            }
-        }
-    }
-    return absl::OkStatus();
+    return validator_.Validate(event);
 }
 
 absl::Status InputServiceImpl::ValidateBatchRequest(const SendInputEventsRequest& request) const {
@@ -469,14 +325,18 @@ absl::Status InputServiceImpl::ValidateBatchRequest(const SendInputEventsRequest
     return absl::OkStatus();
 }
 
-std::unique_ptr<DispatcherSession> InputServiceImpl::OpenSession(int32_t source_id) const {
-    return std::make_unique<DispatcherSession>(
-            dispatcher_,
-            IInputDispatcher::SessionOptions{
-                .human = source_id == 0, .source_id = source_id, .reject_down_on_held = true});
+std::unique_ptr<DispatcherSession> InputServiceImpl::OpenSession(
+        int32_t source_id, absl::Duration idle_timeout) const {
+    return std::make_unique<DispatcherSession>(dispatcher_, IInputDispatcher::SessionOptions{
+                                                                .human = source_id == 0,
+                                                                .source_id = source_id,
+                                                                .reject_down_on_held = true,
+                                                                .idle_timeout = idle_timeout,
+                                                            });
 }
 
 DispatcherSession& InputServiceImpl::BatchSession(int32_t source_id) {
+    DCHECK_NE(source_id, 0);
     {
         absl::MutexLock batch_sessions_lock(batch_sessions_mutex_);
         if (auto it = batch_sessions_.find(source_id); it != batch_sessions_.end()) {
@@ -485,13 +345,14 @@ DispatcherSession& InputServiceImpl::BatchSession(int32_t source_id) {
     }
     // Opened outside the lock, as opening calls into the dispatcher. Sessions
     // are never removed, so the reference stays valid after unlocking.
-    std::unique_ptr<DispatcherSession> opened = OpenSession(source_id);
+    std::unique_ptr<DispatcherSession> opened =
+            OpenSession(source_id, options_.held_input_idle_timeout);
     absl::MutexLock batch_sessions_lock(batch_sessions_mutex_);
     return *batch_sessions_.try_emplace(source_id, std::move(opened)).first->second;
 }
 
-void InputServiceImpl::SleepUntil(absl::Time target) const {
-    const absl::Time now = options_.now_fn();
+void InputServiceImpl::SleepUntil(absl::Duration target) const {
+    const absl::Duration now = clock_.Now();
     if (target > now) {
         options_.sleep_fn(target - now);
     }
@@ -509,15 +370,18 @@ void InputServiceImpl::SleepUntil(absl::Time target) const {
     }
 
     const int32_t client_source_id = ClientSourceId(*context);
+    // Closed when the call returns, so anonymous batches release what they left
+    // held instead of sharing a persistent session across callers.
+    std::unique_ptr<DispatcherSession> anonymous_session;
     auto dispatched = std::make_shared<DispatchedEvents>();
-    // Host time corresponding to client timestamp 0, anchored at the first timed event.
-    std::optional<absl::Time> client_epoch;
+    // Host monotonic time corresponding to client timestamp 0, anchored at the first timed event.
+    std::optional<absl::Duration> client_epoch;
     for (int i = 0; i < request->events_size(); ++i) {
         const InputEvent& event = request->events(i);
         if (event.has_timestamp_nanos()) {
             const absl::Duration client_time = absl::Nanoseconds(event.timestamp_nanos());
             if (!client_epoch.has_value()) {
-                client_epoch = options_.now_fn() - client_time;
+                client_epoch = clock_.Now() - client_time;
             }
             SleepUntil(*client_epoch + client_time);
         }
@@ -528,7 +392,16 @@ void InputServiceImpl::SleepUntil(absl::Time target) const {
             break;
         }
         const int32_t source_id = SourceOf(event, client_source_id);
-        BatchSession(source_id).Dispatch(event, dispatched->Track(i, source_id));
+        DispatcherSession* session = nullptr;
+        if (source_id == 0) {
+            if (anonymous_session == nullptr) {
+                anonymous_session = OpenSession(0);
+            }
+            session = anonymous_session.get();
+        } else {
+            session = &BatchSession(source_id);
+        }
+        session->Dispatch(event, dispatched->Track(i, source_id));
     }
 
     if (!dispatched->AwaitAll(*context)) {
@@ -622,8 +495,8 @@ class InputServiceImpl::StreamInputReader final : public ::SimpleServerReader<In
             // Preserve the client's inter-event spacing, but cap each step so that a pause
             // between bursts (or a timestamp going backwards) rebases onto the host clock
             // instead of delaying dispatch.
-            const absl::Time now = service_.options_.now_fn();
-            absl::Time target = now;
+            const absl::Duration now = service_.clock_.Now();
+            absl::Duration target = now;
             if (prev_client_ts_.has_value() && event->timestamp_nanos() > *prev_client_ts_) {
                 const absl::Duration step =
                         std::min(absl::Nanoseconds(event->timestamp_nanos() - *prev_client_ts_),
@@ -656,9 +529,9 @@ class InputServiceImpl::StreamInputReader final : public ::SimpleServerReader<In
     }
 
     void OnCancel() override {
-        std::shared_ptr<::goldfish::async::EventLoop::Timer> timer_to_cancel;
         bool should_finish = false;
         {
+            ::goldfish::async::EventLoop::ScopedTimer timer_to_cancel;
             absl::MutexLock lock(this->reactor_lock_);
             cancelled_ = true;
             if (state_ == State::kWaitingForTimer || state_ == State::kAwaitingDispatches) {
@@ -666,22 +539,16 @@ class InputServiceImpl::StreamInputReader final : public ::SimpleServerReader<In
                 should_finish = true;
             }
         }
-        if (timer_to_cancel != nullptr) {
-            timer_to_cancel->Cancel();
-        }
         if (should_finish) {
             FinishStream(::grpc::Status::CANCELLED);
         }
     }
 
     void OnDone() override {
-        std::shared_ptr<::goldfish::async::EventLoop::Timer> timer_to_cancel;
         {
+            ::goldfish::async::EventLoop::ScopedTimer timer_to_cancel;
             absl::MutexLock lock(this->reactor_lock_);
             timer_to_cancel = std::move(pending_timer_);
-        }
-        if (timer_to_cancel != nullptr) {
-            timer_to_cancel->Cancel();
         }
         gate_->CloseAndWait();
 
@@ -844,7 +711,7 @@ class InputServiceImpl::StreamInputReader final : public ::SimpleServerReader<In
         }
         // Scheduled outside `reactor_lock_`: the loop may run the timer, or
         // report a failure, before this returns, and both take the lock.
-        std::shared_ptr<::goldfish::async::EventLoop::Timer> timer =
+        ::goldfish::async::EventLoop::ScopedTimer timer =
                 service_.options_.event_loop->ScheduleDelayed(
                         [this, gate = gate_, event = std::move(event), source_id]() mutable {
                             gate->RunIfOpen([this, event = std::move(event), source_id]() mutable {
@@ -858,16 +725,14 @@ class InputServiceImpl::StreamInputReader final : public ::SimpleServerReader<In
                 pending_timer_ = std::move(timer);
             }
         }
-        if (timer != nullptr) {
-            // The stream moved on meanwhile: the timer fired, or must not.
-            timer->Cancel();
-        }
+        // If the stream moved on meanwhile, `timer` was not moved into
+        // `pending_timer_` and its destructor cancels it here.
         return false;
     }
 
     void OnScheduledDispatch(InputEvent event, int32_t source_id) {
-        std::shared_ptr<::goldfish::async::EventLoop::Timer> expired_timer;
         {
+            ::goldfish::async::EventLoop::ScopedTimer expired_timer;
             absl::MutexLock lock(this->reactor_lock_);
             if (cancelled_ || state_ != State::kWaitingForTimer) {
                 return;
@@ -875,7 +740,6 @@ class InputServiceImpl::StreamInputReader final : public ::SimpleServerReader<In
             state_ = State::kDispatchingTimer;
             expired_timer = std::move(pending_timer_);
         }
-        expired_timer.reset();
         if (!DispatchAndRecord(std::move(event), source_id)) {
             return;
         }
@@ -908,12 +772,11 @@ class InputServiceImpl::StreamInputReader final : public ::SimpleServerReader<In
     const std::shared_ptr<CallbackGate> gate_ = std::make_shared<CallbackGate>();
 
     std::optional<int64_t> prev_client_ts_;
-    absl::Time prev_target_time_;
+    absl::Duration prev_target_time_ = absl::ZeroDuration();
 
     int32_t dispatched_count_ ABSL_GUARDED_BY(this->reactor_lock_){0};
     StreamSessions sessions_ ABSL_GUARDED_BY(this->reactor_lock_);
-    std::shared_ptr<::goldfish::async::EventLoop::Timer> pending_timer_
-            ABSL_GUARDED_BY(this->reactor_lock_);
+    ::goldfish::async::EventLoop::ScopedTimer pending_timer_ ABSL_GUARDED_BY(this->reactor_lock_);
     State state_ ABSL_GUARDED_BY(this->reactor_lock_){State::kReading};
     bool cancelled_ ABSL_GUARDED_BY(this->reactor_lock_){false};
 };

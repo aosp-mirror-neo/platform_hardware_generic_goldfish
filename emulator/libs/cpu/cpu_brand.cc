@@ -25,6 +25,8 @@
 #include <Wbemidl.h>
 #include <comdef.h>
 
+#include "android/base/scoped_com_initializer.h"
+
 #else
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -81,12 +83,12 @@ int getCpuBrandNameAndCoreCountWMI(char* name, uint32_t* core_count, uint32_t* l
     // uint32_t numLogicalProcessors = 0;
     char* cpuName;
 
-    hres = CoInitialize(NULL);
-    if (FAILED(hres)) {
+    const android::base::ScopedComInitializer com_init;
+    if (!com_init) {
         LOG(ERROR) << absl::StrFormat(
                 "Error in %s: Failed to initialize COM library."
                 " Error code = 0x%x",
-                __func__, hres);
+                __func__, com_init.hr());
         return 1;
     }
 
@@ -97,7 +99,6 @@ int getCpuBrandNameAndCoreCountWMI(char* name, uint32_t* core_count, uint32_t* l
                 "Error in %s: Failed to create IWbemLocator object."
                 " Error code = 0x%x",
                 __func__, hres);
-        CoUninitialize();
         return 1;
     }
 
@@ -108,7 +109,6 @@ int getCpuBrandNameAndCoreCountWMI(char* name, uint32_t* core_count, uint32_t* l
                 " Error code = 0x%x",
                 __func__, hres);
         pLoc->Release();
-        CoUninitialize();
         return 1;
     }
 
@@ -121,7 +121,6 @@ int getCpuBrandNameAndCoreCountWMI(char* name, uint32_t* core_count, uint32_t* l
                 __func__, hres);
         pSvc->Release();
         pLoc->Release();
-        CoUninitialize();
         return 1;
     }
 
@@ -135,7 +134,6 @@ int getCpuBrandNameAndCoreCountWMI(char* name, uint32_t* core_count, uint32_t* l
                 __func__, hres);
         pSvc->Release();
         pLoc->Release();
-        CoUninitialize();
         return 1;
     }
 
@@ -165,7 +163,6 @@ int getCpuBrandNameAndCoreCountWMI(char* name, uint32_t* core_count, uint32_t* l
     pSvc->Release();
     pLoc->Release();
     pEnumerator->Release();
-    CoUninitialize();
 
     return 0;
 }

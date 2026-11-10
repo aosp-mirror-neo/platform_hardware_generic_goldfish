@@ -79,6 +79,7 @@ cc_library(
         "//emulator/libs/system",
         "//emulator/tools:aemu_version",
         "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/log:vlog_is_on",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
@@ -116,6 +117,8 @@ cc_test(
         ":fake_metrics_writer",
         ":metrics_reporter",
         "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
     ],
 )
 
@@ -258,6 +261,7 @@ cc_test(
     deps = [
         ":studio_file_metrics_writer",
         "//emulator/libs/async:async_testing",
+        "//emulator/libs/process",
         "//emulator/libs/system:test-headers",
         "//emulator/libs/test:googletest_main",
     ],

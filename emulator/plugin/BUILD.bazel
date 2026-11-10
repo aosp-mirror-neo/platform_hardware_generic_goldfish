@@ -4,10 +4,6 @@ load("@rules_cc//cc:defs.bzl", "cc_binary")
     cc_binary(
         name = "goldfish_" + arch,
         srcs = ["plugin.cc"],
-        dynamic_deps = [
-            "@glib//glib:glib_shared",
-            "@glib//gmodule:gmodule_shared",
-        ],
         linkopts = select({
             "@platforms//os:macos": [
                 "-undefined dynamic_lookup",
@@ -19,6 +15,7 @@ load("@rules_cc//cc:defs.bzl", "cc_binary")
                 "-framework Foundation",
             ],
             "@platforms//os:windows": [
+                "avrt.lib",
                 "strmiids.lib",
                 "uuid.lib",
                 "ole32.lib",
@@ -38,13 +35,26 @@ load("@rules_cc//cc:defs.bzl", "cc_binary")
             "@platforms//os:windows": "goldfish_" + arch + ".def",
             "//conditions:default": None,
         }),
-        deps = [
+        # AEMU compat headers must come before crashreport (which pulls in crashpad)
+        # to ensure AEMU's getopt.h and sys/types.h are preferred over Crashpad's.
+        # buildifier: leave-alone
+        deps = select({
+            "@platforms//os:windows": [
+                "@aemu//windows:compat-hdrs",
+                "//emulator/plugin/wasapi",
+                "@qemu//:qemu-system-" + arch + ".if",
+            ],
+            "//conditions:default": [],
+        }) + [
+            "//emulator/crashreport:breadcrumb",
             "//emulator/crashreport:crash_reporter",
+            "//emulator/crashreport:crash_system",
             "//emulator/crashreport:debug",
             "//emulator/libs/logging:color_log_sink",
             "//emulator/libs/perfetto:init",
             "//emulator/libs/perfetto:qemu_trace_bridge",
             "//emulator/plugin/adb-vsock",
+            "//emulator/plugin/audio:goldfish_audio_mux",
             "//emulator/plugin/avd:avd_finalize",
             "//emulator/plugin/avd:avd_start",
             "//emulator/plugin/avd:global_event_loop",
@@ -66,23 +76,10 @@ load("@rules_cc//cc:defs.bzl", "cc_binary")
             "@qemu//:aemu_func_defs",
             "@qemu//:qemu-headers-exported",
             "//emulator/plugin/legacy/goldfish_address_space:impl_" + arch,
+            "//emulator/plugin/legacy/goldfish_gpu:impl_" + arch,
             "//emulator/plugin/legacy/goldfish_pipe:impl_" + arch,
             "//emulator/plugin/legacy/goldfish_sync:impl_" + arch,
             "//emulator/plugin/vsock_goldfish:vsock_impl_" + arch,
-            "@glib//glib:glib_import",
-            "@glib//gmodule:gmodule_import",
-        ] + select({
-            "@platforms//os:windows": [
-                "@qemu//:qemu-system-" + arch + ".if",
-                "//emulator/crashreport:breadcrumb",
-            ],
-            "//conditions:default": [
-                "//emulator/crashreport:breadcrumb",
-            ],
-        }) + [
-            # crashreport dep must go after the windows compat dep.
-            # buildifier: leave-alone
-            "//emulator/crashreport:crash_system",
         ],
     )
     for arch in [

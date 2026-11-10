@@ -220,3 +220,175 @@ video encoding in Linux cloud environments. Currently, Linux hosts fall back to
 WebRTC's built-in software codecs.
 
 ---
+
+## 4. Microphone Injection (Client → Guest)
+
+A client can send its microphone (for example a browser's `getUserMedia` track) to the
+guest. The guest records it like any microphone, and `AudioService.GetAudioState` lists it
+as a `MicrophoneInput.Kind.WEBRTC` input. This section covers the in-process deployment;
+the standalone binary does not support it yet (§4.6).
+
+### 4.1 Negotiation
+
+The client is always the offerer, and the session is negotiated once. A client that may
+send its microphone opts in when it connects (`microphone: true` in the web SDK) and offers
+its audio transceiver as `sendrecv`, with no track attached. It then turns the microphone
+on and off with `RTCRtpSender.replaceTrack()` alone, without renegotiating:
+
+| Client action | Offer direction | WebRTC on the emulator | `GoldfishAudioDeviceModule` |
+| :--- | :--- | :--- | :--- |
+| Connect with `microphone: true` | `sendrecv` | Creates a receive stream for the advertised SSRC | `StartPlayout()` → listener `true` |
+| `replaceTrack(mic)` / `replaceTrack(null)` | unchanged | RTP starts / stops on the same stream | nothing |
+| Session closed or failed | n/a | Removes the receive stream | `StopPlayout()` (twice) → listener `false` once |
+| Connect without the option | `recvonly` | No receive stream | nothing |
+
+The emulator's speaker track is added with `AddTrack` before the offer arrives. So the
+client's audio m-line binds to that transceiver and is answered `sendrecv`: a single
+m-line carries both the speaker and the microphone.
+
+Chrome, Safari (both libwebrtc) and Firefox advertise an SSRC and `msid:-` for a `sendrecv`
+sender without a track, so the receive stream, and with it playout, exists from the
+start. A client that omitted the SSRC would start playout at its first RTP packet
+instead. Playout is a session-wide signal: it cannot tell which session sends, which is
+fine for a single controlling client (see §4.2).
+
+### 4.2 Pipeline
+
+```mermaid
+flowchart LR
+    subgraph Client
+        GUM["getUserMedia (AEC on)"] -- "replaceTrack" --> TX["audio transceiver sendrecv"]
+    end
+    TX -- "Opus RTP" --> NetEq
+    subgraph WebRTC["WebRTC engine (Sw-Network / Sw-Worker)"]
+        NetEq["ChannelReceive / NetEq (jitter buffer)"] --> Mixer["AudioMixer"]
+        Mixer --> Transport["AudioTransport::NeedMorePlayData"]
+        State["AudioState: first / last receive stream (Sw-Worker)"]
+    end
+    State -- "StartPlayout / StopPlayout" --> Listener["ADM playout listener"]
+    Listener --> Mic["goldfish::audio::WebRtcMicrophone::SetPlaying"]
+    Mic -- "Start / Stop, posted to the QEMU loop" --> Inject["QemuAudioInject (webrtc, kWebRtc)"]
+    Guest["AudioInputMux timer tick (BQL)"] --> Inject
+    Inject -- "ReadCallback" --> ADM["GoldfishAudioDeviceModule::PullPlayout (48 kHz mono S16)"]
+    ADM -- "10 ms blocks" --> Transport
+```
+
+- **The guest clock drives decoding.** WebRTC decodes received audio only when its audio
+  device module asks for playout data. `GoldfishAudioDeviceModule` has no playout thread,
+  so nothing is decoded until `PullPlayout()` is called. `WebRtcMicrophone`'s
+  `ReadCallback` calls it whenever the guest's capture timer needs samples. NetEq is the
+  only jitter buffer, so there is no second clock and no drift to correct. Nothing is
+  decoded while no guest app records.
+- **When the input exists.** WebRTC starts playout when the first receive audio stream
+  appears and stops it when the last one goes away. The module reports each change to its
+  playout listener, and `WebRtcMicrophone` keeps one injector, `source_id = "webrtc"`,
+  for as long as playout runs. It is silent while no client has a track attached.
+- **Mixing.** WebRTC's mixer combines every sending session into the pulled audio. The
+  guest-side `AudioInputMux` then mixes the `"webrtc"` input with any other injectors, so
+  a person's browser microphone and an agent's `AudioService` stream are heard together.
+  Like any injector, it replaces the host microphone while it runs.
+- **Full mixer.** If `kMaxConcurrentMicrophoneStreams` injectors are already running,
+  `Start()` returns `RESOURCE_EXHAUSTED`. `WebRtcMicrophone` logs a warning once per
+  playout, watches the mixer state, and adds the input as soon as it fits. Other
+  failures (no microphone mixer on this device, or the emulator shutting down) last, so
+  it logs that the WebRTC audio is dropped and does not retry. The mixer reserves
+  `"webrtc"` for this input, so no other client can take the name.
+- **Wiring.** `CreateInProcessSwitchboard()` creates the `GoldfishAudioDeviceModule`. It
+  passes the module to the `Switchboard` (which hands it to the `PeerConnectionFactory`)
+  and to `CreateInProcessMediaProvider()`. The provider sets the playout listener to
+  `WebRtcMicrophone::SetPlaying`, gives the microphone a pull function on the module, and
+  clears the listener when it is destroyed.
+
+### 4.3 Threading and Lock Order
+
+| Step | Thread | Locks |
+| :--- | :--- | :--- |
+| `StartPlayout` / `StopPlayout` → listener → `SetPlaying` | `Sw-Worker` | ADM `playout_mutex_` (leaf); posts to the QEMU loop |
+| `WebRtcMicrophone::Update` → `Start` / `Stop` | QEMU main loop | BQL (`RecursiveScopedVmLock`) |
+| Mixer state observer (retry while the mixer is full) | Any thread changing the mixer | BQL; only posts to the QEMU loop |
+| `ReadCallback` → `PullPlayout` → `NeedMorePlayData` | QEMU main loop (mux timer) | BQL → ADM `mutex_` → mixer `mutex_` → `ChannelReceive::neteq_mutex_` |
+| RTP arrival → `NetEq::InsertPacket` | `Sw-Worker` | `neteq_mutex_` |
+| Voice engine start / stop → `RegisterAudioCallback` | `Sw-Worker` | ADM `mutex_` |
+
+- No WebRTC thread takes or waits for the BQL. A BQL holder such as QEMU teardown may
+  block on a WebRTC thread, so taking the microphone is always posted to the QEMU loop.
+  The lock order is therefore one-way, BQL first, and cannot deadlock.
+- The WebRTC locks taken under the BQL (`AudioMixerImpl::mutex_`,
+  `ChannelReceive::neteq_mutex_`, the ADM `mutex_`) are held elsewhere only for short,
+  non-blocking sections: packet insertion, stats, codec changes and source add/remove.
+
+### 4.4 Guest Impact
+
+> **Decision (reviewed 2026-10):** keep decoding on the guest's pull, under the BQL. The
+> numbers below were judged acceptable. Re-measure as described at the end of this section
+> rather than re-deriving the analysis; switch to the fallback only if they regress.
+
+A pull decodes Opus and runs NetEq and the mixer while the BQL is held, so any vCPU
+needing the BQL waits for it. This was measured on an Apple M-series host (`-c opt`;
+`remote_audio_test` with a real Opus stream; 980 pulls, three runs):
+
+| Case | Per-call CPU time | BQL time per 10 ms of audio |
+| :--- | :--- | :--- |
+| Steady state, one 10 ms block | p50 ≈ 55 µs, p99 ≈ 180 µs, max ≈ 250 µs | ≈ 0.5% typical, ≤ 2.5% worst |
+| No packets (NetEq concealment) | p50 ≈ 47 µs, max ≈ 400 µs | similar |
+| 200 ms backlog drained in one tick (after a VM stall) | ≈ 0.8–1.1 ms, once | one-off |
+
+- The audio input pacer caps any backlog at 200 ms. One pull therefore never decodes more
+  than 20 blocks.
+- Wall time occasionally reached 1–7 ms with unchanged CPU time. A lock-free compute
+  loop on the same thread showed the same spikes at the same rate. They are host
+  scheduler preemption, which can hit any BQL holder, not lock contention.
+- The cost is paid only while a guest app records *and* a WebRTC peer sends. The existing
+  speaker path (`QemuAudioSource`) already calls into WebRTC under the BQL.
+- Fallback if this budget is ever too high: a dedicated playout thread decodes into a
+  small ring buffer, and the BQL path only copies from it (the
+  `QemuMicrophoneSession` pattern). The price is a thread, a ring buffer, 10–20 ms of extra
+  latency, and drift handling between the host and virtual clocks.
+
+**How to re-measure.** In `remote_audio_test`'s `MicrophoneToneComesOutOfPlayout`:
+- Run about 1000 iterations instead of 150.
+- Around each `PullPlayout()` call, record wall time (`absl::Now()`) and thread CPU time
+  (`clock_gettime(CLOCK_THREAD_CPUTIME_ID)`).
+- Print p50, p99 and max of both.
+- As a control, time a lock-free compute loop of similar length on the same thread. If
+  wall-time spikes show up in the control at the same rate, they are scheduler
+  preemption. Spikes in wall time but not CPU time that appear only around
+  `PullPlayout()` would mean lock waits.
+- Run with
+  `bazel test -c opt --test_output=all --test_filter='*Tone*' --cache_test_results=no
+  @goldfish//emulator/videobridge:remote_audio_test`.
+
+### 4.5 Testing
+
+- `goldfish_audio_device_module_test`: block chunking, leftover handling, short blocks,
+  engine registration, and the playout listener (changes reported once, late and
+  cleared listeners).
+- `remote_audio_test`: a client `PeerConnection` on the same factory and in-memory
+  network, negotiating like the web SDK. A `sendrecv` offer starts playout before any
+  track is attached, a `recvonly` one never does, a 1 kHz tone sent after `replaceTrack`
+  comes out of `PullPlayout` (checked with Goertzel), and removing the track keeps
+  playout until the session closes.
+- `webrtc_microphone_test` (`emulator/plugin/audio`): the `"webrtc"` input's lifetime,
+  mixing with an agent's gRPC stream, retrying when the mixer is full, dropping the audio
+  when there is no mixer, the reserved name, and teardown.
+- `in_process_rtc_service_test`: `StartPlayout` on the shared module gives the guest a
+  `"webrtc"` input that records what the module plays out.
+
+### 4.6 Standalone `videobridge` (deferred)
+
+The standalone binary has no guest clock and no in-process mixer, so it ignores client
+microphones today. This was scoped and deferred until someone needs it. The scope was one
+CL of about 250 production and 200 test lines:
+- A v2 `AudioService` stub on `EmulatorClient`.
+- A `GrpcMicrophoneForwarder`. It follows the playout listener like `WebRtcMicrophone`.
+  While playout runs, a 10 ms steady-clock thread pulls `PullPlayout()` and writes
+  `AudioChunk`s to `AudioService.StreamMicrophoneAudio`.
+- Wiring in `videobridge.cpp`.
+
+Trade-offs:
+- 20–60 ms more latency than in-process.
+- Host-clock and guest-clock drift, absorbed by the server's buffer.
+- The input reports as `GRPC_STREAM`, because `Kind` is output-only.
+- The bridge's token needs write access to `AudioService`.
+
+---

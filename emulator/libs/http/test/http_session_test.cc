@@ -20,6 +20,7 @@
 #include "absl/synchronization/notification.h"
 
 #include "goldfish/async/testing/fake_async_socket.h"
+#include "goldfish/async/testing/test_event_loop.h"
 #include "goldfish/http/http_headers.h"
 #include "goldfish/http/http_router.h"
 #include "goldfish/network/endpoint.h"
@@ -730,6 +731,118 @@ TEST_F(HttpSessionTest, DispatchesAllSupportedHttpMethods) {
         EXPECT_TRUE(absl::StartsWith(sent, "HTTP/1.1 200 OK\r\n"));
         EXPECT_TRUE(absl::EndsWith(sent, absl::StrCat("\r\n\r\n", HttpMethodToString(tc.method))));
     }
+}
+
+TEST_F(HttpSessionTest, FormatStreamingHeadersDetectsCaseInsensitiveChunked) {
+    const absl::flat_hash_map<std::string, std::string> chunked_headers = {
+        {std::string(headers::kContentType), std::string(mime::kApplicationGrpcWebProto)},
+        {"TrAnSfEr-EnCoDiNg", "ChUnKeD"},
+    };
+    bool is_chunked = false;
+    const std::string wire = internal::FormatStreamingHeaders(chunked_headers, 200, &is_chunked);
+    EXPECT_TRUE(is_chunked);
+    EXPECT_TRUE(absl::StartsWith(wire, "HTTP/1.1 200 OK\r\n"));
+    EXPECT_TRUE(absl::StrContains(wire, "content-type: application/grpc-web+proto\r\n"));
+    EXPECT_TRUE(absl::StrContains(wire, "TrAnSfEr-EnCoDiNg: ChUnKeD\r\n"));
+    EXPECT_TRUE(absl::EndsWith(wire, "\r\n\r\n"));
+
+    const absl::flat_hash_map<std::string, std::string> raw_headers = {
+        {std::string(headers::kContentType), std::string(mime::kTextPlain)},
+        {"X-Device-Name", "Pixel_9_Pro_エミュレータ"},
+    };
+    bool raw_chunked = true;
+    const std::string raw_wire = internal::FormatStreamingHeaders(raw_headers, 201, &raw_chunked);
+    EXPECT_FALSE(raw_chunked);
+    EXPECT_TRUE(absl::StartsWith(raw_wire, "HTTP/1.1 201 Created\r\n"));
+    EXPECT_TRUE(absl::StrContains(raw_wire, "X-Device-Name: Pixel_9_Pro_エミュレータ\r\n"));
+    EXPECT_TRUE(absl::EndsWith(raw_wire, "\r\n\r\n"));
+}
+
+TEST_F(HttpSessionTest, ResetClearsStateOnLoopAndOffLoopThread) {
+    std::vector<AccessLogEntry> logged_entries;
+    router_->AddRoute(HttpMethod::kGet, "/first", [](const HttpRequest& req) {
+        EXPECT_EQ(req.GetHeader("X-First-Header"), "first-val");
+        return HttpResponse::String("first", 200, "text/plain");
+    });
+    router_->AddRoute(HttpMethod::kGet, "/second", [](const HttpRequest& req) {
+        // Verify no headers or body leaked from the previous request after Reset().
+        EXPECT_FALSE(req.HasHeader("X-First-Header"));
+        EXPECT_TRUE(req.Body().empty());
+        return HttpResponse::String("second", 200, "text/plain");
+    });
+
+    auto loop = async::testing::TestEventLoop::Create("HttpSessionResetLoop");
+    auto session = HttpSession::Create(fake_socket_, loop.get(), router_.get(),
+                                       /*max_payload_size=*/64 * 1024 * 1024,
+                                       /*not_found_handler=*/nullptr,
+                                       /*access_logger=*/[&](const AccessLogEntry& entry) {
+                                           logged_entries.push_back(entry);
+                                       });
+
+    // 1. Process first Keep-Alive request and invoke Reset() directly on the
+    // loop thread (IsOnLoopThread() == true), verifying no extra task is queued.
+    ASSERT_TRUE(loop->Post([&]() {
+                        EXPECT_TRUE(
+                                session->OnDataReceived("GET /first HTTP/1.1\r\n"
+                                                        "Host: localhost\r\n"
+                                                        "X-First-Header: first-val\r\n\r\n"));
+                        session->Reset();
+                    }).ok());
+    loop->RunAll();
+    EXPECT_EQ(loop->TaskCount(), 0u);
+    std::string first_sent = GetSentData();
+    EXPECT_TRUE(absl::StartsWith(first_sent, "HTTP/1.1 200 OK\r\n"));
+    EXPECT_TRUE(absl::EndsWith(first_sent, "\r\n\r\nfirst"));
+
+    // 2. Calling Reset() from the test thread (IsOnLoopThread() == false) must
+    // post ResetDirect() onto the EventLoop rather than mutating state off-loop.
+    session->Reset();
+    EXPECT_EQ(loop->TaskCount(), 1u);
+    loop->RunAll();
+    EXPECT_EQ(loop->TaskCount(), 0u);
+
+    // 3. Verify a subsequent Keep-Alive request parses cleanly and records a
+    // valid non-negative duration in AccessLogger.
+    ASSERT_TRUE(loop->Post([&]() {
+                        EXPECT_TRUE(session->OnDataReceived(
+                                "GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+                    }).ok());
+    loop->RunAll();
+
+    std::string second_sent = GetSentData();
+    EXPECT_TRUE(absl::StartsWith(second_sent, "HTTP/1.1 200 OK\r\n"));
+    EXPECT_TRUE(absl::EndsWith(second_sent, "\r\n\r\nsecond"));
+    ASSERT_EQ(logged_entries.size(), 2u);
+    EXPECT_EQ(logged_entries[0].method, HttpMethod::kGet);
+    EXPECT_EQ(logged_entries[0].path, "/first");
+    EXPECT_EQ(logged_entries[0].status_code, 200);
+    EXPECT_GE(logged_entries[0].duration, absl::ZeroDuration());
+    EXPECT_EQ(logged_entries[1].method, HttpMethod::kGet);
+    EXPECT_EQ(logged_entries[1].path, "/second");
+    EXPECT_EQ(logged_entries[1].status_code, 200);
+    EXPECT_GE(logged_entries[1].duration, absl::ZeroDuration());
+}
+
+TEST_F(HttpSessionTest, CommitCurrentHeaderInsertsUniqueAndAppendsCaseInsensitiveDuplicates) {
+    bool handler_called = false;
+    router_->AddRoute(HttpMethod::kGet, "/headers", [&](const HttpRequest& req) {
+        handler_called = true;
+        EXPECT_EQ(req.GetHeader("Accept"), "application/json, text/plain; charset=utf-8");
+        EXPECT_EQ(req.GetHeader("accept"), "application/json, text/plain; charset=utf-8");
+        EXPECT_EQ(req.GetHeader("X-Emulator-Label"), "Pixel_9_Pro_エミュレータ");
+        EXPECT_EQ(req.GetHeader("X-Empty"), "");
+        return HttpResponse::String("ok", 200, "text/plain");
+    });
+
+    auto session = CreateSession();
+    EXPECT_TRUE(
+            session->OnDataReceived("GET /headers HTTP/1.1\r\n"
+                                    "Host: localhost\r\n"
+                                    "Accept: application/json\r\n"
+                                    "ACCEPT: text/plain; charset=utf-8\r\n"
+                                    "X-Emulator-Label: Pixel_9_Pro_エミュレータ\r\n"
+                                    "X-Empty: \r\n\r\n"));
+    EXPECT_TRUE(handler_called);
 }
 
 }  // namespace goldfish::http

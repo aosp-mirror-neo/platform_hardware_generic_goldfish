@@ -27,6 +27,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <thread>
@@ -57,6 +58,7 @@ extern "C" {
 #include "modules/video_coding/include/video_error_codes.h"
 #pragma clang diagnostic pop
 
+#include "android/base/scoped_com_initializer.h"
 #include "core/win/mf_video_encoder_h264.h"
 #include "goldfish/videobridge/codec_factories.h"
 
@@ -237,10 +239,9 @@ webrtc::VideoCodec MakeDefaultH264CodecSettings(uint16_t width = 1280, uint16_t 
 class MFHardwareTest : public ::testing::Test {
   protected:
     static void SetUpTestSuite() {
-        HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-        com_initialized_ = SUCCEEDED(hr);
+        com_initializer_.emplace(COINIT_APARTMENTTHREADED);
 
-        hr = MFStartup(MF_VERSION);
+        HRESULT hr = MFStartup(MF_VERSION);
         if (FAILED(hr)) {
             skip_reason_ = "Failed to initialize Windows Media Foundation (MFStartup failed)";
             has_hardware_mft_ = false;
@@ -280,9 +281,7 @@ class MFHardwareTest : public ::testing::Test {
 
     static void TearDownTestSuite() {
         MFShutdown();
-        if (com_initialized_) {
-            CoUninitialize();
-        }
+        com_initializer_.reset();
     }
 
     void SetUp() override {
@@ -293,13 +292,13 @@ class MFHardwareTest : public ::testing::Test {
     }
 
     static bool has_hardware_mft_;
-    static bool com_initialized_;
+    static std::optional<android::base::ScopedComInitializer> com_initializer_;
     static std::string skip_reason_;
     static std::vector<std::string> hardware_encoder_names_;
 };
 
 bool MFHardwareTest::has_hardware_mft_ = false;
-bool MFHardwareTest::com_initialized_ = false;
+std::optional<android::base::ScopedComInitializer> MFHardwareTest::com_initializer_;
 std::string MFHardwareTest::skip_reason_;
 std::vector<std::string> MFHardwareTest::hardware_encoder_names_;
 
@@ -801,14 +800,11 @@ TEST_F(MFHardwareTest, SupportsEncodeOnWorkerThreadSeparateFromInitThread) {
 
     // Dispatch encode calls from worker thread
     std::thread worker([&]() {
-        HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const android::base::ScopedComInitializer com_init(COINIT_MULTITHREADED);
         for (int i = 0; i < kNumFrames; ++i) {
             webrtc::VideoFrame frame =
                     CreateGradientI420Frame(kWidth, kHeight, i, static_cast<uint32_t>(i * 3000));
             EXPECT_EQ(encoder->Encode(frame, nullptr), WEBRTC_VIDEO_CODEC_OK);
-        }
-        if (SUCCEEDED(hr)) {
-            CoUninitialize();
         }
     });
     worker.join();

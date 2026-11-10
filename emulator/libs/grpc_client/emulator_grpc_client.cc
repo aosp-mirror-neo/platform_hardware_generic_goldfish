@@ -13,18 +13,14 @@
 // limitations under the License.
 #include "android/emulation/control/emulator_grpc_client.h"
 
-#include <grpcpp/completion_queue.h>
 #include <grpcpp/grpcpp.h>
 
 #include <atomic>
-#include <fstream>
+#include <chrono>
 #include <memory>
-#include <thread>
-#include <unordered_set>
+#include <utility>
 
 #include "absl/base/thread_annotations.h"
-#include "absl/log/log.h"
-#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 #include "grpc_connection_monitor.h"
@@ -51,6 +47,12 @@ absl::Status MakeChannelCreationError(std::string_view target) {
                          "'. Non-local targets require TLS credentials (pem_root_certs, "
                          "pem_private_key, and pem_cert_chain); check TLS configuration or "
                          "use a localhost/127.0.0.1 target."));
+}
+
+void AddBearerTokenHeader(Endpoint& endpoint, std::string_view token) {
+    auto* header = endpoint.add_required_headers();
+    header->set_key(BasicTokenAuth::kDefaultHeader);
+    header->set_value(absl::StrCat("Bearer ", token));
 }
 }  // namespace
 
@@ -79,6 +81,10 @@ class EmulatorGrpcClientImpl : public std::enable_shared_from_this<EmulatorGrpcC
     }
 
   private:
+    void SetConnectionState(ConnectionState state) {
+        state_.store(state, std::memory_order_release);
+        connection_state_source_.FireEvent(state);
+    }
     void CreateChannelIfNeeded();
     absl::Status PrepareForConnection();
 
@@ -106,8 +112,7 @@ absl::Status EmulatorGrpcClientImpl::PrepareForConnection() {
 
     CreateChannelIfNeeded();
     if (!GetChannel()) {
-        state_.store(ConnectionState::kDisconnected, std::memory_order_release);
-        connection_state_source_.FireEvent(ConnectionState::kDisconnected);
+        SetConnectionState(ConnectionState::kDisconnected);
         return MakeChannelCreationError(endpoint_.target());
     }
     return absl::OkStatus();
@@ -118,30 +123,27 @@ absl::Status EmulatorGrpcClientImpl::Connect(absl::Duration timeout) {
 
     const auto deadline = std::chrono::system_clock::now() + absl::ToChronoMilliseconds(timeout);
     if (GetChannel()->WaitForConnected(deadline)) {
-        state_.store(ConnectionState::kConnected, std::memory_order_release);
-        connection_state_source_.FireEvent(ConnectionState::kConnected);
+        SetConnectionState(ConnectionState::kConnected);
         return absl::OkStatus();
     }
 
-    state_.store(ConnectionState::kDisconnected, std::memory_order_release);
-    connection_state_source_.FireEvent(ConnectionState::kDisconnected);
+    SetConnectionState(ConnectionState::kDisconnected);
     return absl::DeadlineExceededError(absl::StrCat(
             "Timed out after ", absl::FormatDuration(timeout), " waiting for gRPC connection to '",
             endpoint_.target(), "'. Verify the server is running and reachable."));
 }
 
 std::future<absl::Status> EmulatorGrpcClientImpl::ConnectAsync(absl::Duration timeout) {
-    if (auto status = PrepareForConnection(); !status.ok()) {
-        return MakeReadyStatusFuture(status);
+    if (absl::Status status = PrepareForConnection(); !status.ok()) {
+        return MakeReadyStatusFuture(std::move(status));
     }
 
     monitor_ = std::make_unique<GrpcConnectionMonitor>(
             GetChannel(),
             [weak_self = weak_from_this()](ConnectionState state) {
                 // Forward channel state event, (if we are still alive.)
-                if (auto self = weak_self.lock()) {
-                    self->state_.store(state, std::memory_order_release);
-                    self->connection_state_source_.FireEvent(state);
+                if (std::shared_ptr<EmulatorGrpcClientImpl> self = weak_self.lock()) {
+                    self->SetConnectionState(state);
                 }
             },
             endpoint_.target());
@@ -160,8 +162,7 @@ void EmulatorGrpcClientImpl::Disconnect() {
     if (monitor_) {
         monitor_->Stop();
     }
-    state_.store(ConnectionState::kDisconnected, std::memory_order_release);
-    connection_state_source_.FireEvent(ConnectionState::kDisconnected);
+    SetConnectionState(ConnectionState::kDisconnected);
 }
 
 absl::StatusOr<std::unique_ptr<grpc::ClientContext>> EmulatorGrpcClientImpl::NewContext() {
@@ -256,10 +257,7 @@ EmulatorGrpcClientBuilder& EmulatorGrpcClientBuilder::WithDiscoveryFile(
         return *this;
     }
     if (ini_file.HasKey("grpc.token")) {
-        auto token = ini_file.GetString("grpc.token", "");
-        auto* header = destination_.add_required_headers();
-        header->set_key(android::emulation::control::BasicTokenAuth::kDefaultHeader);
-        header->set_value("Bearer " + token);
+        AddBearerTokenHeader(destination_, ini_file.GetString("grpc.token", ""));
     }
     destination_.set_target("localhost:" + ini_file.GetString("grpc.port", "8554"));
     return *this;
@@ -290,9 +288,7 @@ EmulatorGrpcClientBuilder& EmulatorGrpcClientBuilder::WithTargetOrDiscovery(
         Endpoint endpoint;
         endpoint.set_target(std::string(target));
         if (!token.empty()) {
-            auto* header = endpoint.add_required_headers();
-            header->set_key(BasicTokenAuth::kDefaultHeader);
-            header->set_value(absl::StrCat("Bearer ", token));
+            AddBearerTokenHeader(endpoint, token);
         }
         return WithEndpoint(endpoint);
     }
@@ -309,24 +305,24 @@ EmulatorGrpcClientBuilder& EmulatorGrpcClientBuilder::WithInterceptor(
     return *this;
 }
 
-absl::StatusOr<std::unique_ptr<BlockingEmulatorGrpcClient>>
-EmulatorGrpcClientBuilder::BuildBlocking() {
+template <typename TClient>
+absl::StatusOr<std::unique_ptr<TClient>> EmulatorGrpcClientBuilder::BuildClient() {
     if (!status_.ok()) {
         return status_;
     }
-    auto client = std::make_unique<BlockingEmulatorGrpcClient>();
+    auto client = std::make_unique<TClient>();
     client->p_impl_ = std::make_shared<EmulatorGrpcClientImpl>(destination_, std::move(factories_));
     return client;
 }
 
+absl::StatusOr<std::unique_ptr<BlockingEmulatorGrpcClient>>
+EmulatorGrpcClientBuilder::BuildBlocking() {
+    return BuildClient<BlockingEmulatorGrpcClient>();
+}
+
 absl::StatusOr<std::unique_ptr<CallbackEmulatorGrpcClient>>
 EmulatorGrpcClientBuilder::BuildCallback() {
-    if (!status_.ok()) {
-        return status_;
-    }
-    auto client = std::make_unique<CallbackEmulatorGrpcClient>();
-    client->p_impl_ = std::make_shared<EmulatorGrpcClientImpl>(destination_, std::move(factories_));
-    return client;
+    return BuildClient<CallbackEmulatorGrpcClient>();
 }
 
 absl::StatusOr<std::pair<std::string, std::shared_ptr<grpc::Channel>>>

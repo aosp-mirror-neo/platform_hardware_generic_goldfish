@@ -484,6 +484,11 @@ class VmOperations {
         // Whether this emulator can load the snapshot: its recorded snapshot
         // version matches the emulator's (see goldfish/snapshot/snapshot_store.h).
         bool compatible = true;
+        // Whether this snapshot is compatible and was the one most recently
+        // loaded in this session (via startup -loadvm, LoadSnapshot, or HMP
+        // loadvm) without having been invalidated by a subsequent load,
+        // deletion, or VM reset.
+        bool loaded = false;
     };
 
     using SnapshotEntrySink = absl::FunctionRef<void(SnapshotEntry)>;

@@ -32,9 +32,10 @@
 #include "android/emulation/control/grpc_event_stream_support.h"
 #include "emulator/plugin/grpc/input/dispatcher_session.h"
 #include "emulator/plugin/grpc/input/input_dispatcher_interface.h"
-#include "emulator/plugin/grpc/input/slot_registry.h"
+#include "emulator/plugin/grpc/input/v2_input_validator.h"
 #include "goldfish/async/event_loop.h"
 #include "goldfish/display/abstract_multi_display.h"
+#include "goldfish/system/steady_clock.h"
 #include "input_service.grpc.pb.h"
 
 namespace goldfish::grpc::v2 {
@@ -53,7 +54,7 @@ using InputServiceBase =
  *
  * ### Pacing & Timelines:
  * - `SendInputEvents` validates batch monotonicity and duration bounds up front,
- *   then paces events in real time against the host monotonic clock (`NowFn`)
+ *   then paces events in real time against the host monotonic clock (`SteadyClock`)
  *   according to `timestamp_nanos` deltas.
  * - `StreamInputEvents` rebases client `timestamp_nanos` deltas onto the host
  *   clock, caps stale inter-burst gaps to prevent artificial lag, and schedules
@@ -66,8 +67,11 @@ using InputServiceBase =
  *   `DispatcherSession`.
  * - A `StreamInputEvents` stream closes its sessions when it ends, which reports
  *   the release of what they held as synthesized `POINTER_ACTION_CANCEL` and
- *   `KEY_ACTION_UP` activity. `SendInputEvents` calls share one session per
- *   source, so input one call leaves held is still held in the next.
+ *   `KEY_ACTION_UP` activity. Anonymous `SendInputEvents` events (`source_id == 0`)
+ *   use a per-call session that closes when the call returns; identified sources
+ *   (`source_id != 0`) share one persistent session per source across
+ *   `SendInputEvents` calls and expire any input left held after
+ *   `held_input_idle_timeout` of inactivity.
  * - The first event that fails to dispatch, for example with
  *   `RESOURCE_EXHAUSTED` when no touch slot is free, ends the call with its
  *   index; later events aren't dispatched.
@@ -83,8 +87,8 @@ class InputServiceImpl final : public InputServiceBase {
   public:
     static constexpr absl::Duration kDefaultMaxBatchDuration = absl::Seconds(30);
     static constexpr absl::Duration kDefaultMaxStreamStepDuration = absl::Seconds(1);
-    static constexpr int32_t kDefaultMaxTouchPoints =
-            static_cast<int32_t>(::android::emulation::control::kMtsPointersNum);
+    static constexpr absl::Duration kDefaultHeldInputIdleTimeout = absl::Seconds(60);
+    static constexpr int32_t kDefaultMaxTouchPoints = V2InputValidator::kDefaultMaxTouchPoints;
 
     using IMultiDisplay = ::goldfish::display::IMultiDisplay;
 
@@ -97,7 +101,6 @@ class InputServiceImpl final : public InputServiceBase {
     using InputActivity = ::android::emulation::v2::InputActivity;
 
     using ActivityEventSource = IInputDispatcher::ActivityEventSource;
-    using NowFn = std::function<absl::Time()>;
     using SleepFn = std::function<void(absl::Duration)>;
 
     template <typename Reactor = ::grpc::ServerWriteReactor<InputActivity>>
@@ -107,14 +110,16 @@ class InputServiceImpl final : public InputServiceBase {
     struct Options {
         bool hw_sensor_hinge{false};
         bool hw_keyboard{true};
-        bool hw_rotary_input{true};
+        bool hw_rotary_input{false};
         bool read_only{false};
         bool supports_input_activity_observation{true};
         int32_t max_touch_points{kDefaultMaxTouchPoints};
         absl::Duration max_batch_duration{kDefaultMaxBatchDuration};
         absl::Duration max_stream_step_duration{kDefaultMaxStreamStepDuration};
+        absl::Duration held_input_idle_timeout{kDefaultHeldInputIdleTimeout};
         ::goldfish::async::EventLoop* event_loop{nullptr};
-        NowFn now_fn{[]() { return absl::Now(); }};
+        std::reference_wrapper<const ::goldfish::system::SteadyClock> clock{
+                ::goldfish::system::SteadyClock::GetRealClock()};
         SleepFn sleep_fn{[](absl::Duration d) { absl::SleepFor(d); }};
     };
 
@@ -169,21 +174,21 @@ class InputServiceImpl final : public InputServiceBase {
     using SourceSessions = absl::flat_hash_map<int32_t, std::unique_ptr<DispatcherSession>>;
 
     absl::Status ValidateInputEvent(const InputEvent& event) const;
-    absl::Status ValidatePointerEvent(const PointerEvent& pointer) const;
     absl::Status ValidateBatchRequest(const SendInputEventsRequest& request) const;
-    std::unique_ptr<DispatcherSession> OpenSession(int32_t source_id) const;
-    // @return The session that the SendInputEvents calls of `source_id` share,
-    //     which stays open as long as the service.
+    std::unique_ptr<DispatcherSession> OpenSession(
+            int32_t source_id, absl::Duration idle_timeout = absl::ZeroDuration()) const;
+    // @return The session that the SendInputEvents calls of non-zero `source_id`
+    //     share, which stays open as long as the service and expires held input
+    //     after `held_input_idle_timeout` of inactivity.
     DispatcherSession& BatchSession(int32_t source_id) ABSL_LOCKS_EXCLUDED(batch_sessions_mutex_);
-    void SleepUntil(absl::Time target) const;
+    void SleepUntil(absl::Duration target) const;
 
     const std::shared_ptr<IInputDispatcher> dispatcher_;
-    IMultiDisplay& multi_display_;
     const Options options_;
+    const ::goldfish::system::SteadyClock& clock_;
+    const V2InputValidator validator_;
 
     absl::Mutex batch_sessions_mutex_;
-    // TODO(b/554875313): "persistent sessions for identified SendInputEvents
-    // sources" expires idle sessions and gives anonymous calls their own.
     SourceSessions batch_sessions_ ABSL_GUARDED_BY(batch_sessions_mutex_);
 };
 

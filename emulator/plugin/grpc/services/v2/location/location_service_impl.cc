@@ -195,13 +195,22 @@ LocationServiceImpl::LocationServiceImpl(ObservableLocation& observable_location
 LocationServiceImpl::LocationServiceImpl(ObservableLocation& observable_location, Options options)
         : observable_location_(observable_location)
         , options_(std::move(options))
+        , clock_(options_.clock.get())
         , route_state_(std::make_shared<RouteState>(&observable_location, options_.event_loop)) {
-    DCHECK(options_.now_fn != nullptr);
+    if (options_.event_loop != nullptr) {
+        std::weak_ptr<RouteState> weak_state = route_state_;
+        route_state_->timer = options_.event_loop->CreateTimer([weak_state]() {
+            if (std::shared_ptr<RouteState> state = weak_state.lock()) {
+                OnRouteTimerTick(state);
+            }
+            return true;
+        });
+    }
     if (options_.has_gps) {
         location_callback_id_ = observable_location_.AddCallback(
                 [this](const Location& location) { OnLocationUpdated(location); });
         const Location initial = observable_location_.GetValue();
-        const int64_t now_nanos = absl::ToUnixNanos(options_.now_fn());
+        const int64_t now_nanos = absl::ToInt64Nanoseconds(clock_.Now());
         absl::MutexLock state_lock(&state_mutex_);
         if (!has_location_snapshot_) {
             PopulateLocationProto(initial, now_nanos, &current_location_);
@@ -211,8 +220,8 @@ LocationServiceImpl::LocationServiceImpl(ObservableLocation& observable_location
 }
 
 LocationServiceImpl::~LocationServiceImpl() {
-    TimerPtr timer_to_cancel;
     {
+        TimerPtr timer_to_cancel;
         absl::MutexLock route_lock(&route_state_->mutex);
         route_state_->shutting_down = true;
         route_state_->observable_location = nullptr;
@@ -220,10 +229,6 @@ LocationServiceImpl::~LocationServiceImpl() {
         ++route_state_->generation;
         route_state_->active_route.reset();
         timer_to_cancel = std::move(route_state_->timer);
-    }
-    if (timer_to_cancel != nullptr) {
-        timer_to_cancel->Cancel();
-        timer_to_cancel.reset();
     }
 
     if (location_callback_id_ != ObservableLocation::kInvalidCallbackId) {
@@ -250,7 +255,7 @@ void LocationServiceImpl::PopulateLocationState(LocationState* state) const {
 }
 
 void LocationServiceImpl::OnLocationUpdated(const Location& location) {
-    const int64_t now_nanos = absl::ToUnixNanos(options_.now_fn());
+    const int64_t now_nanos = absl::ToInt64Nanoseconds(clock_.Now());
     {
         absl::MutexLock state_lock(&state_mutex_);
         PopulateLocationProto(location, now_nanos, &current_location_);
@@ -277,20 +282,26 @@ ServerWriteReactor<LocationServiceImpl::LocationState>* LocationServiceImpl::Str
     return CreateLocationStateWriter();
 }
 
-Status LocationServiceImpl::UpdateLocationState(ServerContext* /*context*/,
-                                                const UpdateLocationStateRequest* request,
-                                                LocationState* reply) {
+Status LocationServiceImpl::CheckMutationAllowed(absl::string_view operation) const {
     if (!options_.has_gps) {
         return LocationUnsupportedStatus();
     }
     if (options_.read_only) {
-        return LocationReadOnlyStatus("UpdateLocationState");
+        return LocationReadOnlyStatus(operation);
+    }
+    return Status::OK;
+}
+
+Status LocationServiceImpl::UpdateLocationState(ServerContext* /*context*/,
+                                                const UpdateLocationStateRequest* request,
+                                                LocationState* reply) {
+    if (const Status status = CheckMutationAllowed("UpdateLocationState"); !status.ok()) {
+        return status;
     }
     if (const absl::Status status = ValidateLocationUpdate(*request); !status.ok()) {
         return AbslStatusToGrpcStatus(status);
     }
 
-    TimerPtr timer_to_cancel;
     {
         absl::MutexLock route_lock(&route_state_->mutex);
         if (route_state_->shutting_down) {
@@ -299,15 +310,10 @@ Status LocationServiceImpl::UpdateLocationState(ServerContext* /*context*/,
         }
         ++route_state_->generation;
         route_state_->active_route.reset();
-        timer_to_cancel = std::move(route_state_->timer);
 
         const Location updated = MergeLocationUpdate(observable_location_.GetValue(), *request);
         observable_location_.SetValue(updated);
         PopulateLocationState(reply);
-    }
-    if (timer_to_cancel != nullptr) {
-        timer_to_cancel->Cancel();
-        timer_to_cancel.reset();
     }
     return Status::OK;
 }
@@ -349,15 +355,8 @@ LocationServiceImpl::PrepareWaypoints(const PlayRouteRequest& request) {
             return step_delay.status();
         }
 
-        absl::Duration initial_delay = absl::ZeroDuration();
-        if (i == 0 && wp.delay_ms() > 0) {
-            absl::StatusOr<absl::Duration> first_delay =
-                    ComputeScaledWaypointDelay(wp.delay_ms(), speed_multiplier, idx);
-            if (!first_delay.ok()) {
-                return first_delay.status();
-            }
-            initial_delay = *first_delay;
-        }
+        const absl::Duration initial_delay =
+                (i == 0 && wp.delay_ms() > 0) ? *step_delay : absl::ZeroDuration();
 
         prepared.push_back(PreparedWaypoint{
             .location = wp.location(),
@@ -370,11 +369,8 @@ LocationServiceImpl::PrepareWaypoints(const PlayRouteRequest& request) {
 
 Status LocationServiceImpl::PlayRoute(ServerContext* /*context*/, const PlayRouteRequest* request,
                                       PlayRouteResponse* /*reply*/) {
-    if (!options_.has_gps) {
-        return LocationUnsupportedStatus();
-    }
-    if (options_.read_only) {
-        return LocationReadOnlyStatus("PlayRoute");
+    if (const Status status = CheckMutationAllowed("PlayRoute"); !status.ok()) {
+        return status;
     }
     absl::StatusOr<std::vector<PreparedWaypoint>> prepared = PrepareWaypoints(*request);
     if (!prepared.ok()) {
@@ -390,80 +386,61 @@ Status LocationServiceImpl::PlayRoute(ServerContext* /*context*/, const PlayRout
                       "static fixes.");
     }
 
-    TimerPtr timer_to_cancel;
     {
         absl::MutexLock route_lock(&route_state_->mutex);
         if (route_state_->shutting_down) {
             return Status(StatusCode::UNAVAILABLE,
                           "Failed to start route playback: LocationService is shutting down.");
         }
-        const uint64_t generation = ++route_state_->generation;
-        timer_to_cancel = std::move(route_state_->timer);
+        ++route_state_->generation;
         route_state_->active_route = ActiveRoute{
             .waypoints = std::move(*prepared),
             .next_index = 0,
             .loop = request->loop(),
         };
         if (route_state_->active_route->waypoints[0].initial_delay == absl::ZeroDuration()) {
-            ApplyNextWaypointLocked(route_state_, generation);
+            ApplyNextWaypointLocked(route_state_);
         } else {
-            route_state_->timer = ScheduleWaypointTimerLocked(
-                    route_state_, generation,
-                    route_state_->active_route->waypoints[0].initial_delay);
+            ScheduleWaypointTimerLocked(route_state_,
+                                        route_state_->active_route->waypoints[0].initial_delay);
         }
-    }
-    if (timer_to_cancel != nullptr) {
-        timer_to_cancel->Cancel();
-        timer_to_cancel.reset();
     }
     return Status::OK;
 }
 
-void LocationServiceImpl::ApplyNextWaypointLocked(const std::shared_ptr<RouteState>& route_state,
-                                                  uint64_t generation) {
+void LocationServiceImpl::ApplyNextWaypointLocked(const std::shared_ptr<RouteState>& route_state) {
     DCHECK(route_state->active_route.has_value());
     DCHECK(route_state->observable_location != nullptr);
 
-    const size_t current_index = route_state->active_route->next_index;
-    const Location updated =
-            MergeLocationUpdate(route_state->observable_location->GetValue(),
-                                route_state->active_route->waypoints[current_index].location);
+    ActiveRoute& active_route = *route_state->active_route;
+    const size_t current_index = active_route.next_index;
+    const Location updated = MergeLocationUpdate(route_state->observable_location->GetValue(),
+                                                 active_route.waypoints[current_index].location);
     route_state->observable_location->SetValue(updated);
 
-    if (current_index + 1 < route_state->active_route->waypoints.size()) {
-        const size_t next_index = current_index + 1;
-        route_state->active_route->next_index = next_index;
-        route_state->timer = ScheduleWaypointTimerLocked(
-                route_state, generation,
-                route_state->active_route->waypoints[next_index].step_delay);
-    } else if (route_state->active_route->loop) {
-        route_state->active_route->next_index = 0;
-        route_state->timer = ScheduleWaypointTimerLocked(
-                route_state, generation, route_state->active_route->waypoints[0].step_delay);
-    } else {
+    if (current_index + 1 >= active_route.waypoints.size() && !active_route.loop) {
         route_state->active_route.reset();
+        return;
     }
+
+    const size_t next_index =
+            (current_index + 1 < active_route.waypoints.size()) ? current_index + 1 : 0;
+    active_route.next_index = next_index;
+    ScheduleWaypointTimerLocked(route_state, active_route.waypoints[next_index].step_delay);
 }
 
-LocationServiceImpl::TimerPtr LocationServiceImpl::ScheduleWaypointTimerLocked(
-        const std::shared_ptr<RouteState>& route_state, uint64_t generation, absl::Duration delay) {
-    DCHECK(route_state->event_loop != nullptr);
-    return route_state->event_loop->ScheduleDelayed(
-            [route_state, generation]() { OnRouteTimerTick(route_state, generation); }, delay);
+void LocationServiceImpl::ScheduleWaypointTimerLocked(
+        const std::shared_ptr<RouteState>& route_state, absl::Duration delay) {
+    DCHECK(route_state->timer != nullptr);
+    route_state->timer->Schedule(delay);
 }
 
-void LocationServiceImpl::OnRouteTimerTick(const std::shared_ptr<RouteState>& route_state,
-                                           uint64_t generation) {
-    TimerPtr expired_timer;
-    {
-        absl::MutexLock route_lock(&route_state->mutex);
-        if (route_state->shutting_down || generation != route_state->generation ||
-            !route_state->active_route.has_value()) {
-            return;
-        }
-        expired_timer = std::move(route_state->timer);
-        ApplyNextWaypointLocked(route_state, generation);
+void LocationServiceImpl::OnRouteTimerTick(const std::shared_ptr<RouteState>& route_state) {
+    absl::MutexLock route_lock(&route_state->mutex);
+    if (route_state->shutting_down || !route_state->active_route.has_value()) {
+        return;
     }
+    ApplyNextWaypointLocked(route_state);
 }
 
 }  // namespace goldfish::grpc::v2

@@ -54,20 +54,12 @@ class HttpSession::ResponseWriterImpl : public HttpResponseWriter {
             return;
         }
         status_ = status;
-        for (const auto& [k, v] : headers) {
-            if (absl::EqualsIgnoreCase(k, headers::kTransferEncoding) &&
-                absl::EqualsIgnoreCase(v, "chunked")) {
-                is_chunked_ = true;
-            }
+        bool is_chunked = false;
+        std::string response = internal::FormatStreamingHeaders(headers, status, &is_chunked);
+        if (is_chunked) {
+            is_chunked_ = true;
         }
         if (auto session = GetSession()) {
-            std::string response;
-            absl::StrAppend(&response, protocol::kHttp11, protocol::kSpace, status,
-                            protocol::kSpace, HttpStatusToReason(status), protocol::kCrlf);
-            for (const auto& [k, v] : headers) {
-                absl::StrAppend(&response, k, protocol::kColonSpace, v, protocol::kCrlf);
-            }
-            absl::StrAppend(&response, protocol::kCrlf);
             session->PostOrSend(std::move(response));
         }
     }
@@ -261,29 +253,42 @@ void HttpSession::SetOnDetachedCallback(OnDetachedCallback on_detached) {
 }
 
 void HttpSession::Reset() {
-    PostOrRun([self = shared_from_this()]() {
-        {
-            const absl::MutexLock lock(&self->close_cb_mutex_);
-            self->on_client_closed_ = nullptr;
+    if (loop_ != nullptr && !loop_->IsOnLoopThread()) {
+        if (loop_->GetState() == async::LooperStatusEvent::State::kRunning) {
+            loop_->Post([self = shared_from_this()]() { self->ResetDirect(); }).IgnoreError();
         }
-        self->current_request_.path_.clear();
-        self->current_request_.headers_.clear();
-        self->current_request_.body_.clear();
-        self->current_request_.keep_alive_ = true;
-        self->current_header_field_.clear();
-        self->current_header_value_.clear();
-        self->current_headers_bytes_ = 0;
-        self->header_state_ = HeaderState::kNone;
-        self->payload_too_large_ = false;
-        self->error_occurred_ = false;
-        self->request_start_time_ = absl::Now();
-    });
+        return;
+    }
+    ResetDirect();
+}
+
+void HttpSession::ResetDirect() {
+    {
+        const absl::MutexLock lock(&close_cb_mutex_);
+        on_client_closed_ = nullptr;
+    }
+    current_request_.path_.clear();
+    if (!current_request_.headers_.empty()) {
+        current_request_.headers_.clear();
+    }
+    current_request_.body_.clear();
+    current_request_.keep_alive_ = true;
+    current_header_field_.clear();
+    current_header_value_.clear();
+    current_headers_bytes_ = 0;
+    header_state_ = HeaderState::kNone;
+    payload_too_large_ = false;
+    error_occurred_ = false;
+    // request_start_time_ is only read by EmitAccessLog() when access_logger_ is configured.
+    if (access_logger_) {
+        request_start_time_ = absl::Now();
+    }
 }
 
 void HttpSession::FinishStreaming() {
     is_streaming_active_ = false;
     llhttp_resume(&parser_);
-    Reset();
+    ResetDirect();
     if (!pipelined_buffer_.empty()) {
         std::string next_data = std::move(pipelined_buffer_);
         pipelined_buffer_.clear();
@@ -295,12 +300,10 @@ void HttpSession::CommitCurrentHeader() {
     if (current_header_field_.empty()) {
         return;
     }
-    auto it = current_request_.headers_.find(current_header_field_);
-    if (it != current_request_.headers_.end()) {
+    auto [it, inserted] = current_request_.headers_.try_emplace(std::move(current_header_field_),
+                                                                std::move(current_header_value_));
+    if (!inserted) {
         it->second.append(", ").append(current_header_value_);
-    } else {
-        current_request_.headers_.emplace(std::move(current_header_field_),
-                                          std::move(current_header_value_));
     }
     current_header_field_.clear();
     current_header_value_.clear();
@@ -389,7 +392,7 @@ void HttpSession::SendUnaryResponse(const HttpResponse& resp) {
     PostOrSend(resp.FormatWireResponse(current_request_.KeepAlive(), is_head));
     EmitAccessLog(resp.StatusCode(), resp.Body().size());
     if (current_request_.KeepAlive()) {
-        Reset();
+        ResetDirect();
     } else {
         PostClose();
     }
@@ -445,7 +448,7 @@ void HttpSession::DispatchRequest() {
 
 int HttpSession::OnMessageBegin(llhttp_t* parser) {
     auto* self = static_cast<HttpSession*>(parser->data);
-    self->Reset();
+    self->ResetDirect();
     return 0;
 }
 

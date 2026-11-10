@@ -38,7 +38,6 @@
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 
-#include "android/base/clock.h"
 #include "android/emulation/control/keyboard/key_code_resolver.h"
 #include "emulator/plugin/grpc/input/contact_table.h"
 #include "emulator/plugin/grpc/input/dispatcher_session.h"
@@ -50,6 +49,7 @@
 #include "goldfish/async/threaded_event_loop.h"
 #include "goldfish/display/test/fake_multi_display.h"
 #include "goldfish/display/test/fake_pixman_display.h"
+#include "goldfish/system/steady_clock.h"
 #include "standard-headers/linux/input-event-codes.h"
 
 // Necessary on Windows where winsock/windows headers define send as a macro.
@@ -58,7 +58,6 @@
 namespace goldfish::grpc::v2 {
 namespace {
 
-using ::android::base::ClockType;
 using ::android::emulation::control::kMtsPointerUp;
 using ::android::emulation::control::keyboard::ResolveEvdevKeyCode;
 using ::android::emulation::v2::AxisType;
@@ -107,6 +106,8 @@ class RecordingKeyboard : public KeyboardSink {
         }
     }
 
+    void Reset() override {}
+
     std::vector<std::string> Writes() const {
         absl::MutexLock writes_lock(writes_mutex_);
         return writes_;
@@ -132,14 +133,14 @@ class RecordingKeyboard : public KeyboardSink {
 };
 
 // The dispatcher's clock too, so dispatch times follow the paced time.
-class FakePacingClock : public ::android::base::IClock {
+class FakePacingClock : public ::goldfish::system::SteadyClock {
   public:
-    explicit FakePacingClock(absl::Time initial = absl::FromUnixNanos(1'000'000'000LL))
+    explicit FakePacingClock(absl::Duration initial = absl::Nanoseconds(1'000'000'000LL))
             : current_time_(initial) {}
 
-    absl::Time Now(ClockType /*type*/) const override {
+    absl::Duration Now() const override {
         absl::MutexLock time_lock(time_mutex_);
-        const absl::Time now = current_time_;
+        const absl::Duration now = current_time_;
         current_time_ += auto_advance_;
         return now;
     }
@@ -162,35 +163,41 @@ class FakePacingClock : public ::android::base::IClock {
 
   private:
     mutable absl::Mutex time_mutex_;
-    mutable absl::Time current_time_ ABSL_GUARDED_BY(time_mutex_);
+    mutable absl::Duration current_time_ ABSL_GUARDED_BY(time_mutex_);
     absl::Duration auto_advance_ ABSL_GUARDED_BY(time_mutex_) = absl::ZeroDuration();
     std::vector<absl::Duration> sleep_calls_ ABSL_GUARDED_BY(time_mutex_);
 };
 
+// The service's loop: posts run on `inner`, but delays and timers advance the
+// fake clock instead of waiting, so paced dispatch is deterministic. Only the
+// service runs on it; the dispatcher keeps real timers on `inner` itself, so
+// its idle timeout doesn't fire the moment it is armed.
 class PacingEventLoop final : public EventLoop {
   public:
-    PacingEventLoop(std::unique_ptr<EventLoop> inner, FakePacingClock& clock)
-            : EventLoop("PacingEventLoop"), inner_(std::move(inner)), clock_(clock) {}
+    PacingEventLoop(EventLoop& inner, FakePacingClock& clock)
+            : EventLoop("PacingEventLoop"), inner_(inner), clock_(clock) {}
 
-    void ShutdownTimers() override { inner_->ShutdownTimers(); }
-    size_t WaitUntilIdle() override { return inner_->WaitUntilIdle(); }
-    std::future<absl::Status> Shutdown() override { return inner_->Shutdown(); }
-    bool IsOnLoopThread() const override { return inner_->IsOnLoopThread(); }
+    void ShutdownTimers() override { inner_.ShutdownTimers(); }
+    size_t WaitUntilIdle() override { return inner_.WaitUntilIdle(); }
+    std::future<absl::Status> Shutdown() override { return inner_.Shutdown(); }
+    bool IsOnLoopThread() const override { return inner_.IsOnLoopThread(); }
 
-    std::shared_ptr<Timer> CreateTimer(RepeatingTask task) override {
-        return std::make_shared<PacingTimer>(*inner_, clock_, std::move(task));
+    ScopedTimer CreateTimer(RepeatingTask task) override {
+        auto timer = std::make_shared<PacingTimer>(inner_, clock_, std::move(task));
+        timer->PinCaller(timer);
+        return ScopedTimer(timer.get());
     }
 
   protected:
     absl::Status PostImmediately(Task task, FlowId /*flow_id*/) override {
-        return inner_->Post(std::move(task));
+        return inner_.Post(std::move(task));
     }
     absl::Status PostDelayed(Task task, absl::Duration delay, FlowId /*flow_id*/) override {
-        if (!inner_->IsOnLoopThread()) {
-            inner_->WaitUntilIdle();
+        if (!inner_.IsOnLoopThread()) {
+            inner_.WaitUntilIdle();
         }
         clock_.Sleep(delay);
-        return inner_->Post(std::move(task));
+        return inner_.Post(std::move(task));
     }
 
   private:
@@ -198,6 +205,8 @@ class PacingEventLoop final : public EventLoop {
       public:
         PacingTimer(EventLoop& loop, FakePacingClock& clock, RepeatingTask task)
                 : loop_(loop), clock_(clock), task_(std::move(task)) {}
+
+        void PinCaller(std::shared_ptr<PacingTimer> self) { caller_pin_ = std::move(self); }
 
         void Schedule(absl::Duration initial_delay, absl::Duration /*interval*/) override {
             if (!loop_.IsOnLoopThread()) {
@@ -211,16 +220,20 @@ class PacingEventLoop final : public EventLoop {
                  }).IgnoreError();
         }
 
-        void Cancel() override { cancelled_.store(true, std::memory_order_release); }
+        void Cancel() override {
+            cancelled_.store(true, std::memory_order_release);
+            caller_pin_.reset();
+        }
 
       private:
         EventLoop& loop_;
         FakePacingClock& clock_;
         RepeatingTask task_;
         std::atomic<bool> cancelled_{false};
+        std::shared_ptr<PacingTimer> caller_pin_;
     };
 
-    std::unique_ptr<EventLoop> inner_;
+    EventLoop& inner_;
     FakePacingClock& clock_;
 };
 
@@ -357,13 +370,13 @@ std::string Describe(const InputActivity& activity) {
 class InputServiceImplTest : public ::testing::Test {
   protected:
     void SetUp() override {
-        loop_ = std::make_unique<PacingEventLoop>(
-                ThreadedEventLoop::Create(LibuvEventLoop::Create()), clock_);
-        multi_display_ = std::make_unique<FakeMultiDisplay>(loop_.get());
+        dispatcher_loop_ = ThreadedEventLoop::Create(LibuvEventLoop::Create());
+        loop_ = std::make_unique<PacingEventLoop>(*dispatcher_loop_, clock_);
+        multi_display_ = std::make_unique<FakeMultiDisplay>(dispatcher_loop_.get());
         touch_devices_ =
                 std::make_unique<MultiDisplayTouchDevices>(*multi_display_, /*has_hinge=*/false);
-        dispatcher_ = std::make_shared<InputDispatcher>(*loop_, *touch_devices_, &keyboard_,
-                                                        ResolveEvdevKeyCode, &clock_);
+        dispatcher_ = std::make_shared<InputDispatcher>(*dispatcher_loop_, *touch_devices_,
+                                                        &keyboard_, ResolveEvdevKeyCode, clock_);
         // Never removed: the dispatcher's event source drops it on destruction.
         dispatcher_->activity().AddCallback(
                 [this](const InputActivity& activity) { recorder_.Record(activity); });
@@ -386,7 +399,7 @@ class InputServiceImplTest : public ::testing::Test {
     InputServiceImpl::Options DefaultOptions() {
         InputServiceImpl::Options opts;
         opts.event_loop = loop_.get();
-        opts.now_fn = [this]() { return clock_.Now(ClockType::kRealtime); };
+        opts.clock = clock_;
         // Lets the dispatcher apply what was posted before time moves on, so
         // dispatch times are deterministic.
         opts.sleep_fn = [this](absl::Duration d) {
@@ -477,6 +490,8 @@ class InputServiceImplTest : public ::testing::Test {
     FakePacingClock clock_;
     RecordingKeyboard keyboard_;
     ActivityRecorder recorder_;
+    // The dispatcher's loop, with real timers; `loop_` paces the service on it.
+    std::unique_ptr<EventLoop> dispatcher_loop_;
     std::unique_ptr<EventLoop> loop_;
     std::unique_ptr<FakeMultiDisplay> multi_display_;
     std::unique_ptr<MultiDisplayTouchDevices> touch_devices_;
@@ -673,7 +688,16 @@ TEST_F(InputServiceImplTest, SendInputEventsFailsForKeyThatIsNotAW3cCode) {
 
     EXPECT_EQ(status.error_code(), ::grpc::StatusCode::INVALID_ARGUMENT);
     EXPECT_THAT(status.error_message(), HasSubstr("events[1]"));
-    EXPECT_THAT(keyboard_.Writes(), ElementsAre("text before"));
+    EXPECT_THAT(keyboard_.Writes(), IsEmpty());
+}
+
+TEST_F(InputServiceImplTest, SendInputEventsRejectsNonAsciiTextBeforeTypingAnything) {
+    const auto status = Send({Text("ok"), Text("测试_🚀_é")});
+
+    EXPECT_EQ(status.error_code(), ::grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_THAT(status.error_message(), HasSubstr("events[1]"));
+    EXPECT_THAT(status.error_message(), HasSubstr("U+6D4B at index 0"));
+    EXPECT_THAT(keyboard_.Writes(), IsEmpty());
 }
 
 TEST_F(InputServiceImplTest, RejectsUnsupportedPeripheralsWithFailedPrecondition) {
@@ -697,7 +721,7 @@ TEST_F(InputServiceImplTest, RejectsUnsupportedPeripheralsWithFailedPrecondition
         ev.mutable_axis()->set_value(1.0F);
         const auto status = Send({ev});
         EXPECT_EQ(status.error_code(), ::grpc::StatusCode::FAILED_PRECONDITION);
-        EXPECT_THAT(status.error_message(), HasSubstr("hw.rotaryInput"));
+        EXPECT_THAT(status.error_message(), HasSubstr("no guest rotary device is registered"));
     }
 }
 
@@ -809,8 +833,9 @@ TEST_F(InputServiceImplTest, ConcurrentSourcesWithSamePointerIdUseDistinctSlotsA
 }
 
 TEST_F(InputServiceImplTest, StreamDisconnectOnlyReleasesSourcesUsedByTheStream) {
-    // The human operator (source 0) holds a touch down.
+    // Source 1 holds a touch down across batch calls.
     InputEvent touch_down = Touch(PointerAction::POINTER_ACTION_DOWN, {0});
+    touch_down.set_input_source_id(1);
     ASSERT_TRUE(Send({touch_down}).ok());
 
     // A stream without x-client-id touches down as source 7, then disconnects.
@@ -822,7 +847,7 @@ TEST_F(InputServiceImplTest, StreamDisconnectOnlyReleasesSourcesUsedByTheStream)
     ASSERT_TRUE(writer->WritesDone());
     ASSERT_TRUE(writer->Finish().ok());
 
-    // Only the stream's own contact is cancelled; the human's touch stays down.
+    // Only the stream's own contact is cancelled; source 1's touch stays down.
     std::vector<int32_t> synthesized_sources;
     for (const InputActivity& activity : TakeActivities()) {
         if (activity.synthesized()) {
@@ -830,6 +855,50 @@ TEST_F(InputServiceImplTest, StreamDisconnectOnlyReleasesSourcesUsedByTheStream)
         }
     }
     EXPECT_THAT(synthesized_sources, ElementsAre(7));
+}
+
+TEST_F(InputServiceImplTest, AnonymousSendInputEventsReleasesHeldInputOnReturn) {
+    InputEvent touch_down = Touch(PointerAction::POINTER_ACTION_DOWN, {0}, 0.2F, 0.2F);
+    InputEvent key_down;
+    key_down.mutable_key()->set_action(KeyAction::KEY_ACTION_DOWN);
+    key_down.mutable_key()->set_dom_code("KeyA");
+
+    ASSERT_TRUE(Send({touch_down, key_down}).ok());
+
+    EXPECT_THAT(Activities(),
+                ElementsAre("src0 POINTER_ACTION_DOWN ids 0", "src0 KEY_ACTION_DOWN KeyA",
+                            "src0 synthesized POINTER_ACTION_CANCEL ids 0",
+                            absl::StrCat("src0 synthesized KEY_ACTION_UP ", KEY_A)));
+    EXPECT_THAT(keyboard_.Writes(),
+                ElementsAre(absl::StrCat("down ", KEY_A), absl::StrCat("up ", KEY_A)));
+
+    // A subsequent anonymous call gets a fresh session where pointer 0 is not held.
+    ASSERT_TRUE(Send({touch_down, Touch(PointerAction::POINTER_ACTION_UP, {0}, 0.2F, 0.2F)}).ok());
+}
+
+TEST_F(InputServiceImplTest, IdentifiedSendInputEventsExpiresHeldInputAfterIdleTimeout) {
+    auto opts = DefaultOptions();
+    opts.held_input_idle_timeout = absl::Milliseconds(30);
+    StartServer(std::move(opts));
+
+    InputEvent touch_down = Touch(PointerAction::POINTER_ACTION_DOWN, {0}, 0.2F, 0.2F);
+    touch_down.set_input_source_id(7);
+    InputEvent key_down;
+    key_down.set_input_source_id(7);
+    key_down.mutable_key()->set_action(KeyAction::KEY_ACTION_DOWN);
+    key_down.mutable_key()->set_dom_code("KeyA");
+
+    ASSERT_TRUE(Send({touch_down, key_down}).ok());
+
+    // Wait for the idle timer to release KeyA and cancel pointer 0.
+    keyboard_.AwaitWrite(absl::StrCat("up ", KEY_A));
+    EXPECT_THAT(Activities(),
+                ElementsAre("src7 POINTER_ACTION_DOWN ids 0", "src7 KEY_ACTION_DOWN KeyA",
+                            "src7 synthesized POINTER_ACTION_CANCEL ids 0",
+                            absl::StrCat("src7 synthesized KEY_ACTION_UP ", KEY_A)));
+
+    // Pointer 0 is no longer held on source 7's session, so a new DOWN succeeds.
+    ASSERT_TRUE(Send({touch_down}).ok());
 }
 
 TEST_F(InputServiceImplTest, StreamInputEventsFinishesWithFirstDispatchError) {
@@ -1006,10 +1075,10 @@ TEST_F(InputServiceImplTest, StreamInputEventsCancellationReleasesHeldContactsCl
     down.set_timestamp_nanos(10'000'000LL);
     ASSERT_TRUE(writer->Write(down));
 
-    InputEvent marker = Text("测试_🚀_é");
+    InputEvent marker = Text("marker");
     marker.set_timestamp_nanos(20'000'000LL);
     ASSERT_TRUE(writer->Write(marker));
-    keyboard_.AwaitWrite("text 测试_🚀_é");
+    keyboard_.AwaitWrite("text marker");
 
     stream_ctx.TryCancel();
     const ::grpc::Status status = writer->Finish();
@@ -1019,9 +1088,8 @@ TEST_F(InputServiceImplTest, StreamInputEventsCancellationReleasesHeldContactsCl
     // async OnCancel()/OnDone() callback runs; wait for the synthesized cancel.
     recorder_.AwaitCount(3);
     const std::string src = absl::StrCat("src", expected_source);
-    EXPECT_THAT(Activities(),
-                ElementsAre(src + " POINTER_ACTION_DOWN ids 0", src + " text 测试_🚀_é",
-                            src + " synthesized POINTER_ACTION_CANCEL ids 0"));
+    EXPECT_THAT(Activities(), ElementsAre(src + " POINTER_ACTION_DOWN ids 0", src + " text marker",
+                                          src + " synthesized POINTER_ACTION_CANCEL ids 0"));
 }
 
 TEST_F(InputServiceImplTest,
@@ -1047,7 +1115,7 @@ TEST_F(InputServiceImplTest,
                 SendInputEventsRequest req;
                 auto* ev = req.add_events();
                 ev->set_input_source_id(t + 1);
-                ev->mutable_text()->set_text(absl::StrCat("测试_🚀_é_", t, "_", i));
+                ev->mutable_text()->set_text(absl::StrCat("text_", t, "_", i));
                 SendInputEventsResponse resp;
                 EXPECT_TRUE(service_->SendInputEvents(&ctx, &req, &resp).ok());
             }

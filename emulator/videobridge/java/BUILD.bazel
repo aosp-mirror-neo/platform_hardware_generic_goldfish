@@ -42,6 +42,22 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "mouse_button_mask",
+    hdrs = ["native/mouse_button_mask.h"],
+    strip_include_prefix = "native",
+)
+
+cc_test(
+    name = "mouse_button_mask_test",
+    size = "small",
+    srcs = ["native/mouse_button_mask_test.cc"],
+    deps = [
+        ":mouse_button_mask",
+        "//emulator/libs/test:googletest_main",
+    ],
+)
+
 cc_binary(
     name = "libwebrtc_java_receiver",
     srcs = [
@@ -64,6 +80,7 @@ cc_binary(
         # buildifier: keep - JNI headers must precede videobridge_codecs to avoid collision with ffmpeg/jni.h
         "@bazel_tools//tools/jdk:jni",
         ":frame_buffer_pool",
+        ":mouse_button_mask",
         "//emulator/libs/base",
         "//emulator/videobridge:videobridge_codecs",
         "@abseil-cpp//absl/log",

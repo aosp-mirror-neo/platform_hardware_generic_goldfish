@@ -19,10 +19,7 @@
 #include "goldfish/devices/connector_registry.h"
 #include "goldfish/devices/internal/hal_plug.h"
 #include "goldfish/sensors/physical_model.h"
-
-namespace android::base {
-class IClock;
-}
+#include "goldfish/system/virtual_clock.h"
 
 namespace goldfish::devices::sensor {
 
@@ -59,12 +56,8 @@ class ISensorDevice : public HalPlug, public std::enable_shared_from_this<ISenso
     static void RegisterDevice(PhysicalModel* pm, IConnectorRegistry* registry,
                                android::goldfish::DeviceType avd_type, int avd_api,
                                const android::goldfish::HardwareConfig& hw, EventLoop* client_loop,
-                               EventLoop* qemu_loop);
-    // Test seam
-    static void RegisterDevice(PhysicalModel* pm, IConnectorRegistry* registry,
-                               android::goldfish::DeviceType avd_type, int avd_api,
-                               const android::goldfish::HardwareConfig& hw, EventLoop* client_loop,
-                               EventLoop* qemu_loop, ::android::base::IClock* clock);
+                               EventLoop* qemu_loop,
+                               const ::goldfish::system::VirtualClock& clock);
 };
 
 }  // namespace goldfish::devices::sensor

@@ -237,5 +237,17 @@ TEST_F(MultiDisplayTouchDevicesTest, RecreatedDisplay_FindRebindsSameSink) {
     EXPECT_THAT(Display(1)->evdev_reports, ElementsAre(ElementsAre(kFakeSlot0, kFakeSyn)));
 }
 
+TEST_F(MultiDisplayTouchDevicesTest, Devices_ReturnsAllExistingDisplaysIncludingFoldedZero) {
+    AddDisplay(1);
+    AddDisplay(3);
+    multi_display_.folded = true;
+    MultiDisplayTouchDevices foldable(multi_display_, /*has_hinge=*/true);
+
+    EXPECT_THAT(foldable.Devices(), ElementsAre(0U, 1U, 3U));
+
+    RemoveDisplay(1);
+    EXPECT_THAT(foldable.Devices(), ElementsAre(0U, 3U));
+}
+
 }  // namespace
 }  // namespace goldfish::grpc::v2

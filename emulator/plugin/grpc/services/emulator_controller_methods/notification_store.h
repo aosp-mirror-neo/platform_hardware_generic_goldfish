@@ -78,6 +78,7 @@ class NotificationStore {
         case GrpcNotification::TypeCase::kXrOptions:
         case GrpcNotification::TypeCase::kCameraNotification:
         case GrpcNotification::TypeCase::kPosture:
+        case GrpcNotification::TypeCase::kMicrophoneState:
             return true;
         default:
             return false;

@@ -23,6 +23,22 @@
 #include "absl/strings/str_split.h"
 
 namespace goldfish::telnet {
+namespace {
+
+// Appends token to target separated by a space if target is non-empty.
+void AppendSpaceSeparated(std::string* target, std::string_view token) {
+    if (!target->empty()) {
+        *target += " ";
+    }
+    target->append(token.data(), token.size());
+}
+
+// Returns true if the command entry is safe or the session is authenticated.
+bool IsAccessible(const CommandRegistry::Entry& entry, const LineCommandHandler::Context& ctx) {
+    return entry.is_safe || ctx.authenticated;
+}
+
+}  // namespace
 
 // --- Static Helpers ---
 
@@ -194,17 +210,10 @@ absl::StatusOr<std::string> CommandRegistry::DispatchCommand(ArgStream& args, Co
         current = next;
         children = &current->children;
 
-        if (!user_path.empty()) {
-            user_path += " ";
-        }
-        user_path += name;
+        AppendSpaceSeparated(&user_path, name);
+        AppendSpaceSeparated(&canonical_path, canonical_name);
 
-        if (!canonical_path.empty()) {
-            canonical_path += " ";
-        }
-        canonical_path.append(canonical_name.data(), canonical_name.size());
-
-        if (!current->is_safe && !ctx.authenticated) {
+        if (!IsAccessible(*current, ctx)) {
             // Do not leak existence of commands that require authentication.
             return absl::NotFoundError("unknown command, try 'help'.");
         }
@@ -239,7 +248,7 @@ std::string CommandRegistry::ShowRootHelp(const Context& ctx, bool verbose) cons
     std::string help =
             verbose ? "Android console command help:\r\n\r\n" : "Android console commands:\r\n";
     for (const auto& cmd : root_commands_) {
-        if (cmd->is_safe || ctx.authenticated) {
+        if (IsAccessible(*cmd, ctx)) {
             if (verbose) {
                 absl::StrAppend(&help,
                                 absl::StrFormat("    %-16s %s\r\n", cmd->name, cmd->abstract));
@@ -269,13 +278,10 @@ absl::StatusOr<std::string> CommandRegistry::ShowSubcommandHelp(ArgStream& args,
     while (!args.Empty()) {
         const std::string next_name = args.Next();
         current = FindChild(*children, next_name);
-        if (!current || (!current->is_safe && !ctx.authenticated)) {
+        if (!current || !IsAccessible(*current, ctx)) {
             return absl::NotFoundError("unknown command, try 'help'.");
         }
-        if (!path.empty()) {
-            path += " ";
-        }
-        path += next_name;
+        AppendSpaceSeparated(&path, next_name);
         children = &current->children;
     }
 
@@ -294,7 +300,7 @@ std::string CommandRegistry::GetSubCommandsHelp(const Entry& entry, std::string_
 
     bool has_subs = false;
     for (const auto& child : entry.children) {
-        if (child->is_safe || ctx.authenticated) {
+        if (IsAccessible(*child, ctx)) {
             if (!has_subs) {
                 absl::StrAppend(&help, "\navailable sub-commands:\r\n");
                 has_subs = true;

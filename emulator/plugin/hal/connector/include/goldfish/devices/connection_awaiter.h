@@ -139,6 +139,6 @@ class ConnectionAwaiter : public IPlug, public std::enable_shared_from_this<Conn
     ConnectionCallback on_connected_;
 
     /// Task responsible for retrying connection attempts
-    std::shared_ptr<async::EventLoop::Timer> connection_retry_task_;
+    async::EventLoop::ScopedTimer connection_retry_task_;
 };
 }  // namespace goldfish::devices

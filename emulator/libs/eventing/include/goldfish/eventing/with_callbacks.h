@@ -79,7 +79,7 @@ class ScopedEventCallback {
     static constexpr size_t kInvalidId = 0;
     struct CallbackDeleter {
         struct Empty {};
-        explicit CallbackDeleter(Empty = {}) : source(nullptr) {}
+        explicit CallbackDeleter(Empty) {}
         explicit CallbackDeleter(EventSystem* sys) : source(sys) {}
 
         void operator()(size_t id) const {

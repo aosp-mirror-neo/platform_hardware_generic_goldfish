@@ -40,9 +40,15 @@ class MockAdbPacketCallback : public AdbPacketCallback {
 };
 using goldfish::adb::AMessage;
 using goldfish::adb::APacket;
+using goldfish::adb::kAdbOpen;
+using goldfish::adb::kAdbWrte;
+using goldfish::adb::kMaxDataLogLength;
 using ::testing::EndsWith;
 using ::testing::HasSubstr;
+using ::testing::InSequence;
+using ::testing::IsNull;
 using ::testing::Not;
+using ::testing::NotNull;
 using ::testing::StartsWith;
 
 using Message = std::string;
@@ -255,6 +261,77 @@ TEST_F(AdbMessageLoggerTest, invalid_header_triggers_out_of_sync) {
     logger_->Observe(wire.data(), wire.size());
 }
 
+TEST_F(AdbMessageLoggerTest, empty_payload_dispatches_on_packet_with_nullptr) {
+    MockAdbPacketCallback mock_cb;
+    logger_->SetCallback(&mock_cb);
+
+    EXPECT_CALL(mock_cb, OnPacket(testing::_, IsNull(), true))
+            .WillOnce([](const AMessage& message, const char* data, bool to_guest) {
+                EXPECT_EQ(message.command, kAdbWrte);
+                EXPECT_EQ(message.data_length, 0U);
+                EXPECT_EQ(data, nullptr);
+                EXPECT_TRUE(to_guest);
+            });
+
+    sendMessage(emptyMsg());
+}
+
+TEST_F(AdbMessageLoggerTest, payload_dispatches_on_packet_with_snippet_and_size) {
+    MockAdbPacketCallback mock_cb;
+    logger_->SetCallback(&mock_cb);
+
+    constexpr absl::string_view kPayload = "shell:exit";
+    EXPECT_CALL(mock_cb, OnPacket(testing::_, NotNull(), true))
+            .WillOnce([kPayload](const AMessage& message, const char* data, bool to_guest) {
+                EXPECT_EQ(message.command, kAdbOpen);
+                EXPECT_EQ(message.arg0, 1U);
+                EXPECT_EQ(message.arg1, 1U);
+                EXPECT_EQ(message.data_length, kPayload.size());
+                ASSERT_NE(data, nullptr);
+                EXPECT_EQ(absl::string_view(data, message.data_length), kPayload);
+                EXPECT_TRUE(to_guest);
+            });
+
+    sendMessage(openMsg(std::string(kPayload)));
+}
+
+TEST_F(AdbMessageLoggerTest, invalid_header_after_oversized_payload_skip_triggers_out_of_sync) {
+    MockAdbPacketCallback mock_cb;
+    logger_->SetCallback(&mock_cb);
+
+    constexpr size_t kExtraPayloadBytes = 128;
+    const std::string oversized_payload(kMaxDataLogLength + kExtraPayloadBytes, 'z');
+    const std::string wire = writeMsg(oversized_payload) + invalidMagicMsg();
+
+    {
+        InSequence seq;
+        EXPECT_CALL(mock_cb, OnPacket(testing::_, NotNull(), true))
+                .WillOnce([&oversized_payload](const AMessage& message, const char* data,
+                                               bool to_guest) {
+                    EXPECT_EQ(message.command, kAdbWrte);
+                    EXPECT_EQ(message.data_length, oversized_payload.size());
+                    ASSERT_NE(data, nullptr);
+                    EXPECT_EQ(absl::string_view(data, kMaxDataLogLength),
+                              absl::string_view(oversized_payload).substr(0, kMaxDataLogLength));
+                    EXPECT_TRUE(to_guest);
+                });
+        EXPECT_CALL(mock_cb, OnOutOfSync(StartsWith("Invalid header:"), true)).Times(1);
+    }
+
+    const size_t first_chunk_size = sizeof(AMessage) + kMaxDataLogLength + (kExtraPayloadBytes / 2);
+    logger_->Observe(wire.data(), first_chunk_size);
+    logger_->Observe(wire.data() + first_chunk_size, wire.size() - first_chunk_size);
+
+    EXPECT_THAT(log_sink_->captured_log_,
+                HasSubstr("ADB passive logging parser got out of sync and is disabling "
+                          "further ADB logging."));
+    EXPECT_THAT(log_sink_->captured_log_, HasSubstr("Details: Invalid header:"));
+
+    log_sink_->clear();
+    sendMessage(openMsg("shell:exit"));
+    EXPECT_EQ(log_sink_->captured_log_, "");
+}
+
 TEST(AdbMessageLoggerDirectionTest, passes_false_to_outofsync_when_tracking_to_host) {
     auto logger = std::make_unique<AdbMessageLogger>("test> ", false, true);
     MockAdbPacketCallback mock_cb;
@@ -264,6 +341,39 @@ TEST(AdbMessageLoggerDirectionTest, passes_false_to_outofsync_when_tracking_to_h
 
     std::string large_data(1024 * 1024 + 1, 'a');
     logger->Observe(large_data.data(), large_data.size());
+}
+
+TEST(AdbMessageLoggerDirectionTest, passes_false_to_on_packet_when_tracking_to_host) {
+    auto logger =
+            std::make_unique<AdbMessageLogger>("test> ", /*to_guest=*/false, /*verbose=*/false);
+    MockAdbPacketCallback mock_cb;
+    logger->SetCallback(&mock_cb);
+
+    constexpr size_t kShortSnippetSize = 32;
+    const std::string payload(kShortSnippetSize + 16, 'p');
+
+    {
+        InSequence seq;
+        EXPECT_CALL(mock_cb, OnPacket(testing::_, NotNull(), false))
+                .WillOnce([&payload](const AMessage& message, const char* data, bool to_guest) {
+                    EXPECT_EQ(message.command, kAdbWrte);
+                    EXPECT_EQ(message.data_length, payload.size());
+                    ASSERT_NE(data, nullptr);
+                    EXPECT_EQ(absl::string_view(data, kShortSnippetSize),
+                              absl::string_view(payload).substr(0, kShortSnippetSize));
+                    EXPECT_FALSE(to_guest);
+                });
+        EXPECT_CALL(mock_cb, OnPacket(testing::_, IsNull(), false))
+                .WillOnce([](const AMessage& message, const char* data, bool to_guest) {
+                    EXPECT_EQ(message.command, kAdbWrte);
+                    EXPECT_EQ(message.data_length, 0U);
+                    EXPECT_EQ(data, nullptr);
+                    EXPECT_FALSE(to_guest);
+                });
+    }
+
+    const std::string wire = writeMsg(payload) + emptyMsg();
+    logger->Observe(wire.data(), wire.size());
 }
 
 }  // namespace

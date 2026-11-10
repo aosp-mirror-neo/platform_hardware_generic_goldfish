@@ -14,7 +14,12 @@
 #include "android/emulation/control/keyboard/key_conversion.h"
 
 #include <cctype>
+#include <cstdint>
 #include <iomanip>
+#include <iterator>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "absl/log/log.h"
 
@@ -152,6 +157,14 @@ std::vector<QemuKeyEvent> ascii_to_qcode(unsigned short unicode, bool down) {
     return {};
 }
 
+bool IsTypeableCodePoint(int32_t code_point) {
+    // Text typing skips code points above ASCII, even those the key map reaches through an Alt
+    // chord.
+    constexpr int32_t kMaxAsciiCodePoint = 0x7F;
+    return code_point >= 0 && code_point <= kMaxAsciiCodePoint &&
+           !ascii_to_qcode(static_cast<unsigned short>(code_point), /*down=*/true).empty();
+}
+
 void QemuKeyEvent::send(QKbdState* kbd) const {
     VLOG(1) << "Sending QKeyCode: " << code << " " << (down ? "down" : "up");
     qkbd_state_key_event(kbd, code, down);
@@ -269,6 +282,339 @@ uint32_t android_keycode_to_evdev(int32_t keycode) {
     default:
         return 0;
     }
+}
+
+std::string_view evdev_to_dom_code(uint32_t evdev) {
+    if (evdev == 0) {
+        return {};
+    }
+    for (auto it = usb_keycode_map.rbegin(); it != usb_keycode_map.rend(); ++it) {
+        if (it->evdev == evdev && !it->code.empty()) {
+            return it->code;
+        }
+    }
+    return {};
+}
+
+uint32_t qcode_to_evdev(QKeyCode qcode) {
+    switch (qcode) {
+    case Q_KEY_CODE_SHIFT:
+        return KEY_LEFTSHIFT;
+    case Q_KEY_CODE_ALT:
+        return KEY_LEFTALT;
+    case Q_KEY_CODE_A:
+        return KEY_A;
+    case Q_KEY_CODE_B:
+        return KEY_B;
+    case Q_KEY_CODE_C:
+        return KEY_C;
+    case Q_KEY_CODE_D:
+        return KEY_D;
+    case Q_KEY_CODE_E:
+        return KEY_E;
+    case Q_KEY_CODE_F:
+        return KEY_F;
+    case Q_KEY_CODE_G:
+        return KEY_G;
+    case Q_KEY_CODE_H:
+        return KEY_H;
+    case Q_KEY_CODE_I:
+        return KEY_I;
+    case Q_KEY_CODE_J:
+        return KEY_J;
+    case Q_KEY_CODE_K:
+        return KEY_K;
+    case Q_KEY_CODE_L:
+        return KEY_L;
+    case Q_KEY_CODE_M:
+        return KEY_M;
+    case Q_KEY_CODE_N:
+        return KEY_N;
+    case Q_KEY_CODE_O:
+        return KEY_O;
+    case Q_KEY_CODE_P:
+        return KEY_P;
+    case Q_KEY_CODE_Q:
+        return KEY_Q;
+    case Q_KEY_CODE_R:
+        return KEY_R;
+    case Q_KEY_CODE_S:
+        return KEY_S;
+    case Q_KEY_CODE_T:
+        return KEY_T;
+    case Q_KEY_CODE_U:
+        return KEY_U;
+    case Q_KEY_CODE_V:
+        return KEY_V;
+    case Q_KEY_CODE_W:
+        return KEY_W;
+    case Q_KEY_CODE_X:
+        return KEY_X;
+    case Q_KEY_CODE_Y:
+        return KEY_Y;
+    case Q_KEY_CODE_Z:
+        return KEY_Z;
+    case Q_KEY_CODE_COMMA:
+        return KEY_COMMA;
+    case Q_KEY_CODE_DOT:
+        return KEY_DOT;
+    case Q_KEY_CODE_SLASH:
+        return KEY_SLASH;
+    case Q_KEY_CODE_SPC:
+        return KEY_SPACE;
+    case Q_KEY_CODE_LF:
+        return KEY_ENTER;
+    case Q_KEY_CODE_0:
+        return KEY_0;
+    case Q_KEY_CODE_1:
+        return KEY_1;
+    case Q_KEY_CODE_2:
+        return KEY_2;
+    case Q_KEY_CODE_3:
+        return KEY_3;
+    case Q_KEY_CODE_4:
+        return KEY_4;
+    case Q_KEY_CODE_5:
+        return KEY_5;
+    case Q_KEY_CODE_6:
+        return KEY_6;
+    case Q_KEY_CODE_7:
+        return KEY_7;
+    case Q_KEY_CODE_8:
+        return KEY_8;
+    case Q_KEY_CODE_9:
+        return KEY_9;
+    case Q_KEY_CODE_TAB:
+        return KEY_TAB;
+    case Q_KEY_CODE_GRAVE_ACCENT:
+        return KEY_GRAVE;
+    case Q_KEY_CODE_MINUS:
+        return KEY_MINUS;
+    case Q_KEY_CODE_EQUAL:
+        return KEY_EQUAL;
+    case Q_KEY_CODE_BRACKET_LEFT:
+        return KEY_LEFTBRACE;
+    case Q_KEY_CODE_BRACKET_RIGHT:
+        return KEY_RIGHTBRACE;
+    case Q_KEY_CODE_BACKSLASH:
+        return KEY_BACKSLASH;
+    case Q_KEY_CODE_SEMICOLON:
+        return KEY_SEMICOLON;
+    case Q_KEY_CODE_APOSTROPHE:
+        return KEY_APOSTROPHE;
+    default:
+        return 0;
+    }
+}
+
+namespace {
+
+struct DomKeyMapEntry {
+    DomKey dom_key;
+    const char* string;
+};
+
+#define DOM_KEY_MAP_DECLARATION const DomKeyMapEntry kDomKeyMap[] =
+#define DOM_KEY_UNI(key, id, value) {DomKey::id, key}
+#define DOM_KEY_MAP(key, id, value) {DomKey::id, key}
+#include "dom_key_data.inc"
+#undef DOM_KEY_MAP_DECLARATION
+#undef DOM_KEY_MAP
+#undef DOM_KEY_UNI
+
+// From
+// https://cs.chromium.org/chromium/src/ui/events/keycodes/dom_us_layout_data.h
+const struct NonPrintableCodeEntry {
+    DomCode dom_code;
+    DomKey::Base dom_key;
+} kNonPrintableCodeMap[] = {
+    {DomCode::ABORT, DomKey::CANCEL},
+    {DomCode::AGAIN, DomKey::AGAIN},
+    {DomCode::ALT_LEFT, DomKey::ALT},
+    {DomCode::ALT_RIGHT, DomKey::ALT},
+    {DomCode::ARROW_DOWN, DomKey::ARROW_DOWN},
+    {DomCode::ARROW_LEFT, DomKey::ARROW_LEFT},
+    {DomCode::ARROW_RIGHT, DomKey::ARROW_RIGHT},
+    {DomCode::ARROW_UP, DomKey::ARROW_UP},
+    {DomCode::BACKSPACE, DomKey::BACKSPACE},
+    {DomCode::BASS_BOOST, DomKey::AUDIO_BASS_BOOST_TOGGLE},
+    {DomCode::BRIGHTNESS_DOWN, DomKey::BRIGHTNESS_DOWN},
+    {DomCode::BRIGHTNESS_UP, DomKey::BRIGHTNESS_UP},
+    {DomCode::BROWSER_BACK, DomKey::BROWSER_BACK},
+    {DomCode::BROWSER_FAVORITES, DomKey::BROWSER_FAVORITES},
+    {DomCode::BROWSER_FORWARD, DomKey::BROWSER_FORWARD},
+    {DomCode::BROWSER_HOME, DomKey::BROWSER_HOME},
+    {DomCode::BROWSER_REFRESH, DomKey::BROWSER_REFRESH},
+    {DomCode::BROWSER_SEARCH, DomKey::BROWSER_SEARCH},
+    {DomCode::BROWSER_STOP, DomKey::BROWSER_STOP},
+    {DomCode::CAPS_LOCK, DomKey::CAPS_LOCK},
+    {DomCode::CHANNEL_DOWN, DomKey::CHANNEL_DOWN},
+    {DomCode::CHANNEL_UP, DomKey::CHANNEL_UP},
+    {DomCode::CLOSE, DomKey::CLOSE},
+    {DomCode::CLOSED_CAPTION_TOGGLE, DomKey::CLOSED_CAPTION_TOGGLE},
+    {DomCode::CONTEXT_MENU, DomKey::CONTEXT_MENU},
+    {DomCode::CONTROL_LEFT, DomKey::CONTROL},
+    {DomCode::CONTROL_RIGHT, DomKey::CONTROL},
+    {DomCode::CONVERT, DomKey::CONVERT},
+    {DomCode::COPY, DomKey::COPY},
+    {DomCode::CUT, DomKey::CUT},
+    {DomCode::DEL, DomKey::DEL},
+    {DomCode::EJECT, DomKey::EJECT},
+    {DomCode::END, DomKey::END},
+    {DomCode::ENTER, DomKey::ENTER},
+    {DomCode::ESCAPE, DomKey::ESCAPE},
+    {DomCode::EXIT, DomKey::EXIT},
+    {DomCode::F1, DomKey::F1},
+    {DomCode::F2, DomKey::F2},
+    {DomCode::F3, DomKey::F3},
+    {DomCode::F4, DomKey::F4},
+    {DomCode::F5, DomKey::F5},
+    {DomCode::F6, DomKey::F6},
+    {DomCode::F7, DomKey::F7},
+    {DomCode::F8, DomKey::F8},
+    {DomCode::F9, DomKey::F9},
+    {DomCode::F10, DomKey::F10},
+    {DomCode::F11, DomKey::F11},
+    {DomCode::F12, DomKey::F12},
+    {DomCode::F13, DomKey::F13},
+    {DomCode::F14, DomKey::F14},
+    {DomCode::F15, DomKey::F15},
+    {DomCode::F16, DomKey::F16},
+    {DomCode::F17, DomKey::F17},
+    {DomCode::F18, DomKey::F18},
+    {DomCode::F19, DomKey::F19},
+    {DomCode::F20, DomKey::F20},
+    {DomCode::F21, DomKey::F21},
+    {DomCode::F22, DomKey::F22},
+    {DomCode::F23, DomKey::F23},
+    {DomCode::F24, DomKey::F24},
+    {DomCode::FIND, DomKey::FIND},
+    {DomCode::FN, DomKey::FN},
+    {DomCode::FN_LOCK, DomKey::FN_LOCK},
+    {DomCode::HELP, DomKey::HELP},
+    {DomCode::HOME, DomKey::HOME},
+    {DomCode::HYPER, DomKey::HYPER},
+    {DomCode::INFO, DomKey::INFO},
+    {DomCode::INSERT, DomKey::INSERT},
+    {DomCode::KANA_MODE, DomKey::KANA_MODE},
+    {DomCode::LANG1, DomKey::HANGUL_MODE},
+    {DomCode::LANG2, DomKey::HANJA_MODE},
+    {DomCode::LANG3, DomKey::KATAKANA},
+    {DomCode::LANG4, DomKey::HIRAGANA},
+    {DomCode::LANG5, DomKey::ZENKAKU_HANKAKU},
+    {DomCode::LAUNCH_APP1, DomKey::LAUNCH_MY_COMPUTER},
+    {DomCode::LAUNCH_APP2, DomKey::LAUNCH_CALCULATOR},
+    {DomCode::LAUNCH_ASSISTANT, DomKey::LAUNCH_ASSISTANT},
+    {DomCode::LAUNCH_AUDIO_BROWSER, DomKey::LAUNCH_MUSIC_PLAYER},
+    {DomCode::LAUNCH_CALENDAR, DomKey::LAUNCH_CALENDAR},
+    {DomCode::LAUNCH_CONTACTS, DomKey::LAUNCH_CONTACTS},
+    {DomCode::LAUNCH_CONTROL_PANEL, DomKey::SETTINGS},
+    {DomCode::LAUNCH_INTERNET_BROWSER, DomKey::LAUNCH_WEB_BROWSER},
+    {DomCode::LAUNCH_MAIL, DomKey::LAUNCH_MAIL},
+    {DomCode::LAUNCH_PHONE, DomKey::LAUNCH_PHONE},
+    {DomCode::LAUNCH_SCREEN_SAVER, DomKey::LAUNCH_SCREEN_SAVER},
+    {DomCode::LAUNCH_SPREADSHEET, DomKey::LAUNCH_SPREADSHEET},
+    {DomCode::LOCK_SCREEN, DomKey::LAUNCH_SCREEN_SAVER},
+    {DomCode::LOG_OFF, DomKey::LOG_OFF},
+    {DomCode::MAIL_FORWARD, DomKey::MAIL_FORWARD},
+    {DomCode::MAIL_REPLY, DomKey::MAIL_REPLY},
+    {DomCode::MAIL_SEND, DomKey::MAIL_SEND},
+    {DomCode::MEDIA_FAST_FORWARD, DomKey::MEDIA_FAST_FORWARD},
+    {DomCode::MEDIA_LAST, DomKey::MEDIA_LAST},
+    {DomCode::MEDIA_PLAY, DomKey::MEDIA_PLAY},
+    {DomCode::MEDIA_PLAY_PAUSE, DomKey::MEDIA_PLAY_PAUSE},
+    {DomCode::MEDIA_RECORD, DomKey::MEDIA_RECORD},
+    {DomCode::MEDIA_REWIND, DomKey::MEDIA_REWIND},
+    {DomCode::MEDIA_SELECT, DomKey::LAUNCH_MEDIA_PLAYER},
+    {DomCode::MEDIA_STOP, DomKey::MEDIA_STOP},
+    {DomCode::MEDIA_TRACK_NEXT, DomKey::MEDIA_TRACK_NEXT},
+    {DomCode::MEDIA_TRACK_PREVIOUS, DomKey::MEDIA_TRACK_PREVIOUS},
+    {DomCode::NEW, DomKey::NEW},
+    {DomCode::NON_CONVERT, DomKey::NON_CONVERT},
+    {DomCode::NUM_LOCK, DomKey::NUM_LOCK},
+    {DomCode::NUMPAD_BACKSPACE, DomKey::BACKSPACE},
+    {DomCode::NUMPAD_CLEAR, DomKey::CLEAR},
+    {DomCode::NUMPAD_ENTER, DomKey::ENTER},
+    {DomCode::OPEN, DomKey::OPEN},
+    {DomCode::META_LEFT, DomKey::META},
+    {DomCode::META_RIGHT, DomKey::META},
+    {DomCode::PAGE_DOWN, DomKey::PAGE_DOWN},
+    {DomCode::PAGE_UP, DomKey::PAGE_UP},
+    {DomCode::PASTE, DomKey::PASTE},
+    {DomCode::PAUSE, DomKey::PAUSE},
+    {DomCode::POWER, DomKey::POWER},
+    {DomCode::PRINT, DomKey::PRINT},
+    {DomCode::PRINT_SCREEN, DomKey::PRINT_SCREEN},
+    {DomCode::PROGRAM_GUIDE, DomKey::GUIDE},
+    {DomCode::PROPS, DomKey::PROPS},
+    {DomCode::REDO, DomKey::REDO},
+    {DomCode::SAVE, DomKey::SAVE},
+    {DomCode::SCROLL_LOCK, DomKey::SCROLL_LOCK},
+    {DomCode::SELECT, DomKey::SELECT},
+    {DomCode::SELECT_TASK, DomKey::APP_SWITCH},
+    {DomCode::SHIFT_LEFT, DomKey::SHIFT},
+    {DomCode::SHIFT_RIGHT, DomKey::SHIFT},
+    {DomCode::SPEECH_INPUT_TOGGLE, DomKey::SPEECH_INPUT_TOGGLE},
+    {DomCode::SPELL_CHECK, DomKey::SPELL_CHECK},
+    {DomCode::SUPER, DomKey::SUPER},
+    {DomCode::TAB, DomKey::TAB},
+    {DomCode::UNDO, DomKey::UNDO},
+    {DomCode::VOLUME_DOWN, DomKey::AUDIO_VOLUME_DOWN},
+    {DomCode::VOLUME_MUTE, DomKey::AUDIO_VOLUME_MUTE},
+    {DomCode::VOLUME_UP, DomKey::AUDIO_VOLUME_UP},
+    {DomCode::WAKE_UP, DomKey::WAKE_UP},
+    {DomCode::ZOOM_IN, DomKey::ZOOM_IN},
+    {DomCode::ZOOM_OUT, DomKey::ZOOM_OUT},
+    {DomCode::ZOOM_TOGGLE, DomKey::ZOOM_TOGGLE},
+    {DomCode::GO_BACK, DomKey::GO_BACK},
+    {DomCode::GO_HOME, DomKey::GO_HOME},
+    {DomCode::APP_SWITCH, DomKey::APP_SWITCH},
+    {DomCode::SLEEP, DomKey::STANDBY},
+};
+
+DomKey BrowserKeyToDomKey(std::string_view key) {
+    if (key.empty()) {
+        return DomKey::NONE;
+    }
+    for (const auto& entry : kDomKeyMap) {
+        if (entry.string != nullptr && key == entry.string) {
+            return entry.dom_key;
+        }
+    }
+    if (key == "Dead") {
+        return DomKey::DeadKeyFromCombiningCharacter(0xFFFF);
+    }
+    DomKey from_utf8 = DomKey::FromCharacter(std::string(key));
+    if (from_utf8 != DomKey::NONE) {
+        return from_utf8;
+    }
+    if (key.size() == 1) {
+        return DomKey::FromCharacter(static_cast<uint8_t>(key[0]));
+    }
+    return DomKey::NONE;
+}
+
+DomCode DomKeyAsNonPrintableDomCode(DomKey key) {
+    for (const auto& entry : kNonPrintableCodeMap) {
+        if (entry.dom_key == key) {
+            return entry.dom_code;
+        }
+    }
+    return DomCode::NONE;
+}
+
+}  // namespace
+
+DomKeyResolution resolve_dom_key(std::string_view key) {
+    const DomKey dom_key = BrowserKeyToDomKey(key);
+    if (dom_key == DomKey::NONE || dom_key.IsDeadKey()) {
+        return {DomKeyResolution::Kind::kNone, 0, 0};
+    }
+    const DomCode code = DomKeyAsNonPrintableDomCode(dom_key);
+    if (code != DomCode::NONE) {
+        return {DomKeyResolution::Kind::kNonPrintable, dom_to_evdev(code), 0};
+    }
+    return {DomKeyResolution::Kind::kCharacter, 0, dom_key.ToCharacter()};
 }
 
 static const char* KeyCodeTypeToString(KeyCodeType source) {

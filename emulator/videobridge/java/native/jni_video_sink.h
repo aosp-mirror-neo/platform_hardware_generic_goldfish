@@ -47,7 +47,6 @@ namespace goldfish::videobridge::java {
  */
 struct JniEnvDeleter {
     struct Empty {};
-    JniEnvDeleter() = default;
     explicit JniEnvDeleter(Empty) {}
     explicit JniEnvDeleter(JavaVM* jvm) : jvm_(jvm) {}
     void operator()(JNIEnv* /*env*/) const {
@@ -75,7 +74,7 @@ class ScopedJniEnv : public goldfish::base::UniqueHandle<JNIEnv*, nullptr, JniEn
         if (!jvm) return {};
         JNIEnv* env = nullptr;
         if (jvm->GetEnv(reinterpret_cast<void**>(&env), version) != JNI_EDETACHED) {
-            return UniqueHandle(env);
+            return UniqueHandle(env, goldfish::videobridge::java::JniEnvDeleter(nullptr));
         }
 #if defined(__ANDROID__)
         bool attached = (jvm->AttachCurrentThread(&env, nullptr) == JNI_OK);

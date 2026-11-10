@@ -26,6 +26,11 @@ namespace {
 
 constexpr std::string_view kSnapshotNameSalt = "5a2b3c4d5e6f7a8b123456789abcdef0";
 
+/// Converts `duration` to whole milliseconds for snapshot telemetry fields.
+uint64_t ToDurationMs(absl::Duration duration) {
+    return static_cast<uint64_t>(absl::ToInt64Milliseconds(duration));
+}
+
 bool IsQuickbootLoadSucceeded(
         android_studio::EmulatorQuickbootLoad::EmulatorQuickbootLoadState state) {
     return state == android_studio::EmulatorQuickbootLoad::EMULATOR_QUICKBOOT_LOAD_SUCCEEDED ||
@@ -38,6 +43,49 @@ bool IsQuickbootSaveSucceeded(
     return state == android_studio::EmulatorQuickbootSave::EMULATOR_QUICKBOOT_SAVE_SUCCEEDED ||
            state == android_studio::EmulatorQuickbootSave::
                             EMULATOR_QUICKBOOT_SAVE_SUCCEEDED_WITH_VULKAN;
+}
+
+void ReportQuickbootLoadSkipped(
+        MetricsReporter& reporter,
+        android_studio::EmulatorQuickbootLoad::EmulatorQuickbootLoadState state,
+        android_studio::EmulatorSnapshotFailureReason failure_reason =
+                android_studio::EMULATOR_SNAPSHOT_FAILURE_REASON_UNSPECIFIED) {
+    SnapshotOperationStats stats;
+    stats.for_save = false;
+    stats.is_quickboot = true;
+    stats.include_memory_usage = false;
+    stats.quickboot_load_state = state;
+    stats.failure_reason = failure_reason;
+    ReportSnapshotMetrics(reporter, stats);
+}
+
+void ReportQuickbootSaveSkipped(
+        MetricsReporter& reporter,
+        android_studio::EmulatorQuickbootSave::EmulatorQuickbootSaveState state,
+        android_studio::EmulatorSnapshotFailureReason failure_reason =
+                android_studio::EMULATOR_SNAPSHOT_FAILURE_REASON_UNSPECIFIED) {
+    SnapshotOperationStats stats;
+    stats.for_save = true;
+    stats.is_quickboot = true;
+    stats.include_memory_usage = false;
+    stats.quickboot_save_state = state;
+    stats.failure_reason = failure_reason;
+    ReportSnapshotMetrics(reporter, stats);
+}
+
+/// Populates and reports metrics for a generic (non-quickboot) snapshot save or
+/// load operation.
+void ReportGenericSnapshot(MetricsReporter& reporter, std::string_view name, bool for_save,
+                           bool success, absl::Duration duration) {
+    SnapshotOperationStats stats;
+    stats.for_save = for_save;
+    stats.is_quickboot = false;
+    stats.name = std::string(name);
+    stats.duration_ms = ToDurationMs(duration);
+    if (!success) {
+        stats.ReportFailure();
+    }
+    ReportSnapshotMetrics(reporter, stats);
 }
 
 }  // namespace
@@ -154,38 +202,6 @@ void ReportSnapshotMetrics(MetricsReporter& reporter, const SnapshotOperationSta
     });
 }
 
-namespace {
-
-void ReportQuickbootLoadSkipped(
-        MetricsReporter& reporter,
-        android_studio::EmulatorQuickbootLoad::EmulatorQuickbootLoadState state,
-        android_studio::EmulatorSnapshotFailureReason failure_reason =
-                android_studio::EMULATOR_SNAPSHOT_FAILURE_REASON_UNSPECIFIED) {
-    SnapshotOperationStats stats;
-    stats.for_save = false;
-    stats.is_quickboot = true;
-    stats.include_memory_usage = false;
-    stats.quickboot_load_state = state;
-    stats.failure_reason = failure_reason;
-    ReportSnapshotMetrics(reporter, stats);
-}
-
-void ReportQuickbootSaveSkipped(
-        MetricsReporter& reporter,
-        android_studio::EmulatorQuickbootSave::EmulatorQuickbootSaveState state,
-        android_studio::EmulatorSnapshotFailureReason failure_reason =
-                android_studio::EMULATOR_SNAPSHOT_FAILURE_REASON_UNSPECIFIED) {
-    SnapshotOperationStats stats;
-    stats.for_save = true;
-    stats.is_quickboot = true;
-    stats.include_memory_usage = false;
-    stats.quickboot_save_state = state;
-    stats.failure_reason = failure_reason;
-    ReportSnapshotMetrics(reporter, stats);
-}
-
-}  // namespace
-
 void ReportQuickbootSkippedMetrics(MetricsReporter& reporter, QuickbootLoadStatus load_status,
                                    QuickbootSaveStatus save_status) {
     switch (load_status) {
@@ -232,34 +248,12 @@ void ReportQuickbootSkippedMetrics(MetricsReporter& reporter, QuickbootLoadStatu
 
 void ReportGenericSnapshotSave(MetricsReporter& reporter, std::string_view name, bool success,
                                absl::Duration duration) {
-    SnapshotOperationStats stats;
-    stats.for_save = true;
-    stats.is_quickboot = false;
-    stats.name = std::string(name);
-    stats.duration_ms = static_cast<uint64_t>(absl::ToInt64Milliseconds(duration));
-    if (success) {
-        stats.save_state = android_studio::EMULATOR_SNAPSHOT_SAVE_SUCCEEDED_NORMAL;
-    } else {
-        stats.save_state = android_studio::EMULATOR_SNAPSHOT_SAVE_FAILED;
-        stats.failure_reason = android_studio::EMULATOR_SNAPSHOT_FAILURE_REASON_INTERNAL_ERROR;
-    }
-    ReportSnapshotMetrics(reporter, stats);
+    ReportGenericSnapshot(reporter, name, /*for_save=*/true, success, duration);
 }
 
 void ReportGenericSnapshotLoad(MetricsReporter& reporter, std::string_view name, bool success,
                                absl::Duration duration) {
-    SnapshotOperationStats stats;
-    stats.for_save = false;
-    stats.is_quickboot = false;
-    stats.name = std::string(name);
-    stats.duration_ms = static_cast<uint64_t>(absl::ToInt64Milliseconds(duration));
-    if (success) {
-        stats.load_state = android_studio::EMULATOR_SNAPSHOT_LOAD_SUCCEEDED_NORMAL;
-    } else {
-        stats.load_state = android_studio::EMULATOR_SNAPSHOT_LOAD_FAILED;
-        stats.failure_reason = android_studio::EMULATOR_SNAPSHOT_FAILURE_REASON_INTERNAL_ERROR;
-    }
-    ReportSnapshotMetrics(reporter, stats);
+    ReportGenericSnapshot(reporter, name, /*for_save=*/false, success, duration);
 }
 
 void ReportQuickbootLoad(MetricsReporter& reporter, std::string_view name, bool success,
@@ -270,17 +264,11 @@ void ReportQuickbootLoad(MetricsReporter& reporter, std::string_view name, bool 
     stats.for_save = false;
     stats.is_quickboot = true;
     stats.name = std::string(name);
-    stats.duration_ms = static_cast<uint64_t>(absl::ToInt64Milliseconds(now - state.op_start_time));
+    stats.duration_ms = ToDurationMs(now - state.op_start_time);
     if (success) {
         state.session_start_time = now;
-        stats.quickboot_load_state =
-                android_studio::EmulatorQuickbootLoad::EMULATOR_QUICKBOOT_LOAD_SUCCEEDED;
-        stats.load_state = android_studio::EMULATOR_SNAPSHOT_LOAD_SUCCEEDED_NORMAL;
     } else {
-        stats.quickboot_load_state =
-                android_studio::EmulatorQuickbootLoad::EMULATOR_QUICKBOOT_LOAD_FAILED;
-        stats.load_state = android_studio::EMULATOR_SNAPSHOT_LOAD_FAILED;
-        stats.failure_reason = failure_reason;
+        stats.ReportFailure(failure_reason);
     }
     ReportSnapshotMetrics(reporter, stats);
 }
@@ -293,18 +281,10 @@ void ReportQuickbootSave(MetricsReporter& reporter, std::string_view name, bool 
     stats.for_save = true;
     stats.is_quickboot = true;
     stats.name = std::string(name);
-    stats.duration_ms = static_cast<uint64_t>(absl::ToInt64Milliseconds(now - state.op_start_time));
-    stats.session_uptime_ms =
-            static_cast<uint64_t>(absl::ToInt64Milliseconds(now - state.session_start_time));
-    if (success) {
-        stats.quickboot_save_state =
-                android_studio::EmulatorQuickbootSave::EMULATOR_QUICKBOOT_SAVE_SUCCEEDED;
-        stats.save_state = android_studio::EMULATOR_SNAPSHOT_SAVE_SUCCEEDED_NORMAL;
-    } else {
-        stats.quickboot_save_state =
-                android_studio::EmulatorQuickbootSave::EMULATOR_QUICKBOOT_SAVE_FAILED;
-        stats.save_state = android_studio::EMULATOR_SNAPSHOT_SAVE_FAILED;
-        stats.failure_reason = failure_reason;
+    stats.duration_ms = ToDurationMs(now - state.op_start_time);
+    stats.session_uptime_ms = ToDurationMs(now - state.session_start_time);
+    if (!success) {
+        stats.ReportFailure(failure_reason);
     }
     ReportSnapshotMetrics(reporter, stats);
 }

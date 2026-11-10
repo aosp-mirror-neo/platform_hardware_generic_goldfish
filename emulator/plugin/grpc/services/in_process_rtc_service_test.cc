@@ -17,15 +17,31 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
+#include <cstring>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/time/time.h"
 
+#include "android/emulation/control/in_process_media_provider.h"
+#include "android/emulation/control/keyboard/key_conversion.h"
+#include "emulator/plugin/audio/test_bql.h"
+#include "emulator/plugin/audio/test_qemu_audio_stub.h"
+#include "emulator/plugin/grpc/input/input_dispatcher.h"
 #include "emulator/plugin/grpc/input/input_dispatcher_interface.h"
+#include "emulator/plugin/grpc/input/keyboard_sink.h"
+#include "emulator/plugin/grpc/input/multi_display_touch_devices.h"
 #include "emulator/plugin/grpc/input/recording_input_dispatcher.h"
+#include "emulator/plugin/vminterface/vm_lock.h"
+#include "goldfish/async/testing/test_event_loop.h"
+#include "goldfish/audio/audio_input_mux.h"
 #include "goldfish/audio/qemu_audio_capture.h"
 #include "goldfish/avd/avd_info.h"
 #include "goldfish/avd/avd_properties.h"
@@ -33,16 +49,13 @@
 #include "goldfish/avd/global_event_loop.h"
 #include "goldfish/display/test/fake_multi_display.h"
 #include "goldfish/display/test/fake_pixman_display.h"
+#include "goldfish/system/testing/fake_clocks.h"
 #include "input_service.pb.h"
+#include "standard-headers/linux/input-event-codes.h"
 
 extern "C" {
-struct QemuConsole {
-    int dummy;
-};
 // NOLINTNEXTLINE(readability-identifier-naming)
-QemuConsole* qemu_console_lookup_by_index(int index) {
-    return nullptr;
-}
+AudioBackend* audio_be_by_name(const char* name, void* errp);
 }
 
 namespace android::emulation::control {
@@ -51,11 +64,17 @@ namespace {
 using ::goldfish::grpc::v2::IInputDispatcher;
 using ::goldfish::grpc::v2::testing::RecordingInputDispatcher;
 
-class TestAvdUniverse : public ::goldfish::avd::AvdUniverse {
+class TestAvdClockHolder {
+  protected:
+    ::goldfish::system::testing::FakeVirtualClock virtual_clock_;
+};
+
+class TestAvdUniverse : private TestAvdClockHolder, public ::goldfish::avd::AvdUniverse {
   public:
     explicit TestAvdUniverse(::goldfish::display::IMultiDisplay* multi_display,
                              ::goldfish::async::EventLoop& loop)
-            : ::goldfish::avd::AvdUniverse(std::make_unique<::goldfish::avd::AvdProperties>())
+            : ::goldfish::avd::AvdUniverse(std::make_unique<::goldfish::avd::AvdProperties>(),
+                                           virtual_clock_)
             , multi_display_(multi_display)
             , loop_(loop) {
         ::goldfish::avd::SetGlobalAvdUniverse(this);
@@ -83,14 +102,6 @@ class TestAvdUniverse : public ::goldfish::avd::AvdUniverse {
             std::make_shared<RecordingInputDispatcher>();
 };
 
-#undef send
-class FakeKeyEventSender : public keyboard::IKeyEventSender {
-  public:
-    void send(const KeyboardEvent request) override { sent_events.push_back(request); }
-
-    std::vector<KeyboardEvent> sent_events;
-};
-
 TEST(InProcessRtcServiceTest, CreatesServicesFromAvdUniverse) {
     ::goldfish::display::test::FakeMultiDisplay fake_multidisplay(
             ::goldfish::avd::globalEventLoop());
@@ -102,33 +113,168 @@ TEST(InProcessRtcServiceTest, CreatesServicesFromAvdUniverse) {
     EXPECT_NE(services[1], nullptr);
 }
 
+// Stands in for the WebRTC engine: plays a constant into whoever pulls playout.
+class ConstantTransport : public ::webrtc::AudioTransport {
+  public:
+    explicit ConstantTransport(int16_t value) : value_(value) {}
+
+    int32_t RecordedDataIsAvailable(const void*, size_t, size_t, size_t, uint32_t, uint32_t,
+                                    int32_t, uint32_t, bool, uint32_t&) override {
+        return 0;
+    }
+    int32_t NeedMorePlayData(size_t samples, size_t /*bytes_per_sample*/, size_t channels,
+                             uint32_t /*rate_hz*/, void* audio, size_t& samples_out,
+                             int64_t* elapsed, int64_t* ntp) override {
+        ++calls;
+        samples_out = samples * channels;
+        std::fill_n(static_cast<int16_t*>(audio), samples_out, value_);
+        *elapsed = 0;
+        *ntp = 0;
+        return 0;
+    }
+    void PullRenderData(int, int, size_t, size_t, void*, int64_t*, int64_t*) override {}
+
+    int calls = 0;
+
+  private:
+    const int16_t value_;
+};
+
+class SilentHostInput final : public ::goldfish::audio::HostAudioInputInterface {
+  public:
+    HostVoiceHandle OpenHostVoice(HostVoiceHandle existing, const char* /*name*/,
+                                  const ::goldfish::audio::GuestAudioConfig& /*config*/,
+                                  GuestDataCallback /*on_host_data*/) override {
+        return existing ? existing : &voice_;
+    }
+    void CloseHostVoice(HostVoiceHandle /*voice*/) override {}
+    void SetHostVoiceActive(HostVoiceHandle /*voice*/, bool /*active*/) override {}
+    void SetHostVoiceVolume(HostVoiceHandle /*voice*/,
+                            const ::goldfish::audio::GuestChannelVolume& /*volume*/) override {}
+    size_t ReadHostVoice(HostVoiceHandle /*voice*/, void* dst, size_t byte_count) override {
+        std::memset(dst, 0, byte_count);
+        return byte_count;
+    }
+    void SetTimerArmed(bool /*armed*/) override {}
+    absl::Duration NowVirtualTime() const override { return absl::Milliseconds(now_ms); }
+
+    int64_t now_ms = 1000;
+
+  private:
+    int voice_ = 1;
+};
+
+// When WebRTC starts playout on the audio device module the Switchboard plays received audio
+// into, the guest microphone gets a "webrtc" input that pulls from that module.
+TEST(InProcessRtcServiceTest, PlayoutReachesTheGuestMicrophoneThroughTheSharedAudioDevice) {
+    using ::goldfish::audio::AudioInputMux;
+    using ::goldfish::audio::MicrophoneInputKind;
+    ::goldfish::audio::TestBql bql;
+    ::android::goldfish::ScopedVmLock vm_lock;
+    test_reset_audio_stubs();
+    AudioBackend* backend = audio_be_by_name("mainaudiodev", nullptr);
+    SilentHostInput host;
+    auto mux = std::make_shared<AudioInputMux>(&host);
+    ::goldfish::audio::RegisterAudioInputMux(backend, mux);
+    // Mute the host mic so only the WebRTC input can produce non-silence.
+    ASSERT_TRUE(mux->UpdateState({.input_updates = {{.source_id = "host", .muted = true}}}).ok());
+    auto loop = ::goldfish::async::testing::TestEventLoop::Create();
+    ::goldfish::display::test::FakeMultiDisplay fake_multidisplay(
+            ::goldfish::avd::globalEventLoop());
+    TestAvdUniverse universe(&fake_multidisplay, *loop);
+    auto audio_device = ::goldfish::videobridge::GoldfishAudioDeviceModule::Create();
+    ConstantTransport engine(1234);
+    audio_device->RegisterAudioCallback(&engine);
+    auto run_loop = [&loop] {
+        ::android::goldfish::ScopedVmUnlock unlock;  // The loop thread takes the VM lock itself.
+        loop->RunAll();
+    };
+
+    auto provider = CreateInProcessMediaProvider(universe, 0, backend, audio_device);
+    audio_device->StartPlayout();
+    run_loop();
+
+    const auto inputs = mux->GetStateSnapshot().microphone_inputs;
+    ASSERT_EQ(inputs.size(), 2U);
+    EXPECT_EQ(inputs[1].source_id, "webrtc");
+    EXPECT_EQ(inputs[1].kind, MicrophoneInputKind::kWebRtc);
+
+    std::vector<int16_t> captured;
+    ::goldfish::audio::MuxVoiceHandle* voice = nullptr;
+    voice = mux->OpenVoice(nullptr, "virtio-sound.in",
+                           {.sample_rate_hz = 48000,
+                            .channels = 1,
+                            .format = ::goldfish::audio::GuestPcmFormat::kS16},
+                           [&](int avail_bytes) {
+                               std::vector<int16_t> buf(static_cast<size_t>(avail_bytes) / 2);
+                               const size_t read =
+                                       mux->ReadVoice(voice, buf.data(), buf.size() * 2);
+                               captured.insert(captured.end(), buf.begin(), buf.begin() + read / 2);
+                           });
+    mux->SetVoiceActive(voice, true);
+    host.now_ms += 10;
+    mux->OnTimerTick();
+    EXPECT_THAT(captured, ::testing::AllOf(::testing::SizeIs(480), ::testing::Each(1234)));
+    EXPECT_GT(engine.calls, 0);
+
+    audio_device->StopPlayout();
+    run_loop();
+    EXPECT_EQ(mux->GetStateSnapshot().microphone_inputs.size(), 1U);
+
+    // The module outlives the provider, as it may in the Switchboard's factory.
+    provider.reset();
+    audio_device->StartPlayout();
+    EXPECT_EQ(loop->TaskCount(), 0U);
+
+    mux->CloseVoice(voice);
+    audio_device->RegisterAudioCallback(nullptr);
+    ::goldfish::audio::UnregisterAudioInputMux(backend);
+    mux->Shutdown();
+    test_reset_audio_stubs();
+}
+
 TEST(InProcessRtcServiceTest, InputSenderDispatchesKeyEvent) {
     ::goldfish::display::test::FakeMultiDisplay fake_multidisplay(
             ::goldfish::avd::globalEventLoop());
     TestAvdUniverse universe(&fake_multidisplay, *::goldfish::avd::globalEventLoop());
-    auto key_event_sender = std::make_shared<FakeKeyEventSender>();
-    auto factory = CreateInProcessInputSenderFactory(fake_multidisplay, key_event_sender);
+    auto dispatcher = std::make_shared<RecordingInputDispatcher>();
+    auto factory = CreateInProcessInputSenderFactory(fake_multidisplay, dispatcher);
     auto sender = factory(DataChannelLabel::kInput);
     ASSERT_NE(sender, nullptr);
     EXPECT_TRUE(sender->Start().ok());
+    ASSERT_TRUE(dispatcher->opened_with.has_value());
+    EXPECT_TRUE(dispatcher->opened_with->human);
+    EXPECT_EQ(dispatcher->opened_with->source_id, 0);
+    EXPECT_FALSE(dispatcher->opened_with->reject_down_on_held);
 
     InputEvent event;
     event.mutable_key_event()->set_key("a");
+    event.mutable_key_event()->set_eventtype(KeyboardEvent::keypress);
     sender->SendEvent(event);
+    EXPECT_THAT(dispatcher->calls, ::testing::ElementsAre("key 7 KeyA", "key 7 KeyA"));
 
-    ASSERT_EQ(key_event_sender->sent_events.size(), 1);
-    EXPECT_EQ(key_event_sender->sent_events[0].key(), "a");
+    // Stopping the sender on DataChannel close immediately closes the session.
+    sender->Stop();
+    EXPECT_THAT(dispatcher->calls, ::testing::ElementsAre("key 7 KeyA", "key 7 KeyA", "close 7"));
+
+    // Subsequent sender destruction does not double-close.
+    sender.reset();
+    EXPECT_THAT(dispatcher->calls, ::testing::ElementsAre("key 7 KeyA", "key 7 KeyA", "close 7"));
 }
 
 TEST(InProcessRtcServiceTest, InputSenderDispatchesTouchAndMouseEvent) {
     ::goldfish::display::test::FakeMultiDisplay fake_multidisplay(
             ::goldfish::avd::globalEventLoop());
     TestAvdUniverse universe(&fake_multidisplay, *::goldfish::avd::globalEventLoop());
-    auto key_event_sender = std::make_shared<FakeKeyEventSender>();
-    auto factory = CreateInProcessInputSenderFactory(fake_multidisplay, key_event_sender);
+    auto dispatcher = std::make_shared<RecordingInputDispatcher>();
+    auto factory = CreateInProcessInputSenderFactory(fake_multidisplay, dispatcher);
     auto sender = factory(DataChannelLabel::kInput);
     ASSERT_NE(sender, nullptr);
     EXPECT_TRUE(sender->Start().ok());
+    ASSERT_TRUE(dispatcher->opened_with.has_value());
+    EXPECT_TRUE(dispatcher->opened_with->human);
+    EXPECT_EQ(dispatcher->opened_with->source_id, 0);
+    EXPECT_FALSE(dispatcher->opened_with->reject_down_on_held);
 
     InputEvent touch_event;
     auto* touch = touch_event.mutable_touch_event()->add_touches();
@@ -141,31 +287,122 @@ TEST(InProcessRtcServiceTest, InputSenderDispatchesTouchAndMouseEvent) {
     InputEvent mouse_event;
     mouse_event.mutable_mouse_event()->set_x(50);
     mouse_event.mutable_mouse_event()->set_y(60);
+    mouse_event.mutable_mouse_event()->set_buttons(1);
     sender->SendEvent(mouse_event);
 
+    EXPECT_THAT(dispatcher->calls,
+                ::testing::ElementsAre("pointer 7 display 0", "pointer 7 display 0"));
+
+    sender->Stop();
+    EXPECT_THAT(dispatcher->calls,
+                ::testing::ElementsAre("pointer 7 display 0", "pointer 7 display 0", "close 7"));
+}
+
+TEST(InProcessRtcServiceTest, MultipleWebRtcPeersIsolatePointerZeroAndReleaseOnChannelStop) {
+    class TrackingKeyboardSink final : public ::goldfish::grpc::v2::KeyboardSink {
+      public:
+        void WriteKey(uint32_t evdev_code, bool down) override {
+            key_events.emplace_back(evdev_code, down);
+        }
+        void TypeText(std::string_view /*utf8*/) override {}
+        void Reset() override {}
+
+        std::vector<std::pair<uint32_t, bool>> key_events;
+    };
+
+    auto loop = ::goldfish::async::testing::TestEventLoop::Create("qemu");
+    ::goldfish::display::test::FakeMultiDisplay fake_multidisplay(loop.get());
     auto display = fake_multidisplay.GetDisplay<::goldfish::display::test::ActiveFakePixmanDisplay>(
             fake_multidisplay.GetDisplay(0));
+    display->evdev_reports.clear();
 
-    EXPECT_GT(display->evdevs.size(), 0);
-    bool has_touch = false;
-    for (const auto& ev : display->evdevs) {
-        if (ev.type == 3) has_touch = true;  // EV_ABS
-    }
-    EXPECT_TRUE(has_touch);
+    ::goldfish::grpc::v2::MultiDisplayTouchDevices touch_devices(fake_multidisplay,
+                                                                 /*has_hinge=*/false);
+    TrackingKeyboardSink keyboard_sink;
+    auto dispatcher = std::make_shared<::goldfish::grpc::v2::InputDispatcher>(
+            *loop, touch_devices, &keyboard_sink,
+            [](const ::android::emulation::v2::KeyEvent& key) {
+                return keyboard::dom_code_to_evdev(key.dom_code());
+            });
+    auto factory = CreateInProcessInputSenderFactory(fake_multidisplay, dispatcher);
 
-    ASSERT_EQ(display->mouse_events.size(), 1);
-    EXPECT_EQ(display->mouse_events[0].x, 50);
-    EXPECT_EQ(display->mouse_events[0].y, 60);
+    auto count_active_slots = [&]() {
+        int active_slots = 0;
+        uint32_t selected_slot = 0;
+        std::array<int32_t, 11> slot_tracking;
+        slot_tracking.fill(-1);
+        for (const auto& report : display->evdev_reports) {
+            for (const auto& ev : report) {
+                if (ev.type == EV_ABS && ev.code == ABS_MT_SLOT) {
+                    selected_slot = ev.value;
+                } else if (ev.type == EV_ABS && ev.code == ABS_MT_TRACKING_ID &&
+                           selected_slot < slot_tracking.size()) {
+                    slot_tracking[selected_slot] = static_cast<int32_t>(ev.value);
+                }
+            }
+        }
+        for (const int32_t id : slot_tracking) {
+            if (id != -1) {
+                ++active_slots;
+            }
+        }
+        return active_slots;
+    };
+
+    auto peer_a = factory(DataChannelLabel::kInput);
+    auto peer_b = factory(DataChannelLabel::kInput);
+    ASSERT_TRUE(peer_a->Start().ok());
+    ASSERT_TRUE(peer_b->Start().ok());
+
+    // Both WebRTC peers send Touch(id=0, pressure=1) (JniRtcReceiver / XCID binary pressure).
+    InputEvent touch_a;
+    auto* ta = touch_a.mutable_touch_event()->add_touches();
+    ta->set_identifier(0);
+    ta->set_x(100);
+    ta->set_y(150);
+    ta->set_pressure(1);
+    peer_a->SendEvent(touch_a);
+
+    InputEvent key_a;
+    key_a.mutable_key_event()->set_key("KeyA");
+    key_a.mutable_key_event()->set_eventtype(KeyboardEvent::keydown);
+    peer_a->SendEvent(key_a);
+
+    InputEvent touch_b;
+    auto* tb = touch_b.mutable_touch_event()->add_touches();
+    tb->set_identifier(0);
+    tb->set_x(300);
+    tb->set_y(250);
+    tb->set_pressure(1);
+    peer_b->SendEvent(touch_b);
+    loop->RunAll();
+
+    EXPECT_EQ(count_active_slots(), 2);
+    ASSERT_EQ(keyboard_sink.key_events.size(), 1U);
+    EXPECT_EQ(keyboard_sink.key_events[0], std::make_pair(static_cast<uint32_t>(KEY_A), true));
+
+    // Peer A's DataChannel closes while PeerConnection is still alive: Peer A's touch and key
+    // are released immediately while Peer B's touch stays held.
+    peer_a->Stop();
+    loop->RunAll();
+    EXPECT_EQ(count_active_slots(), 1);
+    ASSERT_EQ(keyboard_sink.key_events.size(), 2U);
+    EXPECT_EQ(keyboard_sink.key_events[1], std::make_pair(static_cast<uint32_t>(KEY_A), false));
+
+    peer_b->Stop();
+    loop->RunAll();
+    EXPECT_EQ(count_active_slots(), 0);
+
+    dispatcher->Shutdown();
+    display->Stop();
 }
 
 TEST(InProcessRtcServiceTest, InputSenderV2DispatchesToAHumanSessionClosedWithTheChannel) {
     ::goldfish::display::test::FakeMultiDisplay fake_multidisplay(
             ::goldfish::avd::globalEventLoop());
     TestAvdUniverse universe(&fake_multidisplay, *::goldfish::avd::globalEventLoop());
-    auto key_event_sender = std::make_shared<FakeKeyEventSender>();
     auto dispatcher = std::make_shared<RecordingInputDispatcher>();
-    auto factory =
-            CreateInProcessInputSenderFactory(fake_multidisplay, key_event_sender, dispatcher);
+    auto factory = CreateInProcessInputSenderFactory(fake_multidisplay, dispatcher);
     auto sender = factory(DataChannelLabel::kInputV2);
     ASSERT_NE(sender, nullptr);
     EXPECT_TRUE(sender->Start().ok());
@@ -186,15 +423,58 @@ TEST(InProcessRtcServiceTest, InputSenderV2DispatchesToAHumanSessionClosedWithTh
 
     sender->SendV2Event(v2_event);
     ::android::emulation::v2::InputEvent text_event;
-    text_event.mutable_text()->set_text("测试_🚀_é");
+    text_event.mutable_text()->set_text("hello 123");
     sender->SendV2Event(text_event);
     EXPECT_THAT(dispatcher->calls,
-                ::testing::ElementsAre("pointer 7 display 0", "text 7 测试_🚀_é"));
+                ::testing::ElementsAre("pointer 7 display 0", "text 7 hello 123"));
+
+    // DataChannel close (Stop) releases the session immediately, before sender destruction.
+    sender->Stop();
+    EXPECT_THAT(dispatcher->calls,
+                ::testing::ElementsAre("pointer 7 display 0", "text 7 hello 123", "close 7"));
 
     sender.reset();
     EXPECT_THAT(dispatcher->calls,
-                ::testing::ElementsAre("pointer 7 display 0", "text 7 测试_🚀_é", "close 7"));
-    EXPECT_TRUE(key_event_sender->sent_events.empty());
+                ::testing::ElementsAre("pointer 7 display 0", "text 7 hello 123", "close 7"));
+}
+
+TEST(InProcessRtcServiceTest, InputSenderV2DropsInvalidEventsBeforeDispatch) {
+    ::goldfish::display::test::FakeMultiDisplay fake_multidisplay(
+            ::goldfish::avd::globalEventLoop());
+    TestAvdUniverse universe(&fake_multidisplay, *::goldfish::avd::globalEventLoop());
+    auto dispatcher = std::make_shared<RecordingInputDispatcher>();
+    auto factory = CreateInProcessInputSenderFactory(fake_multidisplay, dispatcher);
+    auto sender = factory(DataChannelLabel::kInputV2);
+    ASSERT_NE(sender, nullptr);
+    EXPECT_TRUE(sender->Start().ok());
+
+    ::android::emulation::v2::InputEvent mouse_event;
+    auto* mouse_pointer = mouse_event.mutable_pointer();
+    mouse_pointer->set_display_id(0);
+    mouse_pointer->set_action(::android::emulation::v2::PointerAction::POINTER_ACTION_DOWN);
+    auto* mouse_ptr = mouse_pointer->add_pointers();
+    mouse_ptr->set_pointer_id(0);
+    mouse_ptr->set_tool_type(::android::emulation::v2::ToolType::TOOL_TYPE_MOUSE);
+    sender->SendV2Event(mouse_event);
+
+    ::android::emulation::v2::InputEvent scroll_event;
+    scroll_event.mutable_pointer()->set_display_id(0);
+    scroll_event.mutable_pointer()->set_action(
+            ::android::emulation::v2::PointerAction::POINTER_ACTION_SCROLL);
+    scroll_event.mutable_pointer()->set_scroll_y(1.0F);
+    sender->SendV2Event(scroll_event);
+
+    ::android::emulation::v2::InputEvent invalid_key_event;
+    invalid_key_event.mutable_key()->set_action(
+            ::android::emulation::v2::KeyAction::KEY_ACTION_PRESS);
+    invalid_key_event.mutable_key()->set_dom_code("a");
+    sender->SendV2Event(invalid_key_event);
+
+    ::android::emulation::v2::InputEvent non_ascii_text_event;
+    non_ascii_text_event.mutable_text()->set_text("测试_🚀_é");
+    sender->SendV2Event(non_ascii_text_event);
+
+    EXPECT_THAT(dispatcher->calls, ::testing::IsEmpty());
 }
 
 }  // namespace

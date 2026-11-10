@@ -14,6 +14,7 @@
 
 #include "goldfish/async/testing/test_event_loop.h"
 
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <vector>
@@ -88,7 +89,7 @@ TEST(TestEventLoop, ScheduleRepeatingTask) {
     ASSERT_EQ(3, count);
 
     // no new events after cancel.
-    timer->Cancel();
+    timer.reset();
     loop->AdvanceClock(absl::Milliseconds(50));
     ASSERT_EQ(3, count);
 }
@@ -150,14 +151,14 @@ TEST(TestEventLoop, PostAndWaitVoid) {
 TEST(TestEventLoop, TimerCancellation) {
     auto loop = TestEventLoop::Create();
     bool executed = false;
-    auto timer = loop->ScheduleRepeating(
-            [&]() {
-                executed = true;
-                return false;
-            },
-            absl::Milliseconds(100), absl::ZeroDuration());
-
-    timer->Cancel();
+    {
+        auto timer = loop->ScheduleRepeating(
+                [&]() {
+                    executed = true;
+                    return false;
+                },
+                absl::Milliseconds(100), absl::ZeroDuration());
+    }
     loop->AdvanceClock(absl::Milliseconds(100));
     ASSERT_FALSE(executed);
 }
@@ -286,6 +287,47 @@ TEST(TestEventLoop, RescheduleRepeatingTimer) {
     ASSERT_EQ(counter, 3);
 }
 
+TEST(TestEventLoop, TimerReturningFalseCanBeRescheduled) {
+    auto loop = TestEventLoop::Create();
+    int count = 0;
+
+    auto timer = loop->ScheduleRepeating(
+            [&]() {
+                ++count;
+                return count != 2 && count != 4;
+            },
+            absl::Milliseconds(10), absl::Milliseconds(10));
+
+    loop->AdvanceClock(absl::Milliseconds(10));
+    ASSERT_EQ(count, 1);
+    loop->AdvanceClock(absl::Milliseconds(10));
+    ASSERT_EQ(count, 2);
+    loop->AdvanceClock(absl::Milliseconds(20));
+    ASSERT_EQ(count, 2);
+
+    // Re-arm the disarmed ScopedTimer and verify it fires again.
+    timer->Schedule(absl::Milliseconds(10), absl::Milliseconds(10));
+    loop->AdvanceClock(absl::Milliseconds(10));
+    ASSERT_EQ(count, 3);
+    loop->AdvanceClock(absl::Milliseconds(10));
+    EXPECT_EQ(count, 4);
+    loop->AdvanceClock(absl::Milliseconds(20));
+    EXPECT_EQ(count, 4);
+}
+
+TEST(TestEventLoop, ScheduleDelayedTimerCanBeRearmedAfterFiring) {
+    auto loop = TestEventLoop::Create();
+    int count = 0;
+
+    auto timer = loop->ScheduleDelayed([&]() { ++count; }, absl::Milliseconds(10));
+    loop->AdvanceClock(absl::Milliseconds(20));
+    ASSERT_EQ(count, 1);
+
+    timer->Schedule(absl::Milliseconds(10));
+    loop->AdvanceClock(absl::Milliseconds(20));
+    EXPECT_EQ(count, 2);
+}
+
 TEST(TestEventLoop, PauseAndResumeEmitsStateChanges) {
     auto loop = TestEventLoop::Create();
     ASSERT_EQ(loop->GetState(), LooperStatusEvent::State::kRunning);
@@ -304,4 +346,15 @@ TEST(TestEventLoop, PauseAndResumeEmitsStateChanges) {
     ASSERT_EQ(states.size(), 2u);
     EXPECT_EQ(states[0], LooperStatusEvent::State::kPaused);
     EXPECT_EQ(states[1], LooperStatusEvent::State::kRunning);
+}
+
+TEST(TestEventLoop, PostWithDelayRunsOnceTheClockAdvances) {
+    auto loop = TestEventLoop::Create();
+    std::atomic<bool> ran = false;
+    ASSERT_THAT(loop->Post([&ran] { ran = true; }, absl::Seconds(1)), absl_testing::IsOk());
+
+    loop->AdvanceClock(absl::Seconds(2));
+    loop->RunAll();
+
+    EXPECT_TRUE(ran) << "Post(fn, 1s) never ran, even after the clock advanced by 2s";
 }

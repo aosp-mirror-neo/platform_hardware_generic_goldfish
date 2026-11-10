@@ -35,7 +35,7 @@ namespace android::emulation::control::keyboard {
  * character, with modifiers as needed.
  *
  * ### Thread Safety:
- * `WriteKey()` and `TypeText()` run only on the QEMU loop.
+ * `WriteKey()`, `TypeText()`, and `Reset()` run only on the QEMU loop.
  *
  * ### Ownership:
  * Owns its QEMU keyboard state. Destroy the sink on the QEMU loop, or after
@@ -57,10 +57,12 @@ class QemuKeyboardSink : public ::goldfish::grpc::v2::KeyboardSink {
 
     void WriteKey(uint32_t evdev_code, bool down) override;
     void TypeText(std::string_view utf8) override;
+    void Reset() override;
 
   private:
+    QemuConsole* const console_;
     ::goldfish::async::EventLoop& qemu_loop_;
-    QKbdState* const keyboard_state_;
+    QKbdState* keyboard_state_;
 };
 
 }  // namespace android::emulation::control::keyboard

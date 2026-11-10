@@ -34,6 +34,7 @@
 #include "android/crashreport/debug.h"
 #include "emulator/plugin/webrtc/webrtc_device.h"
 #include "goldfish/adb_device/adb_device.h"
+#include "goldfish/audio/goldfish_audio_mux.h"
 #include "goldfish/avd/avd_finalize.h"
 #include "goldfish/avd/avd_start.h"
 #include "goldfish/avd/global_event_loop.h"
@@ -54,6 +55,9 @@
 #include "goldfish/tools/aemu_version.h"
 #include "goldfish/vsock/vsock_low_level.h"
 #include "goldfish/vsock/vsock_port_fwd.h"
+#if defined(_WIN32)
+#include "goldfish/wasapi/audio_wasapi.h"
+#endif
 
 // library and initialize the crashpad crash engine upon launch.
 #include "google/system/aemu_func_defs.h"
@@ -205,6 +209,7 @@ void setup_logging() {
 
 extern "C" void GF_REGISTER_TYPES_FUNC(void) {
     VLOG(1) << "Enter GF_REGISTER_TYPES";
+    goldfish::audio::audio_mux_register_types();
     goldfish_battery_register_types();
     vsock_port_fwd_register_types();
     vsock_low_level_register_types();
@@ -222,6 +227,9 @@ extern "C" void GF_REGISTER_TYPES_FUNC(void) {
     goldfish_pipe_register_types();
     goldfish_sync_register_types();
     goldfish_address_space_register_types();
+#if defined(_WIN32)
+    goldfish::wasapi::WasapiRegisterTypes();
+#endif
     VLOG(1) << "Exit GF_REGISTER_TYPES";
 }
 
@@ -264,8 +272,8 @@ extern "C" void GF_STARTUP_FUNC(int argc, char** argv) {
     VLOG(1) << "Goldfish plugin version: " << goldfish::version::GetEmulatorFullVersion();
     // The plugin crash system should never try to upload - that should only be
     // done by the launcher.
-    if (!android::crashreport::CrashSystem::get().initialize()) {
-        LOG(WARNING) << "Failed to initialize crashreporting.";
+    if (auto status = android::crashreport::CrashSystem::get().initialize(); !status.ok()) {
+        LOG(WARNING) << "Failed to initialize crashreporting: " << status.message();
     }
 
     absl::FailureSignalHandlerOptions options;

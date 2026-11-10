@@ -1,19 +1,33 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
     name = "goldfish_address_space",
     srcs = [
+        "bar1_allocator.cc",
         "goldfish_address_space.cc",
     ],
     hdrs = [
+        "bar1_allocator.h",
         "goldfish_address_space.h",
     ],
     deps = [
+        "//emulator/libs/UniqueIdAllocator",
+        "//emulator/libs/archive",
+        "//emulator/libs/archive:QEMUFileArchive",
+        "//emulator/libs/status_macros",
         "//emulator/plugin/legacy/common",
+        "//emulator/plugin/legacy/goldfish_gpu",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
     ],
     alwayslink = True,
 )
@@ -44,3 +58,32 @@ cc_library(
         "x86_64",
     ]
 ]
+
+cc_test(
+    name = "goldfish_address_space_test",
+    srcs = ["goldfish_address_space_test.cc"],
+    deps = [
+        ":goldfish_address_space",
+        "//emulator/libs/archive",
+        "//emulator/libs/archive:DequeArchive",
+        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/legacy/common",
+        "//emulator/plugin/legacy/common:fake_guest_memory",
+        "//emulator/plugin/legacy/goldfish_gpu",
+        "//emulator/plugin/legacy/goldfish_gpu:fake_goldfish_gpu",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest",
+    ],
+)
+
+clang_tidy_test(
+    name = "tidy",
+    targets = [
+        ":goldfish_address_space",
+        ":goldfish_address_space_test",
+    ],
+    tidy_config_file = "//:clang_tidy_config",
+)

@@ -17,6 +17,7 @@
 #include <memory>
 #include <vector>
 
+#include "audio/audio_service_impl.h"
 #include "battery/battery_service_impl.h"
 #include "discovery/capabilities_service_impl.h"
 #include "environment/sensors_service_impl.h"
@@ -26,6 +27,7 @@
 #include "input/input_service_impl.h"
 #include "location/location_service_impl.h"
 #include "operations/operations_service_impl.h"
+#include "standard-headers/linux/input-event-codes.h"
 #include "system/system_service_impl.h"
 
 namespace goldfish::grpc::v2 {
@@ -53,11 +55,24 @@ std::vector<std::shared_ptr<Service>> CreateV2Services(AvdUniverse& avd_universe
                                          .event_loop = ::goldfish::avd::globalEventLoop()}));
     services.emplace_back(std::make_shared<BatteryServiceImpl>(
             avd_universe.GetBattery(), BatteryServiceImpl::Options{.has_battery = hw.hw_battery}));
+    auto* multi_display = &avd_universe.GetMultiDisplay();
+    const bool has_hinge = hw.hw_sensor_hinge;
+    services.emplace_back(std::make_shared<AudioServiceImpl>(AudioServiceImpl::Options{
+        .has_audio_output = hw.hw_audioOutput,
+        .has_audio_input = hw.hw_audioInput,
+        .set_headset_switches = [multi_display, has_hinge](bool headphone, bool microphone) {
+            if (auto display = multi_display->GetActiveDisplay(0, has_hinge);
+                display.ok() && *display != nullptr) {
+                (*display)->SendEvDevReport({
+                    {EV_SW, SW_HEADPHONE_INSERT, headphone ? 1U : 0U},
+                    {EV_SW, SW_MICROPHONE_INSERT, microphone ? 1U : 0U},
+                });
+            }
+        }}));
     services.emplace_back(std::make_shared<InputServiceImpl>(
             avd_universe.GetInputDispatcher(), avd_universe.GetMultiDisplay(),
             InputServiceImpl::Options{.hw_sensor_hinge = hw.hw_sensor_hinge,
                                       .hw_keyboard = hw.hw_keyboard,
-                                      .hw_rotary_input = hw.hw_rotaryInput,
                                       .event_loop = ::goldfish::avd::globalEventLoop()}));
 
     if (vm_operations != nullptr) {

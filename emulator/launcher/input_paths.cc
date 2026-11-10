@@ -137,27 +137,26 @@ absl::StatusOr<EmulatorPaths> ResolveEmulatorPaths(bool verbose) {
     ASSIGN_OR_RETURN(paths.advanced_features,
                      CheckExists(paths.launcher_directory / "lib" / "advancedFeatures.ini",
                                  "advanced features"));
+    ASSIGN_OR_RETURN(
+            paths.feature_patterns,
+            CheckExists(paths.launcher_directory / "lib" / "emu-original-feature-flags.protobuf",
+                        "feature patterns"));
 
-    // Releases only ship the qemu-system binary matching the host platform, so
-    // each one is optional. At least one must be present.
-    if (auto x86 = CheckExists(paths.binary_directory / AddBinarySuffix("qemu-system-x86_64"),
-                               "qemu-system-x86_64");
-        x86.ok()) {
-        ASSIGN_OR_RETURN(paths.qemu_system_x86_binary, MaybeCanonicalize(*std::move(x86)));
-    } else {
-        VLOG(1) << "Optional binary not available: " << x86.status();
-    }
-    if (auto arm = CheckExists(paths.binary_directory / AddBinarySuffix("qemu-system-aarch64"),
-                               "qemu-system-aarch64");
-        arm.ok()) {
-        ASSIGN_OR_RETURN(paths.qemu_system_arm_binary, MaybeCanonicalize(*std::move(arm)));
-    } else {
-        VLOG(1) << "Optional binary not available: " << arm.status();
-    }
-    if (paths.qemu_system_x86_binary.empty() && paths.qemu_system_arm_binary.empty()) {
-        return absl::NotFoundError(
-                absl::StrCat("No qemu-system binary found in: ", paths.binary_directory.string()));
-    }
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(__arm64__)
+    // Releases only ship the qemu-system binary matching the host architecture.
+    ASSIGN_OR_RETURN(auto arm,
+                     CheckExists(paths.binary_directory / AddBinarySuffix("qemu-system-aarch64"),
+                                 "qemu-system-aarch64"));
+    ASSIGN_OR_RETURN(paths.qemu_system_arm_binary, MaybeCanonicalize(std::move(arm)));
+#elif defined(__x86_64__) || defined(_M_X64)
+    // Releases only ship the qemu-system binary matching the host architecture.
+    ASSIGN_OR_RETURN(auto x86,
+                     CheckExists(paths.binary_directory / AddBinarySuffix("qemu-system-x86_64"),
+                                 "qemu-system-x86_64"));
+    ASSIGN_OR_RETURN(paths.qemu_system_x86_binary, MaybeCanonicalize(std::move(x86)));
+#else
+#error Unsupported host architecture
+#endif
 
 #if defined(__aarch64__) && defined(__linux__)
     // Linux AArch64 does not package a native netsimd binary yet (b/577211431).

@@ -203,6 +203,7 @@ cc_library(
         "@vulkan-headers//:vulkan_headers",
     ] + select({
         "@platforms//os:macos": [":webcam_source_darwin"],
+        "@platforms//os:windows": ["//emulator/libs/windows:scoped_com_initializer"],
         "//conditions:default": [],
     }),
     alwayslink = True,
@@ -281,9 +282,17 @@ cc_test(
         ":test_testdata_exif",
         ":test_vulkan_icds",
     ],
-    env = {
-        "LD_LIBRARY_PATH": "emulator/libs/ver/lib64/vulkan",
-    },
+    env = select({
+        "//emulator/tools:tsan": {
+            "LD_LIBRARY_PATH": "emulator/libs/ver/lib64/vulkan",
+            # Lavapipe worker threads synchronize inside uninstrumented Mesa/LLVM
+            # primitives and report false-positive TSAN races (b/579560086).
+            "LP_NUM_THREADS": "0",
+        },
+        "//conditions:default": {
+            "LD_LIBRARY_PATH": "emulator/libs/ver/lib64/vulkan",
+        },
+    }),
     # TODO(b/568399159): Intentionally skipped on Windows.
     target_compatible_with = select({
         "@platforms//os:windows": ["@platforms//:incompatible"],
@@ -294,6 +303,7 @@ cc_test(
         "//emulator/libs/system",
         "//emulator/libs/system:bazel_info",
         "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/time",
         "@aemu//base:aemu-base-headers",
         "@gfxstream//third_party/glm",
         "@libjpeg_turbo//:jpeg",

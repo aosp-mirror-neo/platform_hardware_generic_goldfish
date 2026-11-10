@@ -25,7 +25,7 @@ TEST(FpsCalculatorTest, InitialState) {
 
 TEST(FpsCalculatorTest, CalculatesFpsCorrectly) {
     FpsCalculator calculator(10);
-    absl::Time now = android::base::IClock::HostNow();
+    absl::Time now = absl::Now();
 
     calculator.AddFrame(now);
     EXPECT_DOUBLE_EQ(0.0, calculator.GetFps());
@@ -39,7 +39,7 @@ TEST(FpsCalculatorTest, CalculatesFpsCorrectly) {
 
 TEST(FpsCalculatorTest, WindowWrapsAround) {
     FpsCalculator calculator(3);
-    absl::Time now = android::base::IClock::HostNow();
+    absl::Time now = absl::Now();
 
     calculator.AddFrame(now);
     calculator.AddFrame(now + absl::Seconds(1));
@@ -52,7 +52,7 @@ TEST(FpsCalculatorTest, WindowWrapsAround) {
 
 TEST(FpsCalculatorTest, ZeroDuration) {
     FpsCalculator calculator(10);
-    absl::Time now = android::base::IClock::HostNow();
+    absl::Time now = absl::Now();
 
     calculator.AddFrame(now);
     calculator.AddFrame(now);

@@ -1,0 +1,47 @@
+load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# Public surface of the legacy GoldfishGpu: the IGoldfishGpu C++ interface used by the
+# goldfish_pipe / goldfish_address_space / goldfish_sync devices, the C ABI header used by
+# the QEMU glue, and a no-op fake for device tests. Header-only; no implementation deps.
+# The include path stays `goldfish/legacy/goldfish_gpu/<header>.h` (the package's public
+# name), unlike the layer headers which carry their layer in the path.
+
+package(
+    default_applicable_licenses = ["//emulator:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "goldfish_gpu_interface",
+    hdrs = [
+        "include/goldfish/legacy/goldfish_gpu/goldfish_gpu.h",
+        "include/goldfish/legacy/goldfish_gpu/goldfish_gpu_c_api.h",
+    ],
+    includes = ["include"],
+    deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
+cc_library(
+    name = "fake_goldfish_gpu",
+    testonly = True,
+    hdrs = ["include/goldfish/legacy/goldfish_gpu/fake_goldfish_gpu.h"],
+    includes = ["include"],
+    deps = [
+        ":goldfish_gpu_interface",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
+clang_tidy_test(
+    name = "tidy",
+    targets = [
+        ":goldfish_gpu_interface",
+        ":fake_goldfish_gpu",
+    ],
+    tidy_config_file = "//:clang_tidy_config",
+)

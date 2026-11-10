@@ -28,6 +28,7 @@
 #include <memory>
 #include <string>
 
+#include "goldfish/videobridge/goldfish_audio_device_module.h"
 #include "goldfish/videobridge/input_sender.h"
 #include "nlohmann/json.hpp"
 #include "rtc_base/network.h"
@@ -129,8 +130,13 @@ class RtcConnection {
      * @brief Constructs a connection on a caller-supplied network substrate.
      *
      * @param substrate The socket server and network manager to build on.
+     * @param audio_device The audio device module to play received audio into. Null creates
+     * one; pass one in to pull received audio from outside (see
+     * GoldfishAudioDeviceModule::PullPlayout()).
      */
-    explicit RtcConnection(NetworkSubstrate substrate);
+    explicit RtcConnection(
+            NetworkSubstrate substrate,
+            ::webrtc::scoped_refptr<GoldfishAudioDeviceModule> audio_device = nullptr);
 
     std::unique_ptr<::webrtc::TaskQueueFactory> task_factory_;
     std::unique_ptr<webrtc::Thread> network_thread_;
@@ -138,6 +144,7 @@ class RtcConnection {
     std::unique_ptr<webrtc::Thread> signaling_thread_;
     std::unique_ptr<::webrtc::NetworkManager> network_manager_;
     std::unique_ptr<::webrtc::PacketSocketFactory> socket_factory_;
+    ::webrtc::scoped_refptr<GoldfishAudioDeviceModule> audio_device_;
     webrtc::scoped_refptr<::webrtc::PeerConnectionFactoryInterface> connection_factory_;
 };
 

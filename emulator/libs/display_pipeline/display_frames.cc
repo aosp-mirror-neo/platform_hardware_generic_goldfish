@@ -128,7 +128,11 @@ DisplayFrames::DisplayFrames(async::EventLoop* loop, uint8_t display_id, Dimensi
         : loop_(loop)
         , display_id_(display_id)
         , reset_epoch_(std::make_shared<std::atomic<uint64_t>>(0))
-        , configured_size_(configured_size) {}
+        , configured_size_(configured_size)
+        , cool_down_timer_(loop_->CreateTimer([this] {
+            CoolDown();
+            return true;
+        })) {}
 
 DisplayFrames::~DisplayFrames() {
     reset_epoch_->fetch_add(1);
@@ -144,6 +148,7 @@ void DisplayFrames::SetProducer(std::weak_ptr<IFrameProducer> producer) {
         stop_old = std::exchange(capturing_, false);
         warm_ = false;
         needs_frame_on_demand_ = false;
+        ++cool_down_generation_;
         if (demand_ > 0) post_update_demand_ = true;
     }
     if (stop_old) {
@@ -283,12 +288,12 @@ void DisplayFrames::Remove() {
         stop_producer = std::exchange(capturing_, false);
         warm_ = false;
         needs_frame_on_demand_ = false;
+        ++cool_down_generation_;
         EnqueueLocked({.event = {.frame_id = ++last_frame_id_,
                                  .rotation = rotation_,
                                  .display_id = display_id_}});
         EnqueueLocked({.type = QueueEntry::Type::kReleaseListeners});
     }
-    ++cool_down_generation_;
     if (stop_producer) {
         if (std::shared_ptr<IFrameProducer> live = producer.lock()) live->SetDemand(false);
     }
@@ -441,11 +446,11 @@ void DisplayFrames::UpdateDemand() {
     std::weak_ptr<IFrameProducer> producer;
     bool start = false;
     bool request_frame = false;
-    bool cool_down = false;
     {
         absl::MutexLock lock(&frames_mutex_);
         if (removed_ || producer_.expired()) return;
         producer = producer_;
+        ++cool_down_generation_;
         if (demand_ > 0) {
             if (!capturing_) {
                 capturing_ = true;
@@ -457,22 +462,11 @@ void DisplayFrames::UpdateDemand() {
                 request_frame = true;
             }
         } else if (capturing_) {
-            cool_down = true;
+            armed_cool_down_generation_ = cool_down_generation_;
+            cool_down_timer_->Schedule(kWarmTime);
+            return;
         }
     }
-    if (cool_down) {
-        // Replaces any pending cool-down; a stale one that still fires is
-        // ignored by its generation.
-        cool_down_timer_ = loop_->ScheduleDelayed(
-                [weak = weak_from_this(), generation = ++cool_down_generation_] {
-                    if (std::shared_ptr<DisplayFrames> self = weak.lock()) {
-                        self->CoolDown(generation);
-                    }
-                },
-                kWarmTime);
-        return;
-    }
-    ++cool_down_generation_;
     if (start) {
         if (std::shared_ptr<IFrameProducer> live = producer.lock()) live->SetDemand(true);
     } else if (request_frame) {
@@ -480,12 +474,14 @@ void DisplayFrames::UpdateDemand() {
     }
 }
 
-void DisplayFrames::CoolDown(uint64_t generation) {
-    if (generation != cool_down_generation_) return;
+void DisplayFrames::CoolDown() {
     std::weak_ptr<IFrameProducer> producer;
     {
         absl::MutexLock lock(&frames_mutex_);
-        if (removed_ || demand_ > 0 || !capturing_ || producer_.expired()) return;
+        if (removed_ || demand_ > 0 || !capturing_ || producer_.expired() ||
+            cool_down_generation_ != armed_cool_down_generation_) {
+            return;
+        }
         capturing_ = false;
         warm_ = false;
         producer = producer_;

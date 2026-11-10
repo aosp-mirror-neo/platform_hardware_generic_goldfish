@@ -23,6 +23,7 @@
 #include "capabilities_service.grpc.pb.h"
 #include "goldfish/avd/avd_properties.h"
 #include "goldfish/avd/avd_universe.h"
+#include "goldfish/system/testing/fake_clocks.h"
 
 #ifdef DeviceCapabilities
 #undef DeviceCapabilities
@@ -39,6 +40,7 @@ using ::android::emulation::v2::Fidelity;
 using ::android::emulation::v2::FoldAxis;
 using ::android::emulation::v2::GetDeviceCapabilitiesRequest;
 using ::android::emulation::v2::InputFeature;
+using ::android::emulation::v2::SampleFormat;
 using ::android::emulation::v2::VmOperation;
 using ::android::goldfish::FakeHardwareConfig;
 using ::goldfish::avd::AvdProperties;
@@ -49,9 +51,15 @@ using ::testing::Contains;
 using ::testing::ElementsAre;
 using ::testing::Not;
 
-class TestUniverse : public AvdUniverse {
+class TestUniverseClockHolder {
+  protected:
+    ::goldfish::system::testing::FakeVirtualClock virtual_clock_;
+};
+
+class TestUniverse : private TestUniverseClockHolder, public AvdUniverse {
   public:
-    explicit TestUniverse(std::unique_ptr<AvdProperties> props) : AvdUniverse(std::move(props)) {}
+    explicit TestUniverse(std::unique_ptr<AvdProperties> props)
+            : AvdUniverse(std::move(props), virtual_clock_) {}
 
     async::EventLoop& GetQemuEventLoop() override {
         LOG(FATAL) << "GetQemuEventLoop not implemented in test";
@@ -92,6 +100,7 @@ class CapabilitiesServiceTest : public ::testing::Test {
         props->hw_config.hw_lcd_width = 1080;
         props->hw_config.hw_lcd_height = 2424;
         props->hw_config.hw_lcd_density = 428;
+        props->hw_config.hw_rotaryInput = true;
 
         universe_ = std::make_unique<TestUniverse>(std::move(props));
         service_ = std::make_unique<CapabilitiesServiceImpl>(*universe_);
@@ -163,6 +172,28 @@ TEST_F(CapabilitiesServiceTest, ReturnsSubsystemsCapabilities) {
     EXPECT_EQ(reply.location().access_mode(), AccessMode::ACCESS_MODE_READ_WRITE);
     EXPECT_EQ(reply.location().fidelity(), Fidelity::FIDELITY_HARDWARE);
 
+    // Audio
+    ASSERT_TRUE(reply.has_audio());
+    EXPECT_EQ(reply.audio().access_mode(), AccessMode::ACCESS_MODE_READ_WRITE);
+    EXPECT_EQ(reply.audio().fidelity(), Fidelity::FIDELITY_HARDWARE);
+    ASSERT_TRUE(reply.audio().has_microphone_profile());
+    ASSERT_TRUE(reply.audio().has_max_concurrent_microphone_streams());
+    EXPECT_EQ(reply.audio().max_concurrent_microphone_streams(), 4);
+    EXPECT_TRUE(reply.audio().supports_wired_headset());
+    EXPECT_THAT(reply.audio().microphone_profile().supported_formats(),
+                ElementsAre(SampleFormat::SAMPLE_FORMAT_PCM16_BIT,
+                            SampleFormat::SAMPLE_FORMAT_F32_BIT));
+    EXPECT_THAT(reply.audio().microphone_profile().supported_sample_rates_hz(),
+                ElementsAre(8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000));
+    EXPECT_THAT(reply.audio().microphone_profile().supported_channel_counts(), ElementsAre(1, 2));
+    ASSERT_TRUE(reply.audio().has_speaker_profile());
+    EXPECT_THAT(reply.audio().speaker_profile().supported_formats(),
+                ElementsAre(SampleFormat::SAMPLE_FORMAT_PCM16_BIT,
+                            SampleFormat::SAMPLE_FORMAT_F32_BIT));
+    EXPECT_THAT(reply.audio().speaker_profile().supported_sample_rates_hz(),
+                ElementsAre(8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000));
+    EXPECT_THAT(reply.audio().speaker_profile().supported_channel_counts(), ElementsAre(1, 2));
+
     // System
     ASSERT_TRUE(reply.has_system());
     EXPECT_EQ(reply.system().access_mode(), AccessMode::ACCESS_MODE_READ_WRITE);
@@ -181,11 +212,18 @@ TEST_F(CapabilitiesServiceTest, ReturnsSubsystemsCapabilities) {
     EXPECT_EQ(reply.input().max_touch_point_count(), 10);
     EXPECT_TRUE(reply.input().supports_input_activity_observation());
     EXPECT_EQ(reply.input().max_batch_duration_ms(), 30000);
+    EXPECT_THAT(reply.input().supported_features(), Contains(InputFeature::INPUT_FEATURE_TOUCH));
+    EXPECT_THAT(reply.input().supported_features(),
+                Contains(InputFeature::INPUT_FEATURE_MULTI_TOUCH));
     EXPECT_THAT(reply.input().supported_features(), Contains(InputFeature::INPUT_FEATURE_KEYBOARD));
+    EXPECT_THAT(reply.input().supported_features(),
+                Not(Contains(InputFeature::INPUT_FEATURE_STYLUS)));
     EXPECT_THAT(reply.input().supported_features(),
                 Not(Contains(InputFeature::INPUT_FEATURE_MOUSE_POINTER)));
     EXPECT_THAT(reply.input().supported_features(),
                 Not(Contains(InputFeature::INPUT_FEATURE_RELATIVE_MOUSE)));
+    EXPECT_THAT(reply.input().supported_features(),
+                Not(Contains(InputFeature::INPUT_FEATURE_ROTARY_ENCODER)));
 }
 
 TEST_F(CapabilitiesServiceTest, ReturnsPostureCapabilitiesWhenConfigured) {
@@ -251,6 +289,64 @@ TEST_F(CapabilitiesServiceTest, OmitsBatteryCapabilitiesWhenDisabled) {
     Status status = service.GetDeviceCapabilities(&server_context, &request, &reply);
     ASSERT_TRUE(status.ok());
     EXPECT_FALSE(reply.has_battery());
+}
+
+TEST_F(CapabilitiesServiceTest, OmitsAudioCapabilitiesWhenDisabled) {
+    auto props = std::make_unique<AvdProperties>();
+    props->hw_config = FakeHardwareConfig::GetHwConfig();
+    props->hw_config.hw_audioOutput = false;
+    props->hw_config.hw_audioInput = false;
+
+    auto universe = std::make_unique<TestUniverse>(std::move(props));
+    CapabilitiesServiceImpl service(*universe);
+
+    GetDeviceCapabilitiesRequest request;
+    DeviceCapabilities reply;
+    ServerContext server_context;
+
+    Status status = service.GetDeviceCapabilities(&server_context, &request, &reply);
+    ASSERT_TRUE(status.ok());
+    EXPECT_FALSE(reply.has_audio());
+}
+
+TEST_F(CapabilitiesServiceTest, AudioProfilesFollowInputAndOutputHardwareFlags) {
+    {
+        auto props = std::make_unique<AvdProperties>();
+        props->hw_config = FakeHardwareConfig::GetHwConfig();
+        props->hw_config.hw_audioInput = true;
+        props->hw_config.hw_audioOutput = false;
+
+        auto universe = std::make_unique<TestUniverse>(std::move(props));
+        CapabilitiesServiceImpl service(*universe);
+
+        GetDeviceCapabilitiesRequest request;
+        DeviceCapabilities reply;
+        ServerContext server_context;
+        ASSERT_TRUE(service.GetDeviceCapabilities(&server_context, &request, &reply).ok());
+        ASSERT_TRUE(reply.has_audio());
+        EXPECT_TRUE(reply.audio().has_microphone_profile());
+        EXPECT_TRUE(reply.audio().has_max_concurrent_microphone_streams());
+        EXPECT_EQ(reply.audio().max_concurrent_microphone_streams(), 4);
+        EXPECT_FALSE(reply.audio().has_speaker_profile());
+    }
+    {
+        auto props = std::make_unique<AvdProperties>();
+        props->hw_config = FakeHardwareConfig::GetHwConfig();
+        props->hw_config.hw_audioInput = false;
+        props->hw_config.hw_audioOutput = true;
+
+        auto universe = std::make_unique<TestUniverse>(std::move(props));
+        CapabilitiesServiceImpl service(*universe);
+
+        GetDeviceCapabilitiesRequest request;
+        DeviceCapabilities reply;
+        ServerContext server_context;
+        ASSERT_TRUE(service.GetDeviceCapabilities(&server_context, &request, &reply).ok());
+        ASSERT_TRUE(reply.has_audio());
+        EXPECT_FALSE(reply.audio().has_microphone_profile());
+        EXPECT_FALSE(reply.audio().has_max_concurrent_microphone_streams());
+        EXPECT_TRUE(reply.audio().has_speaker_profile());
+    }
 }
 
 }  // namespace

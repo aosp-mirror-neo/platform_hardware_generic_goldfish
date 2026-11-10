@@ -43,6 +43,22 @@ cc_library(
     ],
 )
 
+cc_test(
+    name = "netsim_netdev_test",
+    size = "small",
+    srcs = ["netsim_netdev_test.cc"],
+    linkstatic = True,
+    deps = [
+        ":netsim-netdev",
+        ":packet_transport",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/base:log_severity",
+        "@abseil-cpp//absl/log:scoped_mock_log",
+        "@abseil-cpp//absl/status",
+        "@qemu//:qemu-headers-exported",
+    ],
+)
+
 cc_library(
     name = "netsim-chardev",
     srcs = [

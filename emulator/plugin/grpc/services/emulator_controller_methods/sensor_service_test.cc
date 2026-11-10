@@ -22,6 +22,7 @@
 
 #include "android/goldfish/fake_hardware_config.h"
 #include "emulator_controller.grpc.pb.h"
+#include "goldfish/system/testing/fake_clocks.h"
 #include "notification_store.h"
 #include "test/grpc_service_test.h"
 
@@ -71,7 +72,7 @@ class SensorServiceTest : public GrcpServiceTest {
   protected:
     void SetUp() override {
         hw_ = android::goldfish::FakeHardwareConfig::GetHwConfig();
-        physical_model_ = std::make_unique<PhysicalModel>(hw_);
+        physical_model_ = std::make_unique<PhysicalModel>(hw_, virtual_clock_);
         notification_store_ = std::make_unique<NotificationStore>(&notification_channel_);
         sensor_service_ =
                 std::make_unique<SensorServiceImpl>(*physical_model_, &notification_channel_);
@@ -84,6 +85,7 @@ class SensorServiceTest : public GrcpServiceTest {
 
   protected:
     android::goldfish::HardwareConfig hw_;
+    ::goldfish::system::testing::FakeVirtualClock virtual_clock_;
     GrpcNotificationEventSource notification_channel_;
     std::unique_ptr<NotificationStore> notification_store_;
     std::unique_ptr<PhysicalModel> physical_model_;

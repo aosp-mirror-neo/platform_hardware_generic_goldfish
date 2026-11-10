@@ -122,18 +122,15 @@ MFVideoEncoderH264::MFVideoEncoderH264(webrtc::SdpVideoFormat format)
         : format_(std::move(format))
         , initialized_(false)
         , callback_(nullptr)
-        , com_initialized_(false)
+        , com_initializer_(COINIT_APARTMENTTHREADED)
         , target_bitrate_bps_(kDefaultTargetBitrateBps)
         , target_fps_(kDefaultTargetFps) {
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    if (SUCCEEDED(hr)) {
-        com_initialized_ = true;
-    } else if (hr != RPC_E_CHANGED_MODE) {
-        RTC_LOG(LS_ERROR) << "Failed to initialize COM: " << hr;
+    if (!com_initializer_) {
+        RTC_LOG(LS_ERROR) << "Failed to initialize COM: " << com_initializer_.hr();
         return;
     }
 
-    hr = MFStartup(MF_VERSION);
+    HRESULT hr = MFStartup(MF_VERSION);
     if (FAILED(hr)) {
         RTC_LOG(LS_ERROR) << "Failed to initialize Media Foundation: " << hr;
     }
@@ -142,9 +139,6 @@ MFVideoEncoderH264::MFVideoEncoderH264(webrtc::SdpVideoFormat format)
 MFVideoEncoderH264::~MFVideoEncoderH264() {
     Release();
     MFShutdown();
-    if (com_initialized_) {
-        CoUninitialize();
-    }
 }
 
 int32_t MFVideoEncoderH264::InitEncode(const webrtc::VideoCodec* codec_settings,

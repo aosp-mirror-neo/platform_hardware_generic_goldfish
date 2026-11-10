@@ -28,6 +28,7 @@ namespace {
 using ::android::emulation::control::EvDevEvent;
 using ::android::emulation::control::kMtsPointerUp;
 using ::android::emulation::control::kMtsPressureMax;
+using ::android::emulation::v2::ButtonMask;
 using ::android::emulation::v2::PointerAction;
 using ::android::emulation::v2::PointerEvent;
 using ::android::emulation::v2::ToolType;
@@ -93,8 +94,15 @@ inline EvdevTilt RadiansToEvdevTilt(float tilt_radians, float orientation_radian
 uint32_t MapToolType(ToolType tool_type) {
     switch (tool_type) {
     case ToolType::TOOL_TYPE_STYLUS:
-    case ToolType::TOOL_TYPE_ERASER:
         return MT_TOOL_PEN;
+    case ToolType::TOOL_TYPE_ERASER:
+        // Linux evdev has no MT_TOOL_ERASER constant. In Android's
+        // MultiTouchInputMapper::syncTouch, MT_TOOL_PEN maps directly to
+        // MotionEvent.TOOL_TYPE_STYLUS, whereas MT_TOOL_MAX maps to
+        // ToolType::UNKNOWN, causing TouchInputMapper::cookPointerData to fall
+        // back to mTouchButtonAccumulator.getToolType(), which reads
+        // BTN_TOOL_RUBBER to produce MotionEvent.TOOL_TYPE_ERASER.
+        return MT_TOOL_MAX;
     case ToolType::TOOL_TYPE_PALM:
         return MT_TOOL_PALM;
     case ToolType::TOOL_TYPE_FINGER:
@@ -107,8 +115,24 @@ uint32_t MapToolType(ToolType tool_type) {
 
 }  // namespace
 
+bool IsStylusOrEraser(ToolType tool_type) {
+    return tool_type == ToolType::TOOL_TYPE_STYLUS || tool_type == ToolType::TOOL_TYPE_ERASER;
+}
+
+void AppendStylusKeysReset(::android::emulation::control::EvDevEvents& events) {
+    events.push_back({EV_KEY, BTN_TOOL_RUBBER, 0});
+    events.push_back({EV_KEY, BTN_STYLUS, 0});
+}
+
 void AppendContactDownOrMove(const PointerEvent::Pointer& pointer, PointerAction action, int slot,
                              bool new_contact, ::android::emulation::control::EvDevEvents& events) {
+    if (IsStylusOrEraser(pointer.tool_type())) {
+        const uint32_t is_rubber = pointer.tool_type() == ToolType::TOOL_TYPE_ERASER ? 1U : 0U;
+        const uint32_t is_stylus_button_pressed =
+                (pointer.button_mask() & ButtonMask::BUTTON_MASK_STYLUS_PRIMARY) != 0 ? 1U : 0U;
+        events.push_back({EV_KEY, BTN_TOOL_RUBBER, is_rubber});
+        events.push_back({EV_KEY, BTN_STYLUS, is_stylus_button_pressed});
+    }
     events.push_back({EV_ABS, ABS_MT_SLOT, static_cast<uint32_t>(slot)});
     if (new_contact) {
         events.push_back({EV_ABS, ABS_MT_TRACKING_ID, static_cast<uint32_t>(slot)});
@@ -136,24 +160,28 @@ void AppendContactDownOrMove(const PointerEvent::Pointer& pointer, PointerAction
     // than per-slot Multi-Touch Protocol B properties. We only emit tilt when the
     // transducer is an active pen (stylus/eraser) physically tilted relative to the
     // screen normal, decomposing 3D spherical tilt into 2D planar X/Y degrees.
-    if (pointer.tilt_radians() > 0.0F && (pointer.tool_type() == ToolType::TOOL_TYPE_STYLUS ||
-                                          pointer.tool_type() == ToolType::TOOL_TYPE_ERASER)) {
+    if (pointer.tilt_radians() > 0.0F && IsStylusOrEraser(pointer.tool_type())) {
         const auto tilt = RadiansToEvdevTilt(pointer.tilt_radians(), pointer.orientation_radians());
         events.push_back({EV_ABS, ABS_TILT_X, tilt.tilt_x});
         events.push_back({EV_ABS, ABS_TILT_Y, tilt.tilt_y});
     }
 }
 
-void AppendContactUp(int slot, ::android::emulation::control::EvDevEvents& events) {
+void AppendContactUp(int slot, ::android::emulation::control::EvDevEvents& events,
+                     bool clear_stylus_keys) {
     events.push_back({EV_ABS, ABS_MT_SLOT, static_cast<uint32_t>(slot)});
     events.push_back({EV_ABS, ABS_MT_TRACKING_ID, static_cast<uint32_t>(kMtsPointerUp)});
+    if (clear_stylus_keys) {
+        AppendStylusKeysReset(events);
+    }
 }
 
 void AppendContactCancel(int slot, ::android::emulation::control::EvDevEvents& palm_events,
-                         ::android::emulation::control::EvDevEvents& lift_events) {
+                         ::android::emulation::control::EvDevEvents& lift_events,
+                         bool clear_stylus_keys) {
     palm_events.push_back({EV_ABS, ABS_MT_SLOT, static_cast<uint32_t>(slot)});
     palm_events.push_back({EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_PALM});
-    AppendContactUp(slot, lift_events);
+    AppendContactUp(slot, lift_events, clear_stylus_keys);
 }
 
 bool IsContactReleased(PointerAction action, const PointerEvent::Pointer& p) {

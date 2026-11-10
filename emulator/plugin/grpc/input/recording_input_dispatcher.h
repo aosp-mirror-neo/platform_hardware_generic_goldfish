@@ -42,7 +42,7 @@ namespace goldfish::grpc::v2::testing {
 class RecordingInputDispatcher : public IInputDispatcher {
   public:
     static constexpr InputSessionId kSessionId = 7;
-    static constexpr absl::Time kDispatchedAt = absl::FromUnixNanos(1234);
+    static constexpr absl::Duration kDispatchedAt = absl::Nanoseconds(1234);
 
     ActivityEventSource& activity() override { return activity_; }
     void Shutdown() override { calls.emplace_back("shutdown"); }

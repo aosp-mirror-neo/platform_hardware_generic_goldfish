@@ -29,6 +29,7 @@ namespace android::base::file {
 absl::StatusOr<fs::path> make_absolute(const fs::path& path) noexcept;
 absl::StatusOr<fs::path> make_relative(const fs::path& path, const fs::path& base_path) noexcept;
 absl::StatusOr<fs::path> make_canonical(const fs::path& path) noexcept;
+absl::StatusOr<fs::path> read_symlink(const fs::path& path) noexcept;
 
 bool exists(const fs::path& path) noexcept;
 
@@ -40,7 +41,10 @@ bool can_read(const fs::path& path) noexcept;
 bool can_write(const fs::path& path) noexcept;
 bool can_exec(const fs::path& path) noexcept;
 
+inline constexpr StorageCapacity kDiskPressureLimit = 2_GiB;
+
 absl::StatusOr<StorageCapacity> file_size(const fs::path& path) noexcept;
+absl::StatusOr<StorageCapacity> free_space(const fs::path& path) noexcept;
 absl::StatusOr<absl::Time> last_write_time(const fs::path& path) noexcept;
 
 std::vector<fs::path> scan_dir(const fs::path& dirPath, bool fullPath = false) noexcept;

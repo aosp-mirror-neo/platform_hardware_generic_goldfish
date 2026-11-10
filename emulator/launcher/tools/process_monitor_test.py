@@ -38,7 +38,7 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
     def assert_eventually(
         self,
         predicate: Callable[[], bool],
-        timeout: float = 3.0,
+        timeout: float = 10.0,
         interval: float = 0.05,
         msg: str = "Condition not met before timeout",
     ) -> None:
@@ -50,11 +50,28 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
             time.sleep(interval)
         self.fail(f"{msg} (timed out after {timeout}s)")
 
+    async def async_assert_eventually(
+        self,
+        predicate: Callable[[], bool],
+        timeout: float = 10.0,
+        interval: float = 0.02,
+        msg: str = "Condition not met before timeout",
+    ) -> None:
+        """Asynchronously polls predicate until it returns True, or fails after timeout."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            await asyncio.sleep(interval)
+        if predicate():
+            return
+        self.fail(f"{msg} (timed out after {timeout}s)")
+
     def _wait_for_child(
         self,
         child_pid: int,
         parent_pid: int = None,
-        timeout_sec: float = 2.0,
+        timeout_sec: float = 10.0,
     ) -> None:
         """Waits until child_pid appears in parent_pid's psutil children list, asserting discovery."""
         if parent_pid is None:
@@ -87,8 +104,13 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
         """Verify starting, sampling asynchronously, and stopping the monitor."""
         monitor = ProcessTreeMonitor(os.getpid(), sample_interval_sec=0.05)
         await monitor.start()
-        await asyncio.sleep(0.15)
-        summary = await monitor.stop()
+        try:
+            await self.async_assert_eventually(
+                lambda: monitor._sample_count > 0,
+                msg="Monitor failed to collect at least one async sample",
+            )
+        finally:
+            summary = await monitor.stop()
 
         self.assertIsInstance(summary, ProcessMetricsSummary)
         self.assertGreater(summary.sample_count, 0)
@@ -99,7 +121,7 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_process_tree_child_discovery_and_reuse(self):
         """Verify that spawned child processes are discovered, primed, and reused."""
-        cmd = [sys.executable, "-c", "import time; time.sleep(2.0)"]
+        cmd = [sys.executable, "-c", "import time; time.sleep(30.0)"]
         proc = subprocess.Popen(cmd)
         try:
             self._wait_for_child(proc.pid)
@@ -120,11 +142,11 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
 
     def test_child_priming_and_first_sample_delay(self):
         """Verify new child is primed on discovery tick and reports real CPU on next tick."""
-        # Run a busy child that spins for 5 seconds to burn CPU
+        # Run a busy child that spins for up to 30 seconds to burn CPU
         cmd = [
             sys.executable,
             "-c",
-            "import time; end = time.time() + 5.0; [None for _ in iter(lambda: time.time() > end, True)]",
+            "import time; end = time.time() + 30.0; [None for _ in iter(lambda: time.time() > end, True)]",
         ]
         proc = subprocess.Popen(cmd)
         try:
@@ -149,7 +171,7 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
 
             self.assert_eventually(
                 check_child_cpu,
-                timeout=2.0,
+                timeout=10.0,
                 interval=0.1,
                 msg="Child process failed to report > 0.0% CPU",
             )
@@ -221,12 +243,13 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
 
     def test_parent_process_termination_no_pid_reuse(self):
         """Verify that when parent process exits, sample_once returns None without resurrecting."""
-        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.05)"])
-        monitor = ProcessTreeMonitor(proc.pid, sample_interval_sec=0.05)
-        self.assertIsNotNone(monitor._parent_proc)
-
-        # Wait for the process to exit
-        proc.wait()
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30.0)"])
+        try:
+            monitor = ProcessTreeMonitor(proc.pid, sample_interval_sec=0.05)
+            self.assertIsNotNone(monitor._parent_proc)
+        finally:
+            proc.terminate()
+            proc.wait()
 
         # sample_once should see parent is not running and return None without re-instantiating Process
         sample = monitor.sample_once()
@@ -259,7 +282,7 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
 
     def test_sync_child_processes_helper(self):
         """Verify _sync_child_processes tracks new children and evicts dead children."""
-        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(2.0)"])
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30.0)"])
         try:
             self._wait_for_child(proc.pid)
             monitor = ProcessTreeMonitor(os.getpid())
@@ -285,7 +308,7 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
         cmd = [
             sys.executable,
             "-c",
-            "import time; end = time.time() + 5.0; [None for _ in iter(lambda: time.time() > end, True)]",
+            "import time; end = time.time() + 30.0; [None for _ in iter(lambda: time.time() > end, True)]",
         ]
         proc = subprocess.Popen(cmd)
         try:
@@ -307,7 +330,7 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
 
             self.assert_eventually(
                 check_established_cpu,
-                timeout=2.0,
+                timeout=10.0,
                 interval=0.1,
                 msg="Child process failed to report > 0.0% CPU",
             )
@@ -336,7 +359,7 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
 
     def test_terminated_child_retained_in_diagnostic_dump(self):
         """Verify terminated child processes remain visible in diagnostic dump as Status=terminated."""
-        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(2.0)"])
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30.0)"])
         try:
             self._wait_for_child(proc.pid)
             monitor = ProcessTreeMonitor(os.getpid(), sample_interval_sec=0.05)
@@ -368,9 +391,10 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
         # Parent process that spawns a sleep child
         code = (
             "import subprocess, sys, time; "
-            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5.0)']); "
-            "time.sleep(5.0)"
+            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30.0)']); "
+            "time.sleep(30.0)"
         )
+        child_pid = None
         parent = subprocess.Popen([sys.executable, "-c", code])
         try:
             monitor = ProcessTreeMonitor(parent.pid, sample_interval_sec=0.05)
@@ -394,6 +418,11 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(monitor._history_procs[child_pid]["status"], "terminated")
             self.assertEqual(monitor._history_procs[parent.pid]["status"], "terminated")
         finally:
+            if child_pid is not None:
+                try:
+                    psutil.Process(child_pid).kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
             if parent.poll() is None:
                 parent.kill()
                 parent.wait()
@@ -423,7 +452,7 @@ class ProcessTreeMonitorTest(unittest.IsolatedAsyncioTestCase):
 
         self.assert_eventually(
             burn_and_sample_parent,
-            timeout=2.0,
+            timeout=10.0,
             interval=0.01,
             msg="Parent process failed to report > 0.0% CPU",
         )

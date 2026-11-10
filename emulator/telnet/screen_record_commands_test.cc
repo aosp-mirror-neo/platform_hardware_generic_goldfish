@@ -29,6 +29,7 @@ namespace {
 using android::emulation::control::incubating::RecordingInfo;
 using android::emulation::control::incubating::ScreenRecording;
 using testing::_;
+using testing::HasSubstr;
 
 class MockScreenRecordingStub : public ScreenRecording::StubInterface {
   public:
@@ -336,6 +337,187 @@ TEST(ScreenRecordCommandsTest, ParseStartCommandPreservesPathsWithSpaces) {
     auto result = (*registry)("screenrecord start --time-limit 60 " + path_with_spaces, ctx);
     ASSERT_TRUE(result.ok()) << result.status().message();
     EXPECT_EQ(*result, "");
+}
+
+TEST(ScreenRecordCommandsTest, ParseStartCommandRejectsInvalidOptionsAndValues) {
+    CommandRegistryBuilder builder("/dummy/token");
+    auto screenrecord = builder.Command("screenrecord", "desc");
+    RegisterScreenRecordCommands(screenrecord);
+    auto registry = builder.Build();
+
+    MockConsoleContext ctx(5554);
+    ctx.authenticated = true;
+
+    const auto bad_size = (*registry)("screenrecord start --size 1280 test.webm", ctx);
+    ASSERT_FALSE(bad_size.ok());
+    EXPECT_EQ(bad_size.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_THAT(bad_size.status().message(), HasSubstr("1280"));
+    EXPECT_THAT(bad_size.status().message(), HasSubstr("--size 1280x720"));
+
+    const auto zero_size = (*registry)("screenrecord start --size 0x720 test.webm", ctx);
+    ASSERT_FALSE(zero_size.ok());
+    EXPECT_EQ(zero_size.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_THAT(zero_size.status().message(), HasSubstr("0x720"));
+    EXPECT_THAT(zero_size.status().message(), HasSubstr("width and height may not be zero"));
+
+    const auto bad_bitrate = (*registry)("screenrecord start --bit-rate invalid test.webm", ctx);
+    ASSERT_FALSE(bad_bitrate.ok());
+    EXPECT_EQ(bad_bitrate.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_THAT(bad_bitrate.status().message(), HasSubstr("invalid"));
+    EXPECT_THAT(bad_bitrate.status().message(), HasSubstr("--bit-rate 4M"));
+
+    const auto overflow_bitrate = (*registry)("screenrecord start --bit-rate 5000M test.webm", ctx);
+    ASSERT_FALSE(overflow_bitrate.ok());
+    EXPECT_EQ(overflow_bitrate.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_THAT(overflow_bitrate.status().message(), HasSubstr("5000000000bps"));
+
+    const auto negative_time_limit =
+            (*registry)("screenrecord start --time-limit -5 test.webm", ctx);
+    ASSERT_FALSE(negative_time_limit.ok());
+    EXPECT_EQ(negative_time_limit.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_EQ(negative_time_limit.status().message(),
+              "Time limit -5s outside acceptable range [1,14400]");
+
+    const auto bad_fps = (*registry)("screenrecord start --fps 999 test.webm", ctx);
+    ASSERT_FALSE(bad_fps.ok());
+    EXPECT_EQ(bad_fps.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_THAT(bad_fps.status().message(), HasSubstr("999fps outside acceptable range"));
+
+    const auto negative_display = (*registry)("screenrecord start --display -1 test.webm", ctx);
+    ASSERT_FALSE(negative_display.ok());
+    EXPECT_EQ(negative_display.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_THAT(negative_display.status().message(), HasSubstr("-1"));
+    EXPECT_THAT(negative_display.status().message(), HasSubstr("non-negative integer"));
+
+    const auto unknown_option = (*registry)("screenrecord start --unknown-flag test.webm", ctx);
+    ASSERT_FALSE(unknown_option.ok());
+    EXPECT_EQ(unknown_option.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_THAT(unknown_option.status().message(), HasSubstr("--unknown-flag"));
+
+    const auto missing_filename = (*registry)("screenrecord start --fps 24", ctx);
+    ASSERT_FALSE(missing_filename.ok());
+    EXPECT_EQ(missing_filename.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_THAT(missing_filename.status().message(), HasSubstr("Must provide an output filename"));
+}
+
+TEST(ScreenRecordCommandsTest, StartAndStopCommandsPreserveGrpcStatusAndDetails) {
+    CommandRegistryBuilder builder("/dummy/token");
+    auto screenrecord = builder.Command("screenrecord", "desc");
+    RegisterScreenRecordCommands(screenrecord);
+    auto registry = builder.Build();
+
+    {
+        MockConsoleContext ctx(5554);
+        ctx.authenticated = true;
+        auto mock_stub = std::make_unique<MockScreenRecordingStub>();
+        EXPECT_CALL(*mock_stub, StartRecording(_, _, _))
+                .WillOnce([](grpc::ClientContext*, const RecordingInfo&, RecordingInfo*) {
+                    return grpc::Status(grpc::StatusCode::PERMISSION_DENIED,
+                                        "output path is read-only");
+                });
+        ctx.mock_stub = std::move(mock_stub);
+
+        const auto start_err = (*registry)("screenrecord start /readonly/out.webm", ctx);
+        ASSERT_FALSE(start_err.ok());
+        EXPECT_EQ(start_err.status().code(), absl::StatusCode::kPermissionDenied);
+        EXPECT_THAT(start_err.status().message(), HasSubstr("/readonly/out.webm"));
+        EXPECT_THAT(start_err.status().message(), HasSubstr("output path is read-only"));
+    }
+
+    {
+        MockConsoleContext ctx(5554);
+        ctx.authenticated = true;
+        auto mock_stub = std::make_unique<MockScreenRecordingStub>();
+        EXPECT_CALL(*mock_stub, ListRecordings(_, _, _))
+                .WillOnce([](grpc::ClientContext*, const RecordingInfo&,
+                             android::emulation::control::incubating::RecordingInfoList*) {
+                    return grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                                        "recording service disconnected");
+                });
+        ctx.mock_stub = std::move(mock_stub);
+
+        const auto list_err = (*registry)("screenrecord stop", ctx);
+        ASSERT_FALSE(list_err.ok());
+        EXPECT_EQ(list_err.status().code(), absl::StatusCode::kUnavailable);
+        EXPECT_THAT(list_err.status().message(), HasSubstr("recording service disconnected"));
+    }
+
+    {
+        MockConsoleContext ctx(5554);
+        ctx.authenticated = true;
+        auto mock_stub = std::make_unique<MockScreenRecordingStub>();
+        EXPECT_CALL(*mock_stub, ListRecordings(_, _, _))
+                .WillOnce([](grpc::ClientContext*, const RecordingInfo&,
+                             android::emulation::control::incubating::RecordingInfoList* response) {
+                    auto* rec1 = response->add_recordings();
+                    rec1->set_file_name("first.webm");
+                    rec1->set_display(1);
+                    rec1->set_state(RecordingInfo::RECORDER_STATE_RECORDING);
+
+                    auto* rec2 = response->add_recordings();
+                    rec2->set_file_name("second.webm");
+                    rec2->set_display(2);
+                    rec2->set_state(RecordingInfo::RECORDER_STATE_RECORDING);
+                    return grpc::Status::OK;
+                });
+        EXPECT_CALL(*mock_stub, StopRecording(_, _, _))
+                .WillOnce([](grpc::ClientContext*, const RecordingInfo& request, RecordingInfo*) {
+                    EXPECT_EQ(request.file_name(), "first.webm");
+                    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "encoder busy");
+                })
+                .WillOnce([](grpc::ClientContext*, const RecordingInfo& request, RecordingInfo*) {
+                    EXPECT_EQ(request.file_name(), "second.webm");
+                    return grpc::Status::OK;
+                });
+        ctx.mock_stub = std::move(mock_stub);
+
+        const auto stop_err = (*registry)("screenrecord stop", ctx);
+        ASSERT_FALSE(stop_err.ok());
+        EXPECT_EQ(stop_err.status().code(), absl::StatusCode::kFailedPrecondition);
+        EXPECT_THAT(stop_err.status().message(), HasSubstr("first.webm"));
+        EXPECT_THAT(stop_err.status().message(), HasSubstr("display 1"));
+        EXPECT_THAT(stop_err.status().message(), HasSubstr("encoder busy"));
+    }
+}
+
+TEST(ScreenRecordCommandsTest, ScreenshotCommandReportsSpecificErrorsAndSupportsUtf8Paths) {
+    CommandRegistryBuilder builder("/dummy/token");
+    auto screenrecord = builder.Command("screenrecord", "desc");
+    RegisterScreenRecordCommands(screenrecord);
+    auto registry = builder.Build();
+
+    MockConsoleContext ctx(5554);
+    ctx.authenticated = true;
+
+    const auto bad_display = (*registry)("screenrecord screenshot --display -2 out.png", ctx);
+    ASSERT_FALSE(bad_display.ok());
+    EXPECT_EQ(bad_display.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_THAT(bad_display.status().message(), HasSubstr("-2"));
+
+    const auto unknown_opt = (*registry)("screenrecord screenshot --bad-opt out.png", ctx);
+    ASSERT_FALSE(unknown_opt.ok());
+    EXPECT_EQ(unknown_opt.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_THAT(unknown_opt.status().message(), HasSubstr("--bad-opt"));
+
+    auto mock_emu_stub =
+            std::make_unique<android::emulation::control::MockEmulatorControllerStub>();
+    EXPECT_CALL(*mock_emu_stub, getScreenshot(_, _, _))
+            .WillOnce([](grpc::ClientContext*, const android::emulation::control::ImageFormat&,
+                         android::emulation::control::Image* response) {
+                response->set_image("fake png data");
+                return grpc::Status::OK;
+            });
+    ctx.mock_emu_stub = std::move(mock_emu_stub);
+
+    android::base::TestTempDir tmp_dir("screenrecord_utf8_test");
+    const std::filesystem::path missing_utf8_path =
+            tmp_dir.Path() / "täst_中文_missing" / "캡처.png";
+    const auto open_err = (*registry)(
+            std::string("screenrecord screenshot ") + missing_utf8_path.generic_string(), ctx);
+    ASSERT_FALSE(open_err.ok());
+    EXPECT_EQ(open_err.status().code(), absl::StatusCode::kNotFound);
+    EXPECT_THAT(open_err.status().message(), HasSubstr(missing_utf8_path.generic_string()));
+    EXPECT_THAT(open_err.status().message(), HasSubstr("target directory exists and is writable"));
 }
 
 }  // namespace

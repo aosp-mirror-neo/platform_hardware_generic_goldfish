@@ -14,10 +14,12 @@
 
 #include "launcher.h"
 
+#include <atomic>
 #include <fstream>
 #include <future>
 #include <memory>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "absl/base/log_severity.h"
@@ -25,12 +27,14 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/match.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/synchronization/notification.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
 #include "android/cpu/cpu_accelerator.h"
 #include "android/goldfish/avd.h"
+#include "android/goldfish/constants.h"
 #include "android/goldfish/input_paths.h"
 #include "goldfish/async/async_socket_server.h"
 #include "goldfish/async/libuv_event_loop.h"
@@ -38,8 +42,10 @@
 #include "goldfish/async/process_launcher.h"
 #include "goldfish/async/signal_handlers.h"
 #include "goldfish/async/testing/fake_async_socket.h"
+#include "goldfish/file/file.h"
 #include "goldfish/metrics/metrics_reporter.h"
 #include "goldfish/metrics/metrics_writer.h"
+#include "goldfish/metrics/studio_file_metrics_writer.h"
 #include "goldfish/network/endpoint.h"
 #include "launch_qemu/launch_qemu.h"
 #include "mock_avd.h"
@@ -53,6 +59,10 @@ using testing::Return;
 
 MATCHER_P(IsPort, port, "") {
     return ExplainMatchResult(port, ::goldfish::network::GetPortFromEndpoint(arg), result_listener);
+}
+
+MATCHER(IsIpv4Endpoint, "") {
+    return std::holds_alternative<::goldfish::network::Ipv4Endpoint>(arg);
 }
 
 class MockAsyncSocketServer : public ::goldfish::async::AsyncSocketServer {
@@ -97,7 +107,17 @@ class MockSignalHandlers : public ::goldfish::async::SignalHandlers {
 
 class MockMetricsWriter : public ::goldfish::metrics::MetricsWriter {
   public:
+    explicit MockMetricsWriter(std::atomic<bool>* destroyed_flag = nullptr)
+            : destroyed_flag_(destroyed_flag) {}
+    ~MockMetricsWriter() override {
+        if (destroyed_flag_) {
+            destroyed_flag_->store(true, std::memory_order_release);
+        }
+    }
     MOCK_METHOD(void, Write, (::goldfish::metrics::MetricsEvent event), (override));
+
+  private:
+    std::atomic<bool>* destroyed_flag_;
 };
 
 class LauncherTest : public testing::Test {
@@ -201,6 +221,7 @@ class LauncherTest : public testing::Test {
             .avd = std::move(avd),
             .opts = std::move(opts),
             .feature_flags = std::move(feature_flags),
+            .metrics_writer_config = metrics_writer_config,
             .qemu_shutdown_timeout = qemu_shutdown_timeout,
         });
     }
@@ -258,7 +279,7 @@ class LauncherTest : public testing::Test {
         EXPECT_CALL(*avd, GetDeviceType()).WillRepeatedly(Return(DeviceType::kPhone));
         EXPECT_CALL(*avd, GetLastRunQemuVersion()).WillRepeatedly(Return(std::optional<int>(10)));
         EXPECT_CALL(*avd, Hw()).WillRepeatedly(testing::ReturnRef(hw));
-        EXPECT_CALL(*avd, ApiLevel()).WillRepeatedly(testing::Return(30));
+        EXPECT_CALL(*avd, ApiLevel()).WillRepeatedly(testing::Return(kVirtioReadyApiLevel));
 
         system_image_paths.system_image = temp_dir / "system.img";
         system_image_paths.vendor_image = temp_dir / "vendor.img";
@@ -330,6 +351,7 @@ class LauncherTest : public testing::Test {
     AndroidOptions opts;
     FeatureFlags feature_flags;
     HardwareConfig hw;
+    ::goldfish::metrics::MetricsWriterConfig metrics_writer_config;
     absl::Duration qemu_shutdown_timeout = absl::Seconds(60);
     std::unique_ptr<::goldfish::async::LibuvEventLoop> event_loop;
     std::unique_ptr<MockProcessLauncher> owned_launcher;
@@ -621,6 +643,29 @@ TEST_F(LauncherTest, HandlesPortOption) {
     trigger.join();
 }
 
+TEST_F(LauncherTest, PortOptionStartsWithOnlyIpv6Loopback) {
+    auto avd = CreateMockAvd();
+    opts.port = "5562";
+
+    // An IPv6-only host: the IPv4 console fails, IPv6 binds, and the emulator
+    // still launches because -port skips the free port search.
+    EXPECT_CALL(*mock_socket_factory,
+                CreateServer(_, testing::AllOf(IsPort(5562), IsIpv4Endpoint()), _, _))
+            .WillOnce(Return(nullptr));
+    EXPECT_CALL(*mock_socket_factory,
+                CreateServer(_, testing::AllOf(IsPort(5562), testing::Not(IsIpv4Endpoint())), _, _))
+            .WillOnce(Return(std::make_shared<MockAsyncSocketServer>()));
+
+    absl::Notification launched;
+    ::goldfish::async::ProcessLauncher::ExitCallback emulator_exit_cb;
+    ExpectEmulatorLaunch(launched, emulator_exit_cb);
+
+    std::thread trigger = TriggerEmulatorExit(launched, emulator_exit_cb);
+
+    RunLauncher(std::move(avd));
+    trigger.join();
+}
+
 TEST_F(LauncherTest, HandlesValidPortsOption) {
     auto avd = CreateMockAvd();
     opts.ports = "5560,5561";
@@ -876,8 +921,10 @@ TEST_F(LauncherTest, ReturnsErrorStatusWhenPortIsBusy) {
     auto avd = CreateMockAvd();
     opts.port = "5562";
 
+    // -port tries both loopback families before giving up.
     EXPECT_CALL(*mock_socket_factory, CreateServer(_, IsPort(5562), _, _))
-            .WillOnce(Return(nullptr));
+            .Times(2)
+            .WillRepeatedly(Return(nullptr));
     EXPECT_CALL(*mock_launcher, Launch(_, _)).Times(0);
 
     absl::StatusOr<int> status = RunLauncherStatus(std::move(avd));
@@ -912,6 +959,38 @@ TEST_F(LauncherTest, DefaultConfigUsesNetsimModem) {
     EXPECT_THAT(launch_config->args, testing::Contains("netsim-netdev,id=eth0,mode=cellular"));
     EXPECT_THAT(launch_config->args,
                 testing::Not(testing::Contains(testing::HasSubstr("socket,id=modem"))));
+}
+
+// API < kNetsimModemMinApiLevel images ship a radio HAL that aborts on
+// netsimd's modem (empty operator strings while unregistered), so they use the
+// in-process modem simulator even when netsim is on; netsim still carries
+// Wi-Fi/Bluetooth.
+TEST_F(LauncherTest, Api36UsesModemSimulatorEvenWithNetsim) {
+    auto avd = CreateMockAvd();
+    EXPECT_CALL(*avd, ApiLevel()).WillRepeatedly(testing::Return(kNetsimModemMinApiLevel - 1));
+    opts.no_netsim = false;
+    opts.no_netsim_modem = false;
+    EmulatorPorts ports{.serial_number = 5554, .adb_port = 5555};
+    ChardevEndpoints chardev_endpoints{.netsim = "localhost:1234",
+                                       .modem_simulator = "localhost:5678"};
+    LaunchQemu emulator{EmulatorConfig{
+        ports, chardev_endpoints, {}, user_paths, emulator_paths, *avd, opts, feature_flags}};
+
+    auto launch_config = emulator.launch_config();
+    ASSERT_TRUE(launch_config.ok()) << launch_config.status();
+    EXPECT_THAT(
+            launch_config->args,
+            testing::Contains(testing::HasSubstr("socket,id=modem,nodelay=on,reconnect-ms=100,")));
+    EXPECT_THAT(launch_config->args, testing::Not(testing::Contains("netsim-cellular,id=modem")));
+    EXPECT_THAT(launch_config->args, testing::Contains(testing::HasSubstr("user,id=eth0")));
+    EXPECT_THAT(launch_config->args, testing::Contains("netsim-bt,id=bluetooth"));
+}
+
+TEST(UseNetsimModemTest, OnlyFromMinApiLevelAndWhenNotDisabled) {
+    EXPECT_TRUE(UseNetsimModem(/*no_netsim_modem_opt=*/false, kNetsimModemMinApiLevel));
+    EXPECT_TRUE(UseNetsimModem(false, kNetsimModemMinApiLevel + 1));
+    EXPECT_FALSE(UseNetsimModem(false, kNetsimModemMinApiLevel - 1));
+    EXPECT_FALSE(UseNetsimModem(true, kNetsimModemMinApiLevel));
 }
 
 TEST_F(LauncherTest, FallbackConfigUsesModemSimulatorWhenNoNetsimModem) {
@@ -1036,6 +1115,171 @@ TEST_F(LauncherTest, EndToEndMissingNetsimBinaryFallsBackToModemSimulator) {
     trigger.join();
     mock_log.StopCapturingLogs();
     EXPECT_EQ(status, 0);
+}
+
+TEST_F(LauncherTest, ShutsDownMetricsAndFinalizesFilesBeforeClosingSignalHandlers) {
+    auto avd = CreateMockAvd();
+    opts.no_window = false;
+
+    const fs::path unicode_dir = temp_dir / "测试_🚀_é";
+    const fs::path spool_dir = unicode_dir / "spool";
+    fs::create_directories(spool_dir);
+
+    const auto session_uuid = ::goldfish::metrics::Uuid::Generate();
+    const std::string session_id = session_uuid.ToString();
+    metrics_writer_config.type = ::goldfish::metrics::MetricsWriterType::kStudio;
+    metrics_writer_config.studio_spool_dir = spool_dir;
+
+    // Simulate a QEMU child .open spool file left open when QEMU exits (pid = 1234).
+    const fs::path qemu_open_file =
+            spool_dir / absl::StrCat("emulator-metrics2-", session_id, "-1234-0.open");
+    std::ofstream(qemu_open_file).close();
+    fs::path qemu_trk_file = qemu_open_file;
+    qemu_trk_file.replace_extension("trk");
+
+    auto reporter = std::make_unique<::goldfish::metrics::MetricsReporter>(session_uuid);
+    std::atomic<bool> writer_destroyed{false};
+    auto mock_writer = std::make_unique<MockMetricsWriter>(&writer_destroyed);
+
+    absl::Mutex events_mu;
+    std::vector<android_studio::AndroidStudioEvent> events;
+    EXPECT_CALL(*mock_writer, Write(_))
+            .WillRepeatedly([&](::goldfish::metrics::MetricsEvent event) {
+                absl::MutexLock lock(events_mu);
+                events.push_back(std::move(event.as_event));
+            });
+    reporter->SetWriter(std::move(mock_writer));
+
+    ::goldfish::async::AsyncSocketServer::ConnectCallback console_connect_cb;
+    ::goldfish::async::AsyncSocketServer::LoopProvider console_loop_provider;
+    EXPECT_CALL(*mock_socket_factory, CreateServer(_, IsPort(5554), _, _))
+            .Times(2)
+            .WillRepeatedly([&](::goldfish::async::EventLoop*,
+                                const ::goldfish::network::Endpoint& endpoint,
+                                ::goldfish::async::AsyncSocketServer::ConnectCallback connect_cb,
+                                ::goldfish::async::AsyncSocketServer::LoopProvider loop_provider) {
+                if (!console_connect_cb) {
+                    console_connect_cb = std::move(connect_cb);
+                    console_loop_provider = std::move(loop_provider);
+                }
+                auto server = std::make_shared<MockAsyncSocketServer>();
+                ON_CALL(*server, GetEndpoint()).WillByDefault(Return(endpoint));
+                return server;
+            });
+
+    absl::Notification fishtank_launched;
+    bool fishtank_killed_before_metrics_shutdown = false;
+    EXPECT_CALL(*mock_launcher, Launch(testing::Field(&::goldfish::async::LaunchConfig::exe_path,
+                                                      emulator_paths.fishtank_binary),
+                                       _))
+            .WillOnce([&](const ::goldfish::async::LaunchConfig&,
+                          ::goldfish::async::ProcessLauncher::ExitCallback) {
+                auto process = std::make_unique<MockManagedProcess>();
+                MockManagedProcess* process_ptr = process.get();
+                EXPECT_CALL(*process_ptr, GetPid()).WillRepeatedly(Return(5678));
+                EXPECT_CALL(*process_ptr, Kill(SIGTERM)).WillOnce([&](int) {
+                    fishtank_killed_before_metrics_shutdown =
+                            !writer_destroyed.load(std::memory_order_acquire);
+                });
+                fishtank_launched.Notify();
+                return absl::StatusOr<std::unique_ptr<::goldfish::async::ManagedProcess>>(
+                        std::move(process));
+            });
+
+    bool writer_destroyed_before_signal_close = false;
+    bool qemu_open_finalized_before_signal_close = false;
+    EXPECT_CALL(*mock_signal_handlers, close()).WillOnce([&]() {
+        writer_destroyed_before_signal_close = writer_destroyed.load(std::memory_order_acquire);
+        qemu_open_finalized_before_signal_close = !android::base::file::exists(qemu_open_file) &&
+                                                  android::base::file::exists(qemu_trk_file);
+    });
+
+    ::goldfish::async::ProcessLauncher::ExitCallback emulator_exit_cb;
+    absl::Notification launched;
+    ExpectEmulatorLaunch(launched, emulator_exit_cb);
+
+    absl::Notification help_handled;
+    auto console_socket =
+            std::make_shared<testing::NiceMock<::goldfish::async::testing::FakeAsyncSocket>>();
+    ON_CALL(*console_socket, Send(_, _, _))
+            .WillByDefault([&](const char* buf, size_t len,
+                               ::goldfish::async::AsyncSocket::OnSendCallback) {
+                if (absl::StrContains(std::string_view(buf, len), "Try 'help-verbose'") &&
+                    !help_handled.HasBeenNotified()) {
+                    help_handled.Notify();
+                }
+                return absl::OkStatus();
+            });
+    ON_CALL(*console_socket, Close()).WillByDefault([&]() { console_socket->SimulateClose(); });
+
+    std::thread trigger = TriggerEmulatorScript(
+            launched,
+            [&]() {
+                event_loop
+                        ->Post([&]() {
+                            ASSERT_TRUE(console_connect_cb);
+                            ASSERT_TRUE(console_loop_provider);
+                            auto* conn_loop = console_loop_provider(::goldfish::network::ToEndpoint(
+                                    ::goldfish::network::kIPv4LoopbackAddress, 12345));
+                            console_socket->setEventLoop(conn_loop);
+                            ASSERT_TRUE(console_connect_cb(console_socket));
+                            console_socket->SimulateRead("help\r\n");
+                        })
+                        .IgnoreError();
+                help_handled.WaitForNotification();
+                event_loop->Post([&]() { emulator_exit_cb(0, 0); }).IgnoreError();
+            },
+            &fishtank_launched);
+
+    int status = RunLauncher(std::move(avd), std::move(reporter));
+    trigger.join();
+
+    EXPECT_EQ(status, 0);
+    EXPECT_TRUE(fishtank_killed_before_metrics_shutdown);
+    EXPECT_TRUE(writer_destroyed_before_signal_close);
+    EXPECT_TRUE(qemu_open_finalized_before_signal_close);
+
+    bool saw_final_ping = false;
+    bool saw_console_events = false;
+    absl::MutexLock lock(events_mu);
+    for (const auto& ev : events) {
+        if (ev.emulator_details().has_crashes()) {
+            saw_final_ping = true;
+            EXPECT_EQ(ev.emulator_details().crashes(), kMetricsCrashesNone);
+        }
+        if (ev.kind() == android_studio::AndroidStudioEvent::EMULATOR_CONSOLE_EVENTS) {
+            saw_console_events = true;
+            ASSERT_EQ(ev.emulator_console_events_size(), 1);
+            EXPECT_EQ(ev.emulator_console_events(0).command(), "help");
+            EXPECT_EQ(ev.emulator_console_events(0).value(), 1);
+        }
+    }
+    EXPECT_TRUE(saw_final_ping);
+    EXPECT_TRUE(saw_console_events);
+}
+
+TEST_F(LauncherTest, StartupFailureShutsDownMetricsBeforeClosingSignalHandlers) {
+    auto avd = CreateMockAvd();
+    opts.port = "5562";
+
+    // -port tries both loopback families before giving up.
+    EXPECT_CALL(*mock_socket_factory, CreateServer(_, IsPort(5562), _, _))
+            .Times(2)
+            .WillRepeatedly(Return(nullptr));
+    EXPECT_CALL(*mock_launcher, Launch(_, _)).Times(0);
+
+    auto reporter = std::make_unique<::goldfish::metrics::MetricsReporter>();
+    std::atomic<bool> writer_destroyed{false};
+    reporter->SetWriter(std::make_unique<MockMetricsWriter>(&writer_destroyed));
+
+    bool writer_destroyed_before_signal_close = false;
+    EXPECT_CALL(*mock_signal_handlers, close()).WillOnce([&]() {
+        writer_destroyed_before_signal_close = writer_destroyed.load(std::memory_order_acquire);
+    });
+
+    absl::StatusOr<int> status = RunLauncherStatus(std::move(avd), std::move(reporter));
+    EXPECT_FALSE(status.ok());
+    EXPECT_TRUE(writer_destroyed_before_signal_close);
 }
 
 }  // namespace

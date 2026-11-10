@@ -14,6 +14,8 @@
 #include "goldfish/display/cpu_read_pipeline.h"
 
 #include <algorithm>
+#include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -42,7 +44,17 @@
 namespace goldfish::display {
 namespace {
 
+// R,G,B,0xFF is 0xFFBBGGRR as a uint32_t only on little-endian hosts.
+static_assert(std::endian::native == std::endian::little);
+
 constexpr size_t kBytesPerSlotPixel = 4;
+constexpr uint32_t kOpaqueAlphaMask = 0xFF000000U;
+
+#if defined(__clang__) || defined(__GNUC__)
+using PixelVec4 = uint32_t __attribute__((vector_size(16)));
+constexpr PixelVec4 kOpaqueAlphaMaskVec = {kOpaqueAlphaMask, kOpaqueAlphaMask, kOpaqueAlphaMask,
+                                           kOpaqueAlphaMask};
+#endif
 
 // Under ASAN, the bytes of a leased buffer past the requested size are
 // poisoned, so an overrun that stays inside a larger, reused buffer is caught.
@@ -237,31 +249,74 @@ absl::Status CheckSource(const SlotPixels& src, const ReadRequest& read, bool nv
     return absl::OkStatus();
 }
 
+// Copies `pixels` R,G,B,X pixels from `src` to `dst` (`src == dst` is allowed
+// for in-place updates) and sets every fourth byte (alpha) to 0xFF. Explicit
+// 16-byte vectors via `std::memcpy` preserve arbitrary byte alignment while
+// avoiding scalar 32-bit loads/stores when `CopyOpaque` is inlined or strided
+// 1-byte alpha stores in `MakeOpaque`.
+void SetOpaqueAlphaSpan(const uint8_t* src, uint8_t* dst, size_t pixels) {
+    size_t x = 0;
+#if defined(__clang__) || defined(__GNUC__)
+    for (; x + 8 <= pixels; x += 8) {
+        PixelVec4 p0;
+        PixelVec4 p1;
+        std::memcpy(&p0, src + x * kBytesPerSlotPixel, sizeof(p0));
+        std::memcpy(&p1, src + (x + 4) * kBytesPerSlotPixel, sizeof(p1));
+        p0 |= kOpaqueAlphaMaskVec;
+        p1 |= kOpaqueAlphaMaskVec;
+        std::memcpy(dst + x * kBytesPerSlotPixel, &p0, sizeof(p0));
+        std::memcpy(dst + (x + 4) * kBytesPerSlotPixel, &p1, sizeof(p1));
+    }
+    if (x + 4 <= pixels) {
+        PixelVec4 p0;
+        std::memcpy(&p0, src + x * kBytesPerSlotPixel, sizeof(p0));
+        p0 |= kOpaqueAlphaMaskVec;
+        std::memcpy(dst + x * kBytesPerSlotPixel, &p0, sizeof(p0));
+        x += 4;
+    }
+    for (size_t tail = pixels & 3U; tail > 0; --tail, ++x) {
+        uint32_t px = 0;
+        std::memcpy(&px, src + x * kBytesPerSlotPixel, sizeof(px));
+        px |= kOpaqueAlphaMask;
+        std::memcpy(dst + x * kBytesPerSlotPixel, &px, sizeof(px));
+    }
+#else
+    for (; x < pixels; ++x) {
+        uint32_t px = 0;
+        std::memcpy(&px, src + x * kBytesPerSlotPixel, sizeof(px));
+        px |= kOpaqueAlphaMask;
+        std::memcpy(dst + x * kBytesPerSlotPixel, &px, sizeof(px));
+    }
+#endif
+}
+
 // Copies R,G,B and sets the fourth byte to 0xFF in a single pass.
 void CopyOpaque(Image32 src, MutableImage32 dst) {
     const size_t width = static_cast<size_t>(src.width);
-    for (int y = 0; y < src.height; ++y) {
-        const uint8_t* __restrict in = src.data + ptrdiff_t{y} * src.stride;
-        uint8_t* __restrict out = dst.data + ptrdiff_t{y} * dst.stride;
-        for (size_t x = 0; x < width; ++x) {
-            uint32_t px;
-            std::memcpy(&px, in + x * 4, sizeof(px));
-            px |= 0xFF000000U;
-            std::memcpy(out + x * 4, &px, sizeof(px));
-        }
+    const size_t height = static_cast<size_t>(src.height);
+    const size_t row_bytes = width * kBytesPerSlotPixel;
+    if (static_cast<size_t>(src.stride) == row_bytes &&
+        static_cast<size_t>(dst.stride) == row_bytes) {
+        SetOpaqueAlphaSpan(src.data, dst.data, width * height);
+        return;
+    }
+    for (size_t y = 0; y < height; ++y) {
+        SetOpaqueAlphaSpan(src.data + y * static_cast<size_t>(src.stride),
+                           dst.data + y * static_cast<size_t>(dst.stride), width);
     }
 }
 
 void MakeOpaque(MutableImage32 image) {
     const size_t width = static_cast<size_t>(image.width);
-    for (int y = 0; y < image.height; ++y) {
-        uint8_t* __restrict row = image.data + ptrdiff_t{y} * image.stride;
-        for (size_t x = 0; x < width; ++x) {
-            uint32_t px;
-            std::memcpy(&px, row + x * 4, sizeof(px));
-            px |= 0xFF000000U;
-            std::memcpy(row + x * 4, &px, sizeof(px));
-        }
+    const size_t height = static_cast<size_t>(image.height);
+    const size_t row_bytes = width * kBytesPerSlotPixel;
+    if (static_cast<size_t>(image.stride) == row_bytes) {
+        SetOpaqueAlphaSpan(image.data, image.data, width * height);
+        return;
+    }
+    for (size_t y = 0; y < height; ++y) {
+        uint8_t* row = image.data + y * static_cast<size_t>(image.stride);
+        SetOpaqueAlphaSpan(row, row, width);
     }
 }
 

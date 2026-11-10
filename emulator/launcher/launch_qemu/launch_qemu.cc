@@ -35,6 +35,7 @@
 
 #include "adb_device.h"
 #include "android/goldfish/avd.h"
+#include "android/goldfish/constants.h"
 #include "android/process/command.h"
 #include "android/status/status_macros.h"
 #include "audio_device.h"
@@ -177,7 +178,7 @@ absl::Status LaunchQemu::addDevices() {
 
         addDevice<ParameterList>(std::move(radio_params));
 
-        if (!o.no_netsim_modem) {
+        if (UseNetsimModem(o.no_netsim_modem, a.ApiLevel())) {
             netsim_cellular = true;
             addDevice<ParameterList>(std::initializer_list<std::string>{
                 "-chardev",
@@ -185,6 +186,10 @@ absl::Status LaunchQemu::addDevices() {
                 "-device",
                 "virtserialport,chardev=modem,name=modem",
             });
+        } else if (!o.no_netsim_modem) {
+            ABSL_LOG(INFO) << "API " << a.ApiLevel() << " guest radio HAL predates netsim modem "
+                           << "support (API " << kNetsimModemMinApiLevel
+                           << "); using the in-process modem simulator";
         }
     }
 
@@ -213,7 +218,7 @@ absl::Status LaunchQemu::addDevices() {
     // Also includes input devices for the display.
     addDevice<DisplayDevice>(gpu_name);
 
-    if (a.ApiLevel() < 37) {
+    if (a.ApiLevel() < kVirtioReadyApiLevel) {
         addDevice<GoldfishAddressSpaceDevice>("1e.0");
     }
 

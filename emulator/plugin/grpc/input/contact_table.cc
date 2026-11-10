@@ -28,8 +28,7 @@ constexpr int kNonHumanSlotLimit = kTouchDeviceSlots - kReservedHumanSlots;
 
 }  // namespace
 
-absl::StatusOr<int> ContactTable::Acquire(ContactKey key, TouchDeviceId device, int32_t display_id,
-                                          bool human) {
+absl::StatusOr<int> ContactTable::Acquire(ContactKey key, TouchDeviceId device, bool human) {
     if (auto it = contacts_.find(key); it != contacts_.end()) {
         return it->second.contact.slot;
     }
@@ -37,17 +36,17 @@ absl::StatusOr<int> ContactTable::Acquire(ContactKey key, TouchDeviceId device, 
     DeviceSlots& slots = devices_[device];
     if (!human && slots.non_human >= kNonHumanSlotLimit) {
         return absl::ResourceExhaustedError(absl::StrCat(
-                "Touch device ", device, " has no slot for session ", key.session, " pointer ",
-                key.pointer_id, ": automated sessions already hold ", slots.non_human, " of ",
-                kTouchDeviceSlots, " slots and ", kReservedHumanSlots,
+                "Touch device ", device, " has no slot for session ", key.session, " display ",
+                key.display_id, " pointer ", key.pointer_id, ": automated sessions already hold ",
+                slots.non_human, " of ", kTouchDeviceSlots, " slots and ", kReservedHumanSlots,
                 " are reserved for human input. Lift a pointer before touching "
                 "down another."));
     }
     if (slots.used.all()) {
-        return absl::ResourceExhaustedError(
-                absl::StrCat("Touch device ", device, " has no slot for session ", key.session,
-                             " pointer ", key.pointer_id, ": all ", kTouchDeviceSlots,
-                             " slots are held. Lift a pointer before touching down another."));
+        return absl::ResourceExhaustedError(absl::StrCat(
+                "Touch device ", device, " has no slot for session ", key.session, " display ",
+                key.display_id, " pointer ", key.pointer_id, ": all ", kTouchDeviceSlots,
+                " slots are held. Lift a pointer before touching down another."));
     }
 
     int slot = 0;
@@ -58,13 +57,18 @@ absl::StatusOr<int> ContactTable::Acquire(ContactKey key, TouchDeviceId device, 
     if (!human) {
         ++slots.non_human;
     }
-    contacts_.emplace(key, HeldContact{{device, slot, display_id}, human});
+    contacts_.emplace(key, HeldContact{{device, slot}, human});
     return slot;
 }
 
 std::optional<Contact> ContactTable::Find(const ContactKey& key) const {
     auto it = contacts_.find(key);
     return it != contacts_.end() ? std::optional<Contact>(it->second.contact) : std::nullopt;
+}
+
+bool ContactTable::HasSession(InputSessionId session) const {
+    return std::ranges::any_of(
+            contacts_, [session](const auto& entry) { return entry.first.session == session; });
 }
 
 std::optional<Contact> ContactTable::Release(const ContactKey& key) {
@@ -81,9 +85,22 @@ ReleasedContacts ContactTable::ReleaseSession(InputSessionId session) {
             [session](const ContactKey& key, const Contact&) { return key.session == session; });
 }
 
-ReleasedContacts ContactTable::ReleaseSessionOn(InputSessionId session, TouchDeviceId device) {
-    return ReleaseIf([session, device](const ContactKey& key, const Contact& contact) {
-        return key.session == session && contact.device == device;
+ReleasedContacts ContactTable::FindSessionOn(InputSessionId session, int32_t display_id) const {
+    ReleasedContacts matched;
+    for (const auto& [key, held] : contacts_) {
+        if (key.session == session && key.display_id == display_id) {
+            matched.emplace_back(key, held.contact);
+        }
+    }
+    std::sort(matched.begin(), matched.end(), [](const auto& a, const auto& b) {
+        return std::tie(a.second.device, a.second.slot) < std::tie(b.second.device, b.second.slot);
+    });
+    return matched;
+}
+
+ReleasedContacts ContactTable::ReleaseSessionOn(InputSessionId session, int32_t display_id) {
+    return ReleaseIf([session, display_id](const ContactKey& key, const Contact&) {
+        return key.session == session && key.display_id == display_id;
     });
 }
 
@@ -91,6 +108,10 @@ ReleasedContacts ContactTable::ClearDevice(TouchDeviceId device) {
     return ReleaseIf([device](const ContactKey&, const Contact& contact) {
         return contact.device == device;
     });
+}
+
+ReleasedContacts ContactTable::Clear() {
+    return ReleaseIf([](const ContactKey&, const Contact&) { return true; });
 }
 
 template <typename Predicate>

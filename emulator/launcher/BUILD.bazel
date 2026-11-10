@@ -43,6 +43,13 @@ unzip(
 )
 
 cc_library(
+    name = "constants",
+    hdrs = ["include/android/goldfish/constants.h"],
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "config_dirs",
     srcs = ["config_dirs.cc"],
     hdrs = ["include/android/goldfish/config_dirs.h"],
@@ -75,13 +82,20 @@ cc_library(
     name = "feature_flags",
     srcs = ["feature_flags.cc"],
     hdrs = ["include/android/goldfish/feature_flags.h"],
+    implementation_deps = [
+        "//emulator/libs/cpu:version",
+        "//emulator/libs/file",
+        "@abseil-cpp//absl/base:no_destructor",
+        "@protobuf",
+    ],
     includes = ["include"],
     visibility = ["//visibility:public"],
     deps = [
-        "//emulator/libs/file",
+        "//emulator/launcher/protos:emulator_feature_patterns_cc_proto",
         "//emulator/libs/metrics:studio_stats_wrapper",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
     ],
@@ -91,15 +105,68 @@ cc_test(
     name = "feature_flags_test",
     size = "small",
     srcs = ["feature_flags_test.cc"],
-    data = [":advanced_features_ini"],
+    data = [
+        ":advanced_features_ini",
+        ":feature_patterns",
+    ],
     deps = [
         ":feature_flags",
+        "//emulator/launcher/protos:emulator_feature_patterns_cc_proto",
+        "//emulator/libs/file",
         "//emulator/libs/status_macros:status_matcher_macros",
-        "//emulator/libs/system",
         "//emulator/libs/system:bazel_info",
         "//emulator/libs/system:test-headers",
         "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/base:log_severity",
+        "@abseil-cpp//absl/log:scoped_mock_log",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/status:statusor",
+        "@protobuf",
+    ],
+)
+
+cc_library(
+    name = "feature_pattern_downloader",
+    srcs = ["feature_pattern_downloader.cc"],
+    hdrs = ["feature_pattern_downloader.h"],
+    implementation_deps = [
+        ":feature_flags",
+        "//emulator/launcher/protos:emulator_feature_patterns_cc_proto",
+        "//emulator/libs/file",
+        "//emulator/libs/system",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@protobuf",
+    ],
+    deps = [
+        "//emulator/libs/network:http_client",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+cc_test(
+    name = "feature_pattern_downloader_test",
+    size = "small",
+    srcs = ["feature_pattern_downloader_test.cc"],
+    deps = [
+        ":feature_flags",
+        ":feature_pattern_downloader",
+        "//emulator/launcher/protos:emulator_feature_patterns_cc_proto",
+        "//emulator/libs/file",
+        "//emulator/libs/http:web_server",
+        "//emulator/libs/network:http_client",
+        "//emulator/libs/status_macros:status_matcher_macros",
+        "//emulator/libs/system:test-headers",
+        "//emulator/libs/test:googletest_main",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
     ],
 )
 
@@ -185,10 +252,12 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":avd",
+        ":constants",
         ":feature_flags",
         "//emulator/libs/file",
         "//emulator/libs/process",
         "//emulator/libs/system",
+        "@abseil-cpp//absl/functional:function_ref",
         "@abseil-cpp//absl/log",
     ],
 )
@@ -450,10 +519,7 @@ collect_plugins(
 collect_plugins(
     name = "shared_libraries",
     output_dir = "lib64",
-    plugins = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ] + select({
+    plugins = select({
         "darwin_aarch64": [
             "@goldfish_prebuilts_common//ANGLE:lib_darwin_aarch64",
             "@goldfish_prebuilts_common//vulkan:lib_darwin_aarch64",
@@ -586,10 +652,19 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "feature_patterns",
+    srcs = ["data/emu-original-feature-flags.protobuf"],
+    visibility = ["//visibility:public"],
+)
+
 collect_plugins(
     name = "advanced_features",
     output_dir = "lib",
-    plugins = [":advanced_features_ini"],
+    plugins = [
+        ":advanced_features_ini",
+        ":feature_patterns",
+    ],
 )
 
 collect_plugins(
@@ -617,6 +692,7 @@ cc_library(
     srcs = ["launcher.cc"],
     hdrs = ["launcher.h"],
     deps = [
+        ":constants",
         ":feature_flags",
         ":host_info",
         ":input_paths",
@@ -633,6 +709,7 @@ cc_library(
         "//emulator/libs/metrics",
         "//emulator/libs/metrics:configure_metrics_writer",
         "//emulator/libs/metrics:snapshot_metrics",
+        "//emulator/libs/metrics:studio_file_metrics_writer",
         "//emulator/libs/system",
         "//emulator/libs/timezone",
         "//emulator/modem_simulator",
@@ -651,17 +728,21 @@ cc_test(
     size = "medium",
     srcs = ["launcher_test.cc"],
     deps = [
+        ":constants",
         ":feature_flags",
         ":launcher_lib",
         ":mock_avd",
         "//emulator/launcher/launch_qemu",
         "//emulator/libs/async:async_testing",
         "//emulator/libs/cpu",
+        "//emulator/libs/file",
+        "//emulator/libs/metrics:studio_file_metrics_writer",
         "//emulator/libs/test:googletest_main",
         "@abseil-cpp//absl/base:log_severity",
         "@abseil-cpp//absl/log:scoped_mock_log",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
     ],
 )
@@ -702,6 +783,7 @@ cc_binary_with_manifest(
     visibility = ["//visibility:public"],
     deps = [
         ":feature_flags",
+        ":feature_pattern_downloader",
         ":host_info",
         ":launcher_lib",
         ":trampoline",
@@ -758,10 +840,10 @@ create_launch_emulator_test(
 )
 
 create_launch_emulator_test(
-    # Same boot with the plugin's virtio-gpu-gfxstream device instead of the
-    # default virtio-gpu-rutabaga (b/576450291). x-verify-state=enforce is not
-    # passed because the launcher owns the -device string; the device's default
-    # "log" mode reports invariant violations in the emulator log.
+    # Explicit -virtio-gpu-device gfxstream boot check (now also the default,
+    # b/576450291). x-verify-state=enforce is not passed because the launcher
+    # owns the -device string; the device's default "log" mode reports invariant
+    # violations in the emulator log.
     name = "can_boot_with_gfxstream_device",
     count_log_pattern = "'Using virtio-gpu device: virtio-gpu-gfxstream'",
     expected_occurrences = 1,
@@ -770,6 +852,28 @@ create_launch_emulator_test(
         "-no-boot-anim",
         "-virtio-gpu-device",
         "gfxstream",
+        "-netsim-startup-timeout",
+        "30s",
+    ],
+    target_compatible_with = select({
+        "@platforms//os:macos": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    target_log_line = "'Boot completed in \\d+ ms'",
+    timeout_seconds = 300,
+)
+
+create_launch_emulator_test(
+    # Same boot with QEMU's fallback virtio-gpu-rutabaga device instead of the
+    # default virtio-gpu-gfxstream (b/576450291).
+    name = "can_boot_with_rutabaga_device",
+    count_log_pattern = "'Using virtio-gpu device: virtio-gpu-rutabaga'",
+    expected_occurrences = 1,
+    params = [
+        "-show-kernel",
+        "-no-boot-anim",
+        "-virtio-gpu-device",
+        "rutabaga",
         "-netsim-startup-timeout",
         "30s",
     ],
@@ -805,6 +909,7 @@ test_suite(
     tests = [
         ":can_boot_with_gfxstream_device",
         ":can_boot_with_minigbm",
+        ":can_boot_with_rutabaga_device",
     ],
 )
 
@@ -935,6 +1040,7 @@ clang_tidy_test(
     name = "tidy",
     targets = [
         ":feature_flags",
+        ":feature_pattern_downloader",
         ":input_paths",
         ":avd",
     ],

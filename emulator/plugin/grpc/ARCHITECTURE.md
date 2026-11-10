@@ -49,7 +49,9 @@ device. **Location:** `hardware/generic/goldfish/emulator/plugin/grpc` **Namespa
 - **Shutdown request:** Removes the discovery file so that no new clients find the emulator.
   Connected clients are still served while the exit snapshot (`-savevm`) is saved.
 - **Main loop exit:** After the exit snapshot, a `qemu_register_main_loop_exit_notifier` callback
-  releases the BQL, flushes the global event loop (`WaitUntilIdle()`) so terminal exit-snapshot and
-  run-state events reach active streams and LROs, stops the server (100 ms grace), and destroys the
-  services. Some, like the WebRTC switchboard, outlive their RPC streams and release QEMU resources
-  such as audio capture, so this must happen before `qemu_cleanup()` tears down those subsystems.
+  calls `AvdUniverse::OnPreGrpcShutdown()`, which stops the QEMU event loop and the input
+  dispatcher so that RPCs waiting on them do not block the server shutdown, then releases the BQL,
+  flushes the global event loop (`WaitUntilIdle()`) so terminal exit-snapshot and run-state events
+  reach active streams and LROs, stops the server (100 ms grace), and destroys the services. Some,
+  like the WebRTC switchboard, outlive their RPC streams and release QEMU resources such as audio
+  capture, so this must happen before `qemu_cleanup()` tears down those subsystems.

@@ -3,6 +3,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <memory>
@@ -12,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "absl/base/config.h"
 #include "absl/base/log_severity.h"
 #include "absl/log/log.h"
 #include "absl/log/scoped_mock_log.h"
@@ -23,9 +25,27 @@
 
 #include "goldfish/async/libuv_event_loop.h"
 #include "goldfish/async/qemu_event_loop.h"
+#include "goldfish/async/testing/test_event_loop.h"
 #include "goldfish/async/threaded_event_loop.h"
 #include "test/fake_qemu_callbacks.h"
 #include "uv.h"
+
+extern "C" {
+// clang-format off
+// IWYU pragma: begin_keep
+#include "qemu/osdep.h"
+#include "qemu/main-loop.h"
+#include "qemu/timer.h"
+
+#ifdef shutdown
+#undef shutdown
+#endif
+#ifdef close
+#undef close
+#endif
+// IWYU pragma: end_keep
+// clang-format on
+}
 
 using namespace std::chrono_literals;
 
@@ -296,8 +316,8 @@ TEST_P(EventLoopTest, IsOnLoopThreadIsCorrect) {
     if (mLoopType == "libuv") {
         EXPECT_FALSE(loop->IsOnLoopThread());
         runInThread();
-    } else {  // qemu now has a separate thread runner.
-        EXPECT_FALSE(loop->IsOnLoopThread());
+    } else {
+        EXPECT_TRUE(loop->IsOnLoopThread());
     }
 
     (void)loop->Post([&]() { on_loop_thread_promise.set_value(loop->IsOnLoopThread()); });
@@ -598,9 +618,9 @@ TEST_P(EventLoopTest, ScheduleDelayedIsCancelledByHandle) {
             }
         });
 
-        handle->Cancel();
+        handle.reset();
     } else {
-        handle->Cancel();
+        handle.reset();
         std::this_thread::sleep_for(150ms);
     }
 
@@ -619,7 +639,6 @@ TEST_P(EventLoopTest, ScheduleDelayedIsCancelledByRAII) {
         });
 
         handle->Schedule(absl::Milliseconds(100), absl::ZeroDuration());
-        VLOG(1) << "Use count: " << handle.use_count();
 
         if (mLoopType == "qemu") {
             pin = std::async([]() {
@@ -657,7 +676,7 @@ TEST_P(EventLoopTest, ScheduleRepeatingHelperExecutesMultipleTimes) {
 
     auto future = promise.get_future();
     runUntil(future);
-    handle->Cancel();
+    handle.reset();
     ASSERT_EQ(counter.load(), target_count);
 }
 
@@ -678,7 +697,7 @@ TEST_P(EventLoopTest, ScheduleRepeatingExecutesMultipleTimes) {
 
     auto future = promise.get_future();
     runUntil(future);
-    handle->Cancel();
+    handle.reset();
     ASSERT_EQ(counter.load(), target_count);
 }
 
@@ -690,7 +709,7 @@ TEST_P(EventLoopTest, MultiThreadedCreationAndCancellation) {
     // while the worker threads are still using it.
     runInThread();
     // The shared queue for timer handles.
-    std::queue<std::shared_ptr<EventLoop::Timer>> timer_queue;
+    std::queue<EventLoop::ScopedTimer> timer_queue;
     std::mutex queue_mutex;
     std::condition_variable queue_cv;
 
@@ -721,7 +740,7 @@ TEST_P(EventLoopTest, MultiThreadedCreationAndCancellation) {
             // Push the handle into the shared queue.
             {
                 std::lock_guard<std::mutex> lock(queue_mutex);
-                timer_queue.push(handle);
+                timer_queue.push(std::move(handle));
                 created_task_count++;
             }
             queue_cv.notify_one();
@@ -733,7 +752,7 @@ TEST_P(EventLoopTest, MultiThreadedCreationAndCancellation) {
     auto canceller_thread_func = [&]() {
         // Continue while there are still tasks to cancel.
         while (cancellations_done > 0) {
-            std::shared_ptr<EventLoop::Timer> handle;
+            EventLoop::ScopedTimer handle;
             {
                 std::unique_lock<std::mutex> lock(queue_mutex);
                 // Wait for a task or for all creators to finish.
@@ -752,13 +771,13 @@ TEST_P(EventLoopTest, MultiThreadedCreationAndCancellation) {
                     break;
                 }
 
-                handle = timer_queue.front();
+                handle = std::move(timer_queue.front());
 
                 timer_queue.pop();
             }
 
             if (handle) {
-                handle->Cancel();
+                handle.reset();
                 canceled_task_count++;
                 cancellations_done--;
             }
@@ -810,7 +829,7 @@ TEST_P(EventLoopTest, ScheduleRepeatingIsCancelledMidway) {
     // Under heavy load, it's possible that the timer's callback was invoked a few times.
     // However, once we cancel, we should not see any more invocations.
     int count_before_cancel = counter.load();
-    handle->Cancel();
+    handle.reset();
 
     // Note: we can be in the middle of executing the task! (which may increase the counter, and yes
     // this does happen!)
@@ -840,7 +859,7 @@ TEST_P(EventLoopTest, ThreadedEventLoopWaitsAtMostTimeout) {
     }
     std::promise<void> task_completed;
     auto start_time = std::chrono::steady_clock::now();
-    std::shared_ptr<EventLoop::Timer> task;
+    EventLoop::ScopedTimer task;
     {
         auto threaded_loop = ThreadedEventLoop::Create(LibuvEventLoop::Create());
         (void)threaded_loop->Post([&]() { task_completed.set_value(); }, absl::Seconds(10));
@@ -861,7 +880,7 @@ TEST_P(EventLoopTest, ShutdownRaceConditionStressTest) {
 
     // A shared vector to hold all timer handles, protected by a mutex.
     absl::Mutex vec_mutex;
-    std::vector<std::shared_ptr<EventLoop::Timer>> all_timers;
+    std::vector<EventLoop::ScopedTimer> all_timers;
     all_timers.reserve(kTotalTimers);
 
     // Start the event loop in the background.
@@ -877,7 +896,7 @@ TEST_P(EventLoopTest, ShutdownRaceConditionStressTest) {
                 handle->Schedule(absl::Hours(1), absl::Hours(1));
 
                 absl::MutexLock lock(&vec_mutex);
-                all_timers.push_back(handle);
+                all_timers.push_back(std::move(handle));
             }
         });
     }
@@ -909,16 +928,16 @@ TEST_P(EventLoopTest, ShutdownRaceConditionStressTest) {
     for (int i = 0; i < kDestroyerThreads; ++i) {
         destroyers.emplace_back([&]() {
             while (true) {
-                std::shared_ptr<EventLoop::Timer> handle;
+                EventLoop::ScopedTimer handle;
                 {
                     absl::MutexLock lock(&vec_mutex);
                     if (all_timers.empty()) {
                         break;  // No more timers to destroy
                     }
-                    handle = all_timers.back();
+                    handle = std::move(all_timers.back());
                     all_timers.pop_back();
                 }
-                // Resetting the shared_ptr triggers the timer's destructor on THIS thread.
+                // Resetting the ScopedTimer triggers cancellation on THIS thread.
                 handle.reset();
             }
         });
@@ -1071,17 +1090,26 @@ TEST_P(EventLoopTest, TimerCreatedAfterLoopShutdown) {
     }
     f.wait();
 
+    absl::ScopedMockLog log(absl::MockLogDefault::kIgnoreUnexpected);
+    EXPECT_CALL(log, Log(absl::LogSeverity::kError, ::testing::_, ::testing::_)).Times(0);
+    log.StartCapturingLogs();
+
     auto timer = loop->CreateTimer([]() { return true; });
 
     timer->Schedule(absl::Milliseconds(100), absl::Milliseconds(100));
 
     timer.reset();
+    log.StopCapturingLogs();
 
     loop = nullptr;
 }
 
 TEST_P(EventLoopTest, TimerCreatedDuringLoopShutdown) {
     runInThread();
+
+    absl::ScopedMockLog log(absl::MockLogDefault::kIgnoreUnexpected);
+    EXPECT_CALL(log, Log(absl::LogSeverity::kError, ::testing::_, ::testing::_)).Times(0);
+    log.StartCapturingLogs();
 
     auto f = loop->Shutdown();
     auto timer = loop->CreateTimer([]() { return true; });
@@ -1094,8 +1122,69 @@ TEST_P(EventLoopTest, TimerCreatedDuringLoopShutdown) {
     timer->Schedule(absl::Milliseconds(100), absl::Milliseconds(100));
 
     timer.reset();
+    log.StopCapturingLogs();
 
     loop = nullptr;
+}
+
+TEST_P(EventLoopTest, TimerReturningFalseCanBeRescheduled) {
+    runInThread();
+    std::atomic<int> count = 0;
+    absl::Notification stopped_first_batch;
+    absl::Notification stopped_second_batch;
+
+    auto timer = loop->ScheduleRepeating(
+            [&]() {
+                const int c = ++count;
+                if (c == 2) {
+                    stopped_first_batch.Notify();
+                    return false;
+                }
+                if (c == 4) {
+                    stopped_second_batch.Notify();
+                    return false;
+                }
+                return true;
+            },
+            absl::Milliseconds(10), absl::Milliseconds(10));
+
+    runUntil(stopped_first_batch);
+    if (mLoopType == "qemu") {
+        fake_qemu_advance_ms(50);
+    } else {
+        std::this_thread::sleep_for(50ms);
+    }
+    ASSERT_EQ(count.load(), 2);
+
+    // Re-arm the disarmed ScopedTimer and verify it fires again.
+    timer->Schedule(absl::Milliseconds(10), absl::Milliseconds(10));
+    runUntil(stopped_second_batch);
+    EXPECT_EQ(count.load(), 4);
+}
+
+TEST_P(EventLoopTest, ScheduleDelayedTimerCanBeRearmedAfterFiring) {
+    runInThread();
+    std::atomic<int> count = 0;
+    absl::Notification first_fire;
+    absl::Notification second_fire;
+
+    auto timer = loop->ScheduleDelayed(
+            [&]() {
+                const int c = ++count;
+                if (c == 1) {
+                    first_fire.Notify();
+                } else if (c == 2) {
+                    second_fire.Notify();
+                }
+            },
+            absl::Milliseconds(10));
+
+    runUntil(first_fire);
+    ASSERT_EQ(count.load(), 1);
+
+    timer->Schedule(absl::Milliseconds(10));
+    runUntil(second_fire);
+    EXPECT_EQ(count.load(), 2);
 }
 TEST_P(EventLoopTest, LibuvEventStateChanges) {
     if (mLoopType == "qemu") {
@@ -1218,7 +1307,7 @@ TEST_P(EventLoopTest, CancelTimerBeforeLoopRunsDoesNotHang) {
         return true;
     });
     timer1->Schedule(absl::Milliseconds(10), absl::ZeroDuration());
-    timer1->Cancel();
+    timer1.reset();
 
     auto timer2 = loop->CreateTimer([&]() {
         timer2_executed = true;
@@ -1250,7 +1339,7 @@ TEST_P(EventLoopTest, CancelTimerOnLoopThreadBeforeDrainDoesNotFire) {
             return true;
         });
         timer->Schedule(absl::Milliseconds(10), absl::ZeroDuration());
-        timer->Cancel();
+        timer.reset();
         done.Notify();
     });
 
@@ -1310,6 +1399,128 @@ TEST_P(EventLoopTest, QemuSnapshotProgressPausesAndResumesRunningLoop) {
                                                LooperStatusEvent::State::kRunning));
 }
 
+TEST_P(EventLoopTest, QemuSnapshotProgressDoesNotOverwriteShutdown) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    using State = LooperStatusEvent::State;
+    using ::testing::AnyOf;
+    using ::testing::Each;
+
+    fake_qemu_advance_ms(1);
+    ASSERT_EQ(loop->GetState(), State::kRunning);
+
+    QemuSnapshotProgress progress{};
+    progress.operation = QEMU_SNAPSHOT_OP_SAVE;
+    progress.phase = QEMU_SNAPSHOT_PHASE_PREPARING;
+    fake_qemu_fire_snapshot_progress(&progress);
+    ASSERT_EQ(loop->GetState(), State::kPaused);
+
+    // Shut down from another thread mid-snapshot. Shutdown() sets kShuttingDown before it
+    // returns and queues the rest of the shutdown on the loop thread (this thread).
+    std::future<absl::Status> shutdown_future;
+    std::thread([&]() { shutdown_future = loop->Shutdown(); }).join();
+    ASSERT_EQ(loop->GetState(), State::kShuttingDown);
+
+    std::vector<State> states;
+    auto subscription = android::base::eventing::MakeScopedCallback(
+            *loop, [&](const LooperStatusEvent& event) { states.push_back(event.state); });
+
+    // Neither the end of this snapshot nor the start of the next one may resurrect the loop.
+    progress.phase = QEMU_SNAPSHOT_PHASE_COMPLETED;
+    fake_qemu_fire_snapshot_progress(&progress);
+    EXPECT_EQ(loop->GetState(), State::kShuttingDown);
+    progress.phase = QEMU_SNAPSHOT_PHASE_PREPARING;
+    fake_qemu_fire_snapshot_progress(&progress);
+    EXPECT_EQ(loop->GetState(), State::kShuttingDown);
+
+    runUntil(shutdown_future);
+    EXPECT_THAT(shutdown_future.get(), absl_testing::IsOk());
+
+    progress.phase = QEMU_SNAPSHOT_PHASE_FAILED;
+    fake_qemu_fire_snapshot_progress(&progress);
+    EXPECT_THAT(loop->GetState(), AnyOf(State::kShuttingDown, State::kFinished));
+    EXPECT_THAT(states, Each(AnyOf(State::kShuttingDown, State::kFinished)));
+}
+
+TEST_P(EventLoopTest, QemuInitialDrainDoesNotOverwriteShutdown) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    using State = LooperStatusEvent::State;
+    using ::testing::AnyOf;
+    using ::testing::Each;
+
+    ASSERT_EQ(loop->GetState(), State::kNotStarted);
+
+    // With a snapshot in progress, the initial drain would move the loop to kPaused.
+    QemuSnapshotProgress progress{};
+    progress.operation = QEMU_SNAPSHOT_OP_LOAD;
+    progress.phase = QEMU_SNAPSHOT_PHASE_PREPARING;
+    fake_qemu_fire_snapshot_progress(&progress);
+
+    // Shut down from another thread before the loop has drained anything.
+    std::future<absl::Status> shutdown_future;
+    std::thread([&]() { shutdown_future = loop->Shutdown(); }).join();
+    ASSERT_EQ(loop->GetState(), State::kShuttingDown);
+
+    std::vector<State> states;
+    auto subscription = android::base::eventing::MakeScopedCallback(
+            *loop, [&](const LooperStatusEvent& event) { states.push_back(event.state); });
+
+    // The initial drain runs before the queued shutdown task and must keep kShuttingDown.
+    runUntil(shutdown_future);
+    EXPECT_THAT(shutdown_future.get(), absl_testing::IsOk());
+    EXPECT_THAT(loop->GetState(), AnyOf(State::kShuttingDown, State::kFinished));
+    EXPECT_THAT(states, Each(AnyOf(State::kShuttingDown, State::kFinished)));
+}
+
+TEST_P(EventLoopTest, QemuSnapshotCompletionRacingShutdownKeepsShutdown) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    // Unlike the tests above, this lets the snapshot callback (this thread) and Shutdown()
+    // (another thread) race freely, so it can hit the read-to-write window of a
+    // check-then-set transition.
+    constexpr int kIterations = 2000;
+    constexpr int kMaxStartDelaySpins = 400;
+    fake_qemu_advance_ms(1);
+    QemuSnapshotProgress progress{};
+    progress.operation = QEMU_SNAPSHOT_OP_SAVE;
+    for (int i = 0; i < kIterations; ++i) {
+        auto racing_loop = QemuEventLoop::Create("RacingLoop");
+        fake_qemu_advance_ms(1);
+        progress.phase = QEMU_SNAPSHOT_PHASE_PREPARING;
+        fake_qemu_fire_snapshot_progress(&progress);
+        ASSERT_EQ(racing_loop->GetState(), LooperStatusEvent::State::kPaused);
+
+        std::atomic<int> arrived = 0;
+        std::future<absl::Status> shutdown_future;
+        std::thread shutdown_thread([&, delay_spins = i % kMaxStartDelaySpins]() {
+            arrived.fetch_add(1);
+            while (arrived.load() < 2) {
+            }
+            // Vary the start offset so that many points of the race window get sampled.
+            for (int spin = 0; spin < delay_spins; ++spin) {
+                std::atomic_signal_fence(std::memory_order_seq_cst);
+            }
+            shutdown_future = racing_loop->Shutdown();
+        });
+        arrived.fetch_add(1);
+        while (arrived.load() < 2) {
+        }
+        progress.phase = QEMU_SNAPSHOT_PHASE_COMPLETED;
+        fake_qemu_fire_snapshot_progress(&progress);
+        shutdown_thread.join();
+
+        // The shutdown task is still queued, so the loop must be exactly kShuttingDown.
+        ASSERT_EQ(racing_loop->GetState(), LooperStatusEvent::State::kShuttingDown)
+                << "iteration " << i;
+        runUntil(shutdown_future);
+        ASSERT_THAT(shutdown_future.get(), absl_testing::IsOk());
+    }
+}
+
 TEST_P(EventLoopTest, QemuSnapshotBeforeInitialDrainPreservesNotStartedAndPausedStates) {
     if (mLoopType != "qemu") {
         GTEST_SKIP() << "This test is specific to QemuEventLoop.";
@@ -1344,12 +1555,93 @@ TEST_P(EventLoopTest, QemuSnapshotBeforeInitialDrainPreservesNotStartedAndPaused
         return true;
     });
     timer->Schedule(absl::Milliseconds(10), absl::ZeroDuration());
-    timer->Cancel();
+    timer.reset();
 
     progress.phase = QEMU_SNAPSHOT_PHASE_COMPLETED;
     fake_qemu_fire_snapshot_progress(&progress);
     EXPECT_EQ(loop->GetState(), LooperStatusEvent::State::kRunning);
     EXPECT_FALSE(timer_executed.load());
+}
+
+TEST_P(EventLoopTest, QemuLoopShutdownOnLoopThreadDrainsQueuedTasksAndReachesFinished) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+
+    std::vector<LooperStatusEvent::State> states;
+    auto subscription = android::base::eventing::MakeScopedCallback(
+            *loop, [&](const LooperStatusEvent& event) { states.push_back(event.state); });
+
+    // Establish the QEMU loop thread and transition kNotStarted -> kRunning.
+    fake_qemu_advance_ms(1);
+    ASSERT_EQ(loop->GetState(), LooperStatusEvent::State::kRunning);
+    ASSERT_TRUE(loop->IsOnLoopThread());
+
+    // Queue a task from a worker thread before Shutdown() runs on the QEMU loop thread.
+    absl::StatusOr<std::future<std::string>> queued_future;
+    std::thread worker(
+            [&]() { queued_future = loop->Post([]() -> std::string { return "测试_🚀_é"; }); });
+    worker.join();
+    ASSERT_THAT(queued_future, absl_testing::IsOk());
+
+    // Calling ShutdownAndWait() on the loop thread must drain the queued task before
+    // transitioning to kFinished.
+    ASSERT_THAT(loop->ShutdownAndWait(), absl_testing::IsOk());
+    ASSERT_EQ(queued_future->wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_EQ(queued_future->get(), "测试_🚀_é");
+    EXPECT_EQ(loop->GetState(), LooperStatusEvent::State::kFinished);
+    EXPECT_THAT(states, ::testing::ElementsAre(LooperStatusEvent::State::kRunning,
+                                               LooperStatusEvent::State::kShuttingDown,
+                                               LooperStatusEvent::State::kFinished));
+
+    // Subsequent Post and PostAndWait calls from any thread fail fast without blocking.
+    EXPECT_THAT(loop->Post([]() {}), absl_testing::StatusIs(absl::StatusCode::kUnavailable));
+    absl::Status post_after_shutdown_status = absl::OkStatus();
+    std::thread late_worker([&]() { post_after_shutdown_status = loop->PostAndWait([]() {}); });
+    late_worker.join();
+    EXPECT_THAT(post_after_shutdown_status,
+                absl_testing::StatusIs(absl::StatusCode::kFailedPrecondition));
+}
+
+TEST_P(EventLoopTest, QemuLoopConcurrentPostAndWaitDuringShutdownNeverHangs) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+
+    fake_qemu_advance_ms(1);
+    ASSERT_EQ(loop->GetState(), LooperStatusEvent::State::kRunning);
+
+    constexpr int kNumWorkers = 4;
+    constexpr int kCallsPerWorker = 50;
+    absl::BlockingCounter ready(kNumWorkers);
+    absl::Notification start;
+    std::atomic<int> completed_calls = 0;
+
+    std::vector<std::thread> workers;
+    workers.reserve(kNumWorkers);
+    for (int i = 0; i < kNumWorkers; ++i) {
+        workers.emplace_back([&]() {
+            ready.DecrementCount();
+            start.WaitForNotification();
+            for (int j = 0; j < kCallsPerWorker; ++j) {
+                const absl::Status status = loop->PostAndWait([]() {});
+                EXPECT_TRUE(status.ok() || absl::IsUnavailable(status) ||
+                            absl::IsFailedPrecondition(status))
+                        << status;
+                completed_calls.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    ready.Wait();
+    start.Notify();
+    ASSERT_THAT(loop->ShutdownAndWait(), absl_testing::IsOk());
+
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+    EXPECT_EQ(completed_calls.load(), kNumWorkers * kCallsPerWorker);
+    EXPECT_EQ(loop->GetState(), LooperStatusEvent::State::kFinished);
 }
 
 TEST(LibuvEventLoopShutdownTest, DrainsHandlesClosedAfterShutdownWithoutWarning) {
@@ -1417,6 +1709,230 @@ TEST(LibuvEventLoopShutdownTest, ClosesLingeringUnreferencedHandlesOnDestroyWith
 
     log.StopCapturingLogs();
     EXPECT_NE(uv_is_closing(reinterpret_cast<uv_handle_t*>(&lingering_timer)), 0);
+}
+
+TEST_P(EventLoopTest, TimerDoesNotFireAfterCancelReturnsDuringShutdown) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    int fired = 0;
+    auto timer = loop->ScheduleDelayed([&fired] { ++fired; }, absl::Milliseconds(1));
+    fake_qemu_advance_ms(1);
+
+    std::future<absl::Status> shutdown;
+    std::thread grpc([&] { shutdown = loop->Shutdown(); });
+    grpc.join();
+
+    std::thread hang_detector([&] { timer.reset(); });
+    hang_detector.join();
+
+    fake_qemu_advance_ms(1);
+    ASSERT_EQ(shutdown.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_THAT(shutdown.get(), absl_testing::IsOk());
+
+    EXPECT_EQ(fired, 0) << "the timer callback ran after ScopedTimer::reset() returned";
+}
+
+TEST(FakeQemuTest, AdvanceIsRaceFreeWithTimersRegisteredOnOtherThreads) {
+#ifndef ABSL_HAVE_THREAD_SANITIZER
+    GTEST_SKIP() << "Run with --config=tsan: only ThreadSanitizer reports this race reliably.";
+#else
+    constexpr int kTimers = 1000;
+    std::vector<QEMUTimer> timers(kTimers);
+    std::atomic<bool> start = false;
+    std::thread registrar([&] {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+        for (QEMUTimer& timer : timers) {
+            timer_init_full(
+                    &timer, nullptr, QEMU_CLOCK_VIRTUAL, SCALE_MS, 0, [](void*) {}, nullptr);
+        }
+    });
+    start.store(true, std::memory_order_release);
+    for (int i = 0; i < kTimers; ++i) {
+        fake_qemu_advance_ms(1);
+    }
+    registrar.join();
+
+    for (QEMUTimer& timer : timers) {
+        timer_del(&timer);
+    }
+    fake_qemu_reset();
+#endif
+}
+
+TEST_P(EventLoopTest, ShutdownOnQemuMainThreadBeforeFirstDrainCompletes) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    fake_qemu_set_bql_tracking(true);
+    bql_lock();
+    const absl::Status status = loop->ShutdownAndWait(absl::Milliseconds(200));
+    bql_unlock();
+
+    EXPECT_THAT(status, absl_testing::IsOk());
+    fake_qemu_advance_ms(1);
+}
+
+TEST_P(EventLoopTest, ShutdownTimersStopsTimersBeforeReturning) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    int fired = 0;
+    auto timer = loop->ScheduleDelayed([&fired] { ++fired; }, absl::Milliseconds(1));
+    fake_qemu_advance_ms(1);
+
+    loop->ShutdownTimers();
+    fake_qemu_advance_ms(5);
+
+    EXPECT_EQ(fired, 0) << "a timer fired after ShutdownTimers() returned on the loop thread";
+}
+
+TEST_P(EventLoopTest, SubMillisecondRepeatingTimerKeepsRepeating) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    int fired = 0;
+    auto timer = loop->ScheduleRepeating(
+            [&fired] {
+                ++fired;
+                return true;
+            },
+            absl::Microseconds(500), absl::Microseconds(500));
+
+    fake_qemu_advance_ms(20);
+    timer.reset();
+
+    EXPECT_GT(fired, 1) << "a timer repeating every 500us fired " << fired
+                        << " time(s) in 20ms of QEMU time";
+}
+
+TEST_P(EventLoopTest, IsOnLoopThreadIsTrueOnQemuMainThreadBeforeFirstDrain) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    EXPECT_TRUE(loop->IsOnLoopThread())
+            << "QemuEventLoop does not recognize the QEMU main thread until the first "
+               "bottom half drains";
+}
+
+namespace {
+
+constexpr absl::Duration kPromptTimeout = absl::Seconds(1);
+constexpr absl::Duration kCleanupTimeout = absl::Seconds(10);
+
+QemuSnapshotProgress MakeSnapshotProgress(QemuSnapshotOperation operation,
+                                          QemuSnapshotPhase phase) {
+    QemuSnapshotProgress progress{};
+    progress.operation = operation;
+    progress.phase = phase;
+    return progress;
+}
+
+bool PumpFakeQemuUntil(const absl::Notification& done, absl::Duration timeout) {
+    const absl::Time deadline = absl::Now() + timeout;
+    while (!done.HasBeenNotified()) {
+        if (absl::Now() >= deadline) {
+            return false;
+        }
+        fake_qemu_advance_ms(1);
+        std::this_thread::yield();
+    }
+    return true;
+}
+
+}  // namespace
+
+TEST_P(EventLoopTest, TimerCancelKeepsCallerBqlHeld) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    fake_qemu_set_bql_tracking(true);
+    auto timer = loop->CreateTimer([] { return true; });
+    timer->Schedule(absl::Seconds(10));
+    fake_qemu_advance_ms(1);
+
+    absl::Notification cancel_returned;
+    int64_t bql_releases_during_cancel = -1;
+    std::thread vcpu([&] {
+        bql_lock();
+        const int64_t unlocks_before = fake_qemu_bql_unlock_count();
+        timer.reset();
+        bql_releases_during_cancel = fake_qemu_bql_unlock_count() - unlocks_before;
+        bql_unlock();
+        cancel_returned.Notify();
+    });
+    EXPECT_TRUE(PumpFakeQemuUntil(cancel_returned, kCleanupTimeout));
+    vcpu.join();
+
+    EXPECT_EQ(bql_releases_during_cancel, 0)
+            << "ScopedTimer::reset() released the BQL that its caller holds";
+}
+
+TEST_P(EventLoopTest, TimerCancelDoesNotWaitForSnapshotInProgress) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    auto timer = loop->CreateTimer([] { return true; });
+    timer->Schedule(absl::Seconds(10));
+    fake_qemu_advance_ms(1);
+
+    absl::Notification snapshot_running;
+    absl::Notification cancel_returned;
+    bool cancel_returned_during_snapshot = false;
+    const absl::Status posted = loop->Post([&] {
+        const QemuSnapshotProgress preparing =
+                MakeSnapshotProgress(QEMU_SNAPSHOT_OP_SAVE, QEMU_SNAPSHOT_PHASE_PREPARING);
+        fake_qemu_fire_snapshot_progress(&preparing);
+        snapshot_running.Notify();
+        cancel_returned_during_snapshot =
+                cancel_returned.WaitForNotificationWithTimeout(kPromptTimeout);
+        const QemuSnapshotProgress completed =
+                MakeSnapshotProgress(QEMU_SNAPSHOT_OP_SAVE, QEMU_SNAPSHOT_PHASE_COMPLETED);
+        fake_qemu_fire_snapshot_progress(&completed);
+    });
+    ASSERT_THAT(posted, absl_testing::IsOk());
+
+    std::thread hang_detector([&] {
+        snapshot_running.WaitForNotification();
+        timer.reset();
+        cancel_returned.Notify();
+    });
+    EXPECT_TRUE(PumpFakeQemuUntil(cancel_returned, kCleanupTimeout));
+    hang_detector.join();
+
+    EXPECT_TRUE(cancel_returned_during_snapshot)
+            << "ScopedTimer::reset() blocked until the snapshot on the QEMU main thread finished";
+}
+
+TEST_P(EventLoopTest, TimerCancelRacesWithFiringCallbackWithoutUseAfterFree) {
+    if (mLoopType != "qemu") {
+        GTEST_SKIP() << "This test is specific to QemuEventLoop.";
+    }
+    for (int iter = 0; iter < 300; ++iter) {
+        std::atomic<int> fires = 0;
+        absl::Notification scheduled;
+        auto timer = loop->CreateTimer([&fires] {
+            fires.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        });
+        timer->Schedule(absl::Milliseconds(1), absl::Milliseconds(1));
+        (void)loop->Post([&scheduled] { scheduled.Notify(); });
+        while (!scheduled.HasBeenNotified()) {
+            fake_qemu_advance_ms(1);
+        }
+
+        std::atomic<bool> canceller_done = false;
+        std::thread canceller([&] {
+            timer.reset();
+            canceller_done.store(true, std::memory_order_release);
+        });
+        while (!canceller_done.load(std::memory_order_acquire)) {
+            fake_qemu_advance_ms(1);
+        }
+        canceller.join();
+        fake_qemu_advance_ms(2);
+    }
 }
 
 }  // namespace goldfish::async

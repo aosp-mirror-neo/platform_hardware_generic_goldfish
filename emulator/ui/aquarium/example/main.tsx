@@ -24,6 +24,9 @@ import {
   useLocation,
   useVm,
   useSnapshots,
+  useMicrophone,
+  useAudio,
+  MicrophoneInput_Kind,
   RtcConnectionState,
   KeyAction,
   InputFeature,
@@ -88,6 +91,7 @@ function formatSnapshotPhase(phase?: SnapshotOperationMetadata_Phase): string {
  *   - useCapabilities: device display, hardware feature discovery
  *   - useLocation: geographic coordinates and GPS emulation
  *   - useVm / useSnapshots: virtual machine lifecycle, snapshot progress, and snapshot management
+ *   - useMicrophone / useAudio: browser microphone over WebRTC and the virtual microphone mixer
  */
 function DeviceDemoApp({ onLog }: { onLog: (msg: string, type?: LogEntry['type']) => void }) {
   const { state, connect, disconnect, client } = useDevice();
@@ -117,8 +121,20 @@ function DeviceDemoApp({ onLog }: { onLog: (msg: string, type?: LogEntry['type']
     restoreSnapshot,
     deleteSnapshot,
   } = useSnapshots();
+  const { enabled: micEnabled, toggle: toggleMic, isBusy: isMicBusy, error: micError } = useMicrophone();
+  const {
+    audioState,
+    setMicrophoneMuted,
+    setInputMuted,
+    isUpdating: isAudioUpdating,
+    error: audioError,
+  } = useAudio();
+  const hostMicInput = audioState?.microphoneInputs.find((input) => input.sourceId === 'host');
+  const isConnected = state === RtcConnectionState.CONNECTED;
 
-  const [activeTab, setActiveTab] = useState<'controls' | 'sensors' | 'location' | 'capabilities' | 'vm'>('controls');
+  const [activeTab, setActiveTab] = useState<
+    'controls' | 'sensors' | 'location' | 'capabilities' | 'vm' | 'audio'
+  >('controls');
   const [pitchVal, setPitchVal] = useState<number>(0);
   const [yawVal, setYawVal] = useState<number>(0);
   const [rollVal, setRollVal] = useState<number>(0);
@@ -203,6 +219,32 @@ function DeviceDemoApp({ onLog }: { onLog: (msg: string, type?: LogEntry['type']
     },
     [client, onLog]
   );
+
+  // Browser microphone over WebRTC: attaches or detaches the track with replaceTrack.
+  const toggleBrowserMic = useCallback(() => {
+    const action = micEnabled ? 'Disabling' : 'Enabling';
+    onLog(`${action} browser microphone (WebRTC)...`);
+    toggleMic()
+      .then(() => onLog(`Browser microphone ${micEnabled ? 'off' : 'on'}`, 'success'))
+      .catch((err) => onLog(`Browser microphone failed: ${err.message}`, 'error'));
+  }, [micEnabled, toggleMic, onLog]);
+
+  const toggleHostMic = useCallback(() => {
+    if (!hostMicInput) return;
+    const muted = !hostMicInput.muted;
+    onLog(`${muted ? 'Muting' : 'Unmuting'} host microphone (source_id "host")...`);
+    setInputMuted('host', muted)
+      .then(() => onLog(`Host microphone ${muted ? 'muted' : 'unmuted'}`, 'success'))
+      .catch((err) => onLog(`UpdateAudioState failed: ${err.message}`, 'error'));
+  }, [hostMicInput, setInputMuted, onLog]);
+
+  const toggleMasterMute = useCallback(() => {
+    const muted = !audioState?.microphoneMuted;
+    onLog(`${muted ? 'Muting' : 'Unmuting'} all microphone input...`);
+    setMicrophoneMuted(muted)
+      .then(() => onLog(`All microphone input ${muted ? 'muted' : 'unmuted'}`, 'success'))
+      .catch((err) => onLog(`UpdateAudioState failed: ${err.message}`, 'error'));
+  }, [audioState, setMicrophoneMuted, onLog]);
 
   return (
     <div style={styles.container}>
@@ -331,6 +373,12 @@ function DeviceDemoApp({ onLog }: { onLog: (msg: string, type?: LogEntry['type']
             >
               VM
             </button>
+            <button
+              style={activeTab === 'audio' ? styles.tabActive : styles.tab}
+              onClick={() => setActiveTab('audio')}
+            >
+              Audio
+            </button>
           </div>
 
           <div style={styles.panelBody}>
@@ -357,6 +405,14 @@ function DeviceDemoApp({ onLog }: { onLog: (msg: string, type?: LogEntry['type']
                   </button>
                   <button style={styles.btnSecondary} onClick={() => sendKey('AudioVolumeDown', 'Vol-')}>
                     🔉 Vol -
+                  </button>
+                  <button
+                    style={micEnabled ? styles.btnDanger : styles.btnSecondary}
+                    onClick={toggleBrowserMic}
+                    disabled={!isConnected || isMicBusy}
+                    title="Send this browser's microphone to the device over WebRTC"
+                  >
+                    {micEnabled ? '🎙 Mic On' : '🎙 Mic Off'}
                   </button>
                 </div>
               </div>
@@ -1182,6 +1238,74 @@ function DeviceDemoApp({ onLog }: { onLog: (msg: string, type?: LogEntry['type']
                 )}
               </div>
             )}
+
+            {/* 6. Microphone & Audio Mixer Tab */}
+            {activeTab === 'audio' && (
+              <div style={styles.section}>
+                <h3 style={styles.sectionTitle}>Microphone</h3>
+                <p style={styles.sectionDesc}>
+                  Browser microphone over WebRTC via useMicrophone(); mixer inputs via useAudio().
+                </p>
+
+                <div style={styles.controlRow}>
+                  <button
+                    style={{ ...(micEnabled ? styles.btnDanger : styles.btnPrimary), width: '100%' }}
+                    onClick={toggleBrowserMic}
+                    disabled={!isConnected || isMicBusy}
+                  >
+                    {micEnabled ? '⏹ Stop Browser Microphone (WebRTC)' : '🎙 Browser Microphone (WebRTC)'}
+                  </button>
+                  {micError && <div style={styles.errorText}>{micError.message}</div>}
+                </div>
+
+                <div style={styles.controlRow}>
+                  <button
+                    style={{ ...styles.btnSecondary, width: '100%' }}
+                    onClick={toggleHostMic}
+                    disabled={!hostMicInput || isAudioUpdating}
+                  >
+                    {!hostMicInput
+                      ? 'Host Microphone (unavailable)'
+                      : hostMicInput.muted
+                      ? '🎤 Unmute Host Microphone'
+                      : '🔇 Mute Host Microphone'}
+                  </button>
+                </div>
+
+                <div style={styles.controlRow}>
+                  <button
+                    style={{ ...(audioState?.microphoneMuted ? styles.btnDanger : styles.btnSecondary), width: '100%' }}
+                    onClick={toggleMasterMute}
+                    disabled={!audioState || isAudioUpdating}
+                  >
+                    {audioState?.microphoneMuted ? '🔈 Unmute All Microphone Input' : '🔇 Mute All Microphone Input'}
+                  </button>
+                  {audioError && <div style={styles.errorText}>{audioError.message}</div>}
+                </div>
+
+                {audioState ? (
+                  <div style={styles.codeBlock}>
+                    <div>Guest recording: {audioState.microphoneInUseByGuest ? 'yes' : 'no'}</div>
+                    <div>All input muted: {audioState.microphoneMuted ? 'yes' : 'no'}</div>
+                    {audioState.microphoneInputs.map((input) => (
+                      <div key={input.sourceId} style={{ marginLeft: '8px', color: '#94a3b8' }}>
+                        {MicrophoneInput_Kind[input.kind] ?? input.kind} &quot;{input.sourceId}&quot;:{' '}
+                        {input.muted ? 'muted' : 'live'}, gain {input.gain.toFixed(2)}
+                      </div>
+                    ))}
+                    {micEnabled &&
+                      !audioState.microphoneInputs.some((i) => i.sourceId === 'webrtc') && (
+                        <div style={{ color: '#fbbf24', marginTop: '6px' }}>
+                          Browser microphone is on but the emulator has no &quot;webrtc&quot; input:
+                          the microphone mixer may be full.
+                        </div>
+                      )}
+                  </div>
+                ) : (
+                  <div style={styles.emptyState}>No audio state yet.</div>
+                )}
+              </div>
+            )}
           </div>
         </aside>
 
@@ -1267,7 +1391,7 @@ function RootApp() {
 
       {/* DeviceProvider wrapping the app */}
       <div style={styles.bodyWrapper}>
-        <DeviceProvider uri={endpoint} token={token || undefined}>
+        <DeviceProvider uri={endpoint} token={token || undefined} microphone={true}>
           <DeviceDemoApp onLog={addLog} />
         </DeviceProvider>
       </div>
@@ -1606,6 +1730,10 @@ const styles: Record<string, React.CSSProperties> = {
     fontStyle: 'italic',
     textAlign: 'center',
     padding: '16px 0',
+  },
+  errorText: {
+    color: '#f87171',
+    fontSize: '0.75rem',
   },
 };
 

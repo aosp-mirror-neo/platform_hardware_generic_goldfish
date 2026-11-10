@@ -21,6 +21,7 @@
 #include <mutex>
 
 #include "goldfish/eventing/observable_value.h"
+#include "goldfish/system/virtual_clock.h"
 
 namespace goldfish::sensors {
 
@@ -39,7 +40,8 @@ class VirtualSceneCamera {
     using ObservableActive =
             eventing::ObservableValue<bool, eventing::ObservableValueTriggerOnUpdate>;
 
-    explicit VirtualSceneCamera(PhysicalModel* physical_model, bool enable_ambient_motion);
+    VirtualSceneCamera(PhysicalModel* physical_model, bool enable_ambient_motion,
+                       const ::goldfish::system::VirtualClock& virtual_clock);
 
     VirtualSceneCamera(const VirtualSceneCamera&) = delete;
     VirtualSceneCamera(VirtualSceneCamera&&) = delete;
@@ -64,6 +66,7 @@ class VirtualSceneCamera {
 
     PhysicalModel* const physical_model_;
     const bool enable_ambient_motion_;
+    const ::goldfish::system::VirtualClock& virtual_clock_;
 
     mutable std::mutex mutex_;
     int num_users_{0};

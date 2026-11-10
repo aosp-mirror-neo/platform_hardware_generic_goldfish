@@ -1,19 +1,8 @@
 load("@aemu//tools/clang_tidy:defs.bzl", "clang_tidy_test")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("//emulator/tools:cc_binary_with_manifest.bzl", "cc_binary_with_manifest")
-load("//emulator/tools:plugins.bzl", "collect_plugins")
 
 package(default_visibility = ["//visibility:public"])
-
-collect_plugins(
-    name = "binplace",
-    output_dir = ".",
-    plugins = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
-    ],
-    visibility = ["//visibility:private"],
-)
 
 cc_library(
     name = "emulator_controller_methods",
@@ -24,6 +13,7 @@ cc_library(
         "display_service.cc",
         "fingerprint_service.cc",
         "gps_service.cc",
+        "microphone_service.cc",
         "sensor_service.cc",
         "status_service.cc",
         "vm_service.cc",
@@ -35,6 +25,7 @@ cc_library(
         "display_service.h",
         "fingerprint_service.h",
         "gps_service.h",
+        "microphone_service.h",
         "notification_store.h",
         "notification_stream_writer.h",
         "sensor_service.h",
@@ -56,7 +47,10 @@ cc_library(
         "//emulator/libs/perfetto:init",
         "//emulator/libs/shared_memory",
         "//emulator/libs/sockets",
+        "//emulator/plugin/audio:audio_input_mux",
+        "//emulator/plugin/audio:pcm_format",
         "//emulator/plugin/audio:qemu_audio_capture",
+        "//emulator/plugin/audio:qemu_audio_inject",
         "//emulator/plugin/avd:avd_info",
         "//emulator/plugin/avd:avd_properties",
         "//emulator/plugin/avd:avd_universe",
@@ -64,9 +58,16 @@ cc_library(
         "//emulator/plugin/display:write_png",
         "//emulator/plugin/grpc/keyboard",
         "//emulator/plugin/vminterface",
+        "//emulator/plugin/vminterface:vm_lock",
         "//emulator/tools:aemu_version",
+        "@abseil-cpp//absl/base:core_headers",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
         "@aemu//protos/services/emulator-controller:emulator_controller_cc_grpc",
     ],
@@ -79,17 +80,13 @@ cc_test(
         "audio_stream_writer_test.cc",
         "display_service_test.cc",
         "fingerprint_service_test.cc",
+        "microphone_service_test.cc",
         "notification_store_test.cc",
         "qemu_stubs.c",
         "sensor_service_test.cc",
         "status_service_test.cc",
         "test/grpc_service_test.h",
         "vm_service_test.cc",
-    ],
-    data = [":binplace"],
-    dynamic_deps = [
-        "@glib//glib:glib_shared",
-        "@glib//gmodule:gmodule_shared",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -101,15 +98,23 @@ cc_test(
         "//emulator/libs/display_pipeline:cpu_pipeline",
         "//emulator/libs/hardware_config:fake_hardware_config",
         "//emulator/libs/process",
+        "//emulator/libs/system:test-headers",
         "//emulator/libs/test:googletest_main",
+        "//emulator/plugin/audio:audio_input_mux",
+        "//emulator/plugin/audio:pcm_format",
+        "//emulator/plugin/audio:qemu_audio_inject",
+        "//emulator/plugin/audio:test_bql",
         "//emulator/plugin/audio:test_qemu_audio_stub",
         "//emulator/plugin/avd:fake_avd_universe",
         "//emulator/plugin/display:test-display",
         "//emulator/plugin/grpc/keyboard:test_qemu_input_stub",
         "//emulator/plugin/vminterface:test_vminterface",
+        "//emulator/plugin/vminterface:vm_lock",
         "//emulator/plugin/vminterface:vminterface-test",
         "//emulator/tools:aemu_version",
         "@abseil-cpp//absl/synchronization",
+        "@glib//glib",
+        "@glib//gmodule",
     ],
 )
 

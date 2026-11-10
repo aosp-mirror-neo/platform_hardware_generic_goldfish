@@ -129,5 +129,57 @@ TEST_F(LegacyConsoleControllerTest, HandlesIpv4Failure) {
     EXPECT_FALSE(status.ok());  // Fails because IPv4 failed
 }
 
+TEST_F(LegacyConsoleControllerTest, AnyFamilyHandlesIpv4Failure) {
+    ::testing::NiceMock<MockAsyncSocketFactory> factory;
+    int port = 5554;
+    LegacyConsoleController controller(factory, loop_.get(), metrics_reporter_);
+
+    auto ipv4_endpoint = ToEndpoint(ToIpv4Address(127, 0, 0, 1), port);
+    auto ipv6_endpoint = ToEndpoint(ToIpv6Address(0, 0, 0, 0, 0, 0, 0, 1), port);
+
+    auto mock_ipv6_server = std::make_shared<::testing::NiceMock<MockAsyncSocketServer>>();
+
+    // IPv4 fails, e.g. on an IPv6-only host, but IPv6 still starts.
+    EXPECT_CALL(factory, CreateServer(loop_.get(), ipv4_endpoint, _, _)).WillOnce(Return(nullptr));
+    EXPECT_CALL(factory, CreateServer(loop_.get(), ipv6_endpoint, _, _))
+            .WillOnce(Return(mock_ipv6_server));
+
+    auto status = controller.Start(port, LegacyConsoleController::LoopbackRequirement::kAnyFamily);
+    EXPECT_TRUE(status.ok()) << status;
+}
+
+TEST_F(LegacyConsoleControllerTest, HandlesIpv6Failure) {
+    ::testing::NiceMock<MockAsyncSocketFactory> factory;
+    int port = 5554;
+    LegacyConsoleController controller(factory, loop_.get(), metrics_reporter_);
+
+    auto ipv4_endpoint = ToEndpoint(ToIpv4Address(127, 0, 0, 1), port);
+    auto ipv6_endpoint = ToEndpoint(ToIpv6Address(0, 0, 0, 0, 0, 0, 0, 1), port);
+
+    auto mock_ipv4_server = std::make_shared<::testing::NiceMock<MockAsyncSocketServer>>();
+
+    EXPECT_CALL(factory, CreateServer(loop_.get(), ipv4_endpoint, _, _))
+            .WillOnce(Return(mock_ipv4_server));
+    EXPECT_CALL(factory, CreateServer(loop_.get(), ipv6_endpoint, _, _)).WillOnce(Return(nullptr));
+
+    auto status = controller.Start(port);
+    EXPECT_TRUE(status.ok()) << status;
+}
+
+TEST_F(LegacyConsoleControllerTest, AnyFamilyFailsWhenBothFamiliesFail) {
+    ::testing::NiceMock<MockAsyncSocketFactory> factory;
+    int port = 5554;
+    LegacyConsoleController controller(factory, loop_.get(), metrics_reporter_);
+
+    auto ipv4_endpoint = ToEndpoint(ToIpv4Address(127, 0, 0, 1), port);
+    auto ipv6_endpoint = ToEndpoint(ToIpv6Address(0, 0, 0, 0, 0, 0, 0, 1), port);
+
+    EXPECT_CALL(factory, CreateServer(loop_.get(), ipv4_endpoint, _, _)).WillOnce(Return(nullptr));
+    EXPECT_CALL(factory, CreateServer(loop_.get(), ipv6_endpoint, _, _)).WillOnce(Return(nullptr));
+
+    auto status = controller.Start(port, LegacyConsoleController::LoopbackRequirement::kAnyFamily);
+    EXPECT_FALSE(status.ok());
+}
+
 }  // namespace
 }  // namespace goldfish::telnet

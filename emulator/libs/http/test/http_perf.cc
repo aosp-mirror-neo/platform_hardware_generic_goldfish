@@ -30,11 +30,17 @@
 #include "absl/hash/hash.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
+#include "absl/synchronization/mutex.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "benchmark/benchmark.h"
 
 #include "goldfish/http/http_headers.h"
 #include "goldfish/http/http_request.h"
+#include "goldfish/http/http_response.h"
 #include "goldfish/http/http_router.h"
+#include "goldfish/http/http_session.h"
 #include "http_session_internal.h"
 
 namespace goldfish::http {
@@ -488,6 +494,368 @@ void BmLlhttpMethodParse(benchmark::State& state) {
     }
 }
 BENCHMARK(BmLlhttpMethodParse);
+
+ABSL_ATTRIBUTE_NOINLINE std::string LegacyFormatWireResponse(const HttpResponse& resp,
+                                                             bool keep_alive,
+                                                             bool is_head_request = false) {
+    std::string response;
+    const std::string& body = resp.Body();
+    const int status = resp.StatusCode();
+    response.reserve(body.size() + 256);
+    absl::StrAppend(&response, protocol::kHttp11, protocol::kSpace, status, protocol::kSpace,
+                    HttpStatusToReason(status), protocol::kCrlf);
+
+    bool has_content_length = false;
+    bool has_connection = false;
+
+    for (const auto& [name, value] : resp.Headers()) {
+        absl::StrAppend(&response, name, protocol::kColonSpace, value, protocol::kCrlf);
+        if (absl::EqualsIgnoreCase(name, headers::kContentLength)) {
+            has_content_length = true;
+        }
+        if (absl::EqualsIgnoreCase(name, headers::kConnection)) {
+            has_connection = true;
+        }
+    }
+
+    const bool forbids_content_length = (status >= 100 && status < 200) || status == 204;
+    if (!has_content_length && !forbids_content_length) {
+        absl::StrAppend(&response, headers::kContentLength, protocol::kColonSpace, body.size(),
+                        protocol::kCrlf);
+    }
+    if (!has_connection) {
+        absl::StrAppend(&response, headers::kConnection, protocol::kColonSpace,
+                        keep_alive ? protocol::kKeepAlive : protocol::kClose, protocol::kCrlf);
+    }
+
+    absl::StrAppend(&response, protocol::kCrlf);
+    if (!is_head_request && status != 204 && status != 304 && (status < 100 || status >= 200)) {
+        absl::StrAppend(&response, body);
+    }
+    return response;
+}
+
+HttpResponse BuildJsonResponse() {
+    return HttpResponse::String("{\"status\":\"ok\",\"emulator\":\"goldfish\",\"port\":8554}",
+                                HttpStatus::kOk, mime::kApplicationJson);
+}
+
+HttpResponse BuildCorsJsonResponse() {
+    return BuildJsonResponse()
+            .WithHeader(headers::kAccessControlAllowOrigin, "http://localhost:8080")
+            .WithHeader(headers::kAccessControlAllowMethods,
+                        "GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH")
+            .WithHeader(headers::kAccessControlAllowHeaders,
+                        "content-type,x-grpc-web,x-user-agent,authorization")
+            .WithHeader(headers::kAccessControlExposeHeaders,
+                        "grpc-status,grpc-message,grpc-status-details-bin")
+            .WithHeader(headers::kCacheControl, "no-store, no-cache, must-revalidate")
+            .WithHeader(headers::kXGrpcWeb, "1");
+}
+
+void BmFormatWireResponseJsonBaseline(benchmark::State& state) {
+    const HttpResponse resp = BuildJsonResponse();
+    for (auto _ : state) {
+        std::string wire = LegacyFormatWireResponse(resp, /*keep_alive=*/true);
+        benchmark::DoNotOptimize(wire);
+    }
+}
+BENCHMARK(BmFormatWireResponseJsonBaseline);
+
+void BmFormatWireResponseJson(benchmark::State& state) {
+    const HttpResponse resp = BuildJsonResponse();
+    for (auto _ : state) {
+        std::string wire = resp.FormatWireResponse(/*keep_alive=*/true);
+        benchmark::DoNotOptimize(wire);
+    }
+}
+BENCHMARK(BmFormatWireResponseJson);
+
+void BmFormatWireResponseCorsHeadersBaseline(benchmark::State& state) {
+    const HttpResponse resp = BuildCorsJsonResponse();
+    for (auto _ : state) {
+        std::string wire = LegacyFormatWireResponse(resp, /*keep_alive=*/true);
+        benchmark::DoNotOptimize(wire);
+    }
+}
+BENCHMARK(BmFormatWireResponseCorsHeadersBaseline);
+
+void BmFormatWireResponseCorsHeaders(benchmark::State& state) {
+    const HttpResponse resp = BuildCorsJsonResponse();
+    for (auto _ : state) {
+        std::string wire = resp.FormatWireResponse(/*keep_alive=*/true);
+        benchmark::DoNotOptimize(wire);
+    }
+}
+BENCHMARK(BmFormatWireResponseCorsHeaders);
+
+void BmFormatWireResponseHeadLargeBodyBaseline(benchmark::State& state) {
+    const HttpResponse resp = HttpResponse::String(std::string(65536, 'x'), HttpStatus::kOk,
+                                                   mime::kApplicationOctetStream);
+    for (auto _ : state) {
+        std::string wire =
+                LegacyFormatWireResponse(resp, /*keep_alive=*/true, /*is_head_request=*/true);
+        benchmark::DoNotOptimize(wire);
+    }
+}
+BENCHMARK(BmFormatWireResponseHeadLargeBodyBaseline);
+
+void BmFormatWireResponseHeadLargeBody(benchmark::State& state) {
+    const HttpResponse resp = HttpResponse::String(std::string(65536, 'x'), HttpStatus::kOk,
+                                                   mime::kApplicationOctetStream);
+    for (auto _ : state) {
+        std::string wire = resp.FormatWireResponse(/*keep_alive=*/true, /*is_head_request=*/true);
+        benchmark::DoNotOptimize(wire);
+    }
+}
+BENCHMARK(BmFormatWireResponseHeadLargeBody);
+
+ABSL_ATTRIBUTE_NOINLINE std::string LegacyFormatStreamingHeaders(
+        const absl::flat_hash_map<std::string, std::string>& headers, int status,
+        bool* is_chunked = nullptr) {
+    bool chunked = false;
+    for (const auto& [k, v] : headers) {
+        if (absl::EqualsIgnoreCase(k, headers::kTransferEncoding) &&
+            absl::EqualsIgnoreCase(v, "chunked")) {
+            chunked = true;
+        }
+    }
+    if (is_chunked != nullptr) {
+        *is_chunked = chunked;
+    }
+    std::string response;
+    absl::StrAppend(&response, protocol::kHttp11, protocol::kSpace, status, protocol::kSpace,
+                    HttpStatusToReason(status), protocol::kCrlf);
+    for (const auto& [k, v] : headers) {
+        absl::StrAppend(&response, k, protocol::kColonSpace, v, protocol::kCrlf);
+    }
+    absl::StrAppend(&response, protocol::kCrlf);
+    return response;
+}
+
+absl::flat_hash_map<std::string, std::string> BuildChunkedStreamHeaders() {
+    return {
+        {std::string(headers::kContentType), std::string(mime::kApplicationOctetStream)},
+        {std::string(headers::kTransferEncoding), "chunked"},
+    };
+}
+
+absl::flat_hash_map<std::string, std::string> BuildGrpcWebStreamHeaders() {
+    return {
+        {std::string(headers::kContentType), std::string(mime::kApplicationGrpcWebProto)},
+        {std::string(headers::kAccessControlExposeHeaders),
+         "grpc-status, grpc-message, grpc-status-details-bin"},
+        {std::string(headers::kCacheControl), "no-cache, no-store, max-age=0, must-revalidate"},
+        {std::string(headers::kTransferEncoding), "chunked"},
+        {std::string(headers::kAccessControlAllowOrigin), "http://localhost:8080"},
+        {std::string(headers::kAccessControlAllowCredentials), std::string(protocol::kTrue)},
+        {std::string(headers::kVary), "Origin"},
+    };
+}
+
+void BmFormatStreamingHeadersChunkedBaseline(benchmark::State& state) {
+    const auto headers = BuildChunkedStreamHeaders();
+    for (auto _ : state) {
+        bool is_chunked = false;
+        std::string wire = LegacyFormatStreamingHeaders(headers, 200, &is_chunked);
+        benchmark::DoNotOptimize(wire);
+        benchmark::DoNotOptimize(is_chunked);
+    }
+}
+BENCHMARK(BmFormatStreamingHeadersChunkedBaseline);
+
+void BmFormatStreamingHeadersChunked(benchmark::State& state) {
+    const auto headers = BuildChunkedStreamHeaders();
+    for (auto _ : state) {
+        bool is_chunked = false;
+        std::string wire = internal::FormatStreamingHeaders(headers, 200, &is_chunked);
+        benchmark::DoNotOptimize(wire);
+        benchmark::DoNotOptimize(is_chunked);
+    }
+}
+BENCHMARK(BmFormatStreamingHeadersChunked);
+
+void BmFormatStreamingHeadersGrpcWebCorsBaseline(benchmark::State& state) {
+    const auto headers = BuildGrpcWebStreamHeaders();
+    for (auto _ : state) {
+        bool is_chunked = false;
+        std::string wire = LegacyFormatStreamingHeaders(headers, 200, &is_chunked);
+        benchmark::DoNotOptimize(wire);
+        benchmark::DoNotOptimize(is_chunked);
+    }
+}
+BENCHMARK(BmFormatStreamingHeadersGrpcWebCorsBaseline);
+
+void BmFormatStreamingHeadersGrpcWebCors(benchmark::State& state) {
+    const auto headers = BuildGrpcWebStreamHeaders();
+    for (auto _ : state) {
+        bool is_chunked = false;
+        std::string wire = internal::FormatStreamingHeaders(headers, 200, &is_chunked);
+        benchmark::DoNotOptimize(wire);
+        benchmark::DoNotOptimize(is_chunked);
+    }
+}
+BENCHMARK(BmFormatStreamingHeadersGrpcWebCors);
+
+// Baseline reproduction of the previous HttpSession::Reset() implementation:
+// unconditionally constructed a shared_from_this() closure for PostOrRun(),
+// called absl::flat_hash_map::clear() even when headers_ was already empty
+// (which walks control bytes when capacity > 1), and read absl::Now() even
+// when no AccessLogger was configured.
+struct LegacyHttpSessionResetState
+        : public std::enable_shared_from_this<LegacyHttpSessionResetState> {
+    absl::Mutex close_cb_mutex;
+    std::function<void()> on_client_closed;
+    std::string request_path;
+    HttpRequest::HeaderMap request_headers;
+    std::string request_body;
+    bool request_keep_alive = true;
+    std::string current_header_field;
+    std::string current_header_value;
+    size_t current_headers_bytes = 0;
+    int header_state = 0;
+    bool payload_too_large = false;
+    bool error_occurred = false;
+    AccessLogger access_logger;
+    absl::Time request_start_time = absl::InfinitePast();
+
+    LegacyHttpSessionResetState() {
+        // Simulate a Keep-Alive session that has already parsed a typical
+        // request so request_headers has an allocated backing table, matching
+        // BmHttpSessionReset's steady-state Keep-Alive session.
+        request_headers.emplace("host", "127.0.0.1:8554");
+        request_headers.emplace("user-agent", "grpc-web-javascript/0.1");
+        request_headers.emplace("accept", "application/grpc-web+proto");
+        request_headers.emplace("x-grpc-web", "1");
+        request_headers.clear();
+    }
+
+    template <typename F>
+    static void PostOrRunLoop(bool on_loop_thread, F&& fn) {
+        if (!on_loop_thread) {
+            return;
+        }
+        fn();
+    }
+
+    ABSL_ATTRIBUTE_NOINLINE void ResetBaseline() {
+        PostOrRunLoop(/*on_loop_thread=*/true, [self = shared_from_this()]() {
+            {
+                const absl::MutexLock lock(&self->close_cb_mutex);
+                self->on_client_closed = nullptr;
+            }
+            self->request_path.clear();
+            self->request_headers.clear();
+            self->request_body.clear();
+            self->request_keep_alive = true;
+            self->current_header_field.clear();
+            self->current_header_value.clear();
+            self->current_headers_bytes = 0;
+            self->header_state = 0;
+            self->payload_too_large = false;
+            self->error_occurred = false;
+            self->request_start_time = absl::Now();
+        });
+    }
+};
+
+void BmHttpSessionResetBaseline(benchmark::State& state) {
+    auto session_state = std::make_shared<LegacyHttpSessionResetState>();
+    for (auto _ : state) {
+        session_state->ResetBaseline();
+        benchmark::DoNotOptimize(session_state.get());
+    }
+}
+BENCHMARK(BmHttpSessionResetBaseline);
+
+void BmHttpSessionReset(benchmark::State& state) {
+    HttpRouter router;
+    router.AddRoute(HttpMethod::kGet, "/healthz", [](const HttpRequest&) {
+        return HttpResponse::String("ok", 200, "text/plain");
+    });
+    auto session = HttpSession::Create(/*socket=*/nullptr, /*loop=*/nullptr, &router);
+    // Warm up the session with one Keep-Alive request so current_request_.headers_
+    // has an allocated backing table, matching a steady-state Keep-Alive connection.
+    constexpr std::string_view kWarmupRequest =
+            "GET /healthz HTTP/1.1\r\n"
+            "Host: 127.0.0.1:8554\r\n"
+            "User-Agent: grpc-web-javascript/0.1\r\n"
+            "Accept: application/grpc-web+proto\r\n"
+            "X-Grpc-Web: 1\r\n\r\n";
+    session->OnDataReceived(kWarmupRequest);
+
+    for (auto _ : state) {
+        session->Reset();
+        benchmark::DoNotOptimize(session.get());
+    }
+}
+BENCHMARK(BmHttpSessionReset);
+
+// ---------------------------------------------------------------------------
+// 8. HttpSession CommitCurrentHeader (single-lookup try_emplace vs find+emplace)
+// ---------------------------------------------------------------------------
+
+constexpr std::array<std::pair<std::string_view, std::string_view>, 8> kSampleRequestHeaders = {{
+    {"Host", "127.0.0.1:8554"},
+    {"User-Agent", "grpc-web-javascript/0.1"},
+    {"Accept", "application/grpc-web-text+proto"},
+    {"Content-Type", "application/grpc-web-text+proto"},
+    {"Content-Length", "128"},
+    {"Origin", "http://localhost:3000"},
+    {"X-Grpc-Web", "1"},
+    {"X-Android-Emulator-Session", "emulator-5554"},
+}};
+
+inline void CommitHeaderBaseline(HttpRequest::HeaderMap& headers, std::string& field,
+                                 std::string& value) {
+    auto it = headers.find(field);
+    if (it != headers.end()) {
+        it->second.append(", ").append(value);
+    } else {
+        headers.emplace(std::move(field), std::move(value));
+    }
+}
+
+void BmCommitHeadersBaseline(benchmark::State& state) {
+    HttpRequest::HeaderMap headers;
+    headers.reserve(kSampleRequestHeaders.size());
+    std::string field;
+    std::string value;
+    for (auto _ : state) {
+        headers.clear();
+        for (const auto& [name, val] : kSampleRequestHeaders) {
+            field.assign(name.data(), name.size());
+            value.assign(val.data(), val.size());
+            CommitHeaderBaseline(headers, field, value);
+            field.clear();
+            value.clear();
+        }
+        benchmark::DoNotOptimize(headers);
+    }
+}
+BENCHMARK(BmCommitHeadersBaseline);
+
+void BmCommitHeaders(benchmark::State& state) {
+    HttpRequest::HeaderMap headers;
+    headers.reserve(kSampleRequestHeaders.size());
+    std::string field;
+    std::string value;
+    for (auto _ : state) {
+        headers.clear();
+        for (const auto& [name, val] : kSampleRequestHeaders) {
+            field.assign(name.data(), name.size());
+            value.assign(val.data(), val.size());
+            auto [it, inserted] = headers.try_emplace(std::move(field), std::move(value));
+            if (!inserted) {
+                it->second.append(", ").append(value);
+            }
+            field.clear();
+            value.clear();
+        }
+        benchmark::DoNotOptimize(headers);
+    }
+}
+BENCHMARK(BmCommitHeaders);
 
 }  // namespace
 }  // namespace goldfish::http

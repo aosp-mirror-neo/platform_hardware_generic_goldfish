@@ -64,6 +64,14 @@ extern "C" const char* __tsan_default_suppressions() {
             // (__release_weak, lock) is invisible and freeing the block after
             // the last weak_ptr is misreported as a race.
             "race:__on_zero_shared_weak\n"
+            // Lavapipe's (@mesa3d//:vulkan_lvp) lp_fence_signalled() polls
+            // fence->count == fence->rank without locking fence->mutex before
+            // lp_fence_destroy() destroys fence->mutex and fence->signalled,
+            // and util_queue_thread_func() destroys a stack pthread_barrier_t
+            // after pthread_barrier_wait() returns PTHREAD_BARRIER_SERIAL_THREAD
+            // (b/573994192, b/579559759).
+            "race:lp_fence_destroy\n"
+            "race:util_queue_thread_func\n"
             "race:cuttlefish::NetworkService::isRadioOff\n";
 }
 #endif

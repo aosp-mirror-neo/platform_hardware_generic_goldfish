@@ -67,50 +67,6 @@ struct FakeEvDevEvent {
 };
 
 /**
- * @brief Represents a fake mouse event.
- *
- * This struct is used to store information about a simulated mouse event.
- */
-struct FakeMouseEvent {
-    /**
-     * @brief The x-coordinate of the mouse event.
-     */
-    int x;
-    /**
-     * @brief The y-coordinate of the mouse event.
-     */
-    int y;
-    /**
-     * @brief The button mask of the mouse event.
-     */
-    int button_mask;
-};
-
-/**
- * @brief Represents a fake multi-touch event.
- *
- * This struct is used to store information about a simulated multi-touch event.
- */
-struct FakeMultiTouchEvent {
-    /**
-     * @brief The slot of the multi-touch event.
-     */
-    uint8_t slot;
-    /**
-     * @brief The x-coordinate of the multi-touch event.
-     */
-    int x;
-    /**
-     * @brief The y-coordinate of the multi-touch event.
-     */
-    int y;
-    /**
-     * @brief The type of the multi-touch event.
-     */
-    MultiTouchType type;
-};
-
-/**
  * @brief A fake implementation of the PixmanDisplay class.
  *
  * This class is used for testing purposes and simulates a PixmanDisplay.
@@ -133,23 +89,6 @@ struct FakePixmanDisplay : public PixmanDisplay {
      */
     ~FakePixmanDisplay() override;
 
-    /**
-     * @brief Sends a simulated multi-touch event.
-     *
-     * @param slot The slot of the multi-touch event.
-     * @param x The x-coordinate of the multi-touch event.
-     * @param y The y-coordinate of the multi-touch event.
-     * @param type The type of the multi-touch event.
-     */
-    void SendMultiTouchEvent(uint8_t slot, int x, int y, MultiTouchType type) override;
-    /**
-     * @brief Sends a simulated mouse event.
-     *
-     * @param x The x-coordinate of the mouse event.
-     * @param y The y-coordinate of the mouse event.
-     * @param button_mask The button mask of the mouse event.
-     */
-    void SendMouseEvent(int x, int y, int button_mask) override;
     /**
      * @brief Sends a simulated evdev event.
      *
@@ -218,10 +157,7 @@ struct FakePixmanDisplay : public PixmanDisplay {
     std::pair<int, int> ResizeKeepAspectRatio(int desired_width, int desired_height) override
             ABSL_LOCKS_EXCLUDED(hook_mutex_);
 
-    std::vector<FakeEvDevEvent> evdevs;        ///< A list of simulated evdev events.
-    std::vector<FakeMouseEvent> mouse_events;  ///< A list of simulated mouse events.
-    std::vector<FakeMultiTouchEvent>
-            multi_touch_events;  ///< A list of simulated multi-touch events.
+    std::vector<FakeEvDevEvent> evdevs;  ///< A list of simulated evdev events.
     /// Each simulated evdev report, ending with SYN_REPORT.
     std::vector<std::vector<FakeEvDevEvent>> evdev_reports;
     /// Whether the simulated guest input driver is active.

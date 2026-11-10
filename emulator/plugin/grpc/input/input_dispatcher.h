@@ -14,6 +14,7 @@
 #pragma once
 
 #include <atomic>
+#include <bitset>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -33,9 +34,9 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 
-#include "android/base/clock.h"
 #include "contact_table.h"
 #include "goldfish/async/event_loop.h"
+#include "goldfish/system/steady_clock.h"
 #include "input_dispatcher_interface.h"
 #include "input_service.pb.h"
 #include "keyboard_sink.h"
@@ -93,14 +94,15 @@ class InputDispatcher final : public IInputDispatcher {
     /**
      * @brief Constructs an `InputDispatcher` running on `loop`.
      * @param keyboard Receives keys and text; null until `InstallKeyboardSink()`.
-     * @param clock Stamps `dispatched_at_nanos` from its realtime clock.
+     * @param clock Stamps `dispatched_at_nanos` from the host monotonic clock.
      * @param max_pending_per_session The operations a session may have posted
      *     but not yet run; `Dispatch*()` rejects more. Bounds the loop's queue
      *     while it is stalled, for example by a snapshot save.
      */
     InputDispatcher(::goldfish::async::EventLoop& loop, TouchDevices& devices,
                     KeyboardSink* keyboard, KeyCodeResolver resolve_key_code,
-                    ::android::base::IClock* clock = &::android::base::IClock::Get(),
+                    const ::goldfish::system::SteadyClock& clock =
+                            ::goldfish::system::SteadyClock::GetRealClock(),
                     size_t max_pending_per_session = kDefaultMaxPendingPerSession);
     /** @brief Calls `Shutdown()`. */
     ~InputDispatcher() override;
@@ -119,6 +121,39 @@ class InputDispatcher final : public IInputDispatcher {
      *     dispatcher was built without one, and only once.
      */
     void InstallKeyboardSink(KeyboardSink& keyboard);
+
+    /**
+     * @brief Releases all touch slots on every active device, resets the
+     * keyboard (which releases the keys it holds), clears held contacts and
+     * keys, and reports their synthesized `CANCEL` and `KEY_ACTION_UP`
+     * activities.
+     *
+     * Call once the VM is running again after a snapshot load, so contacts or
+     * keys restored from the snapshot or held by sessions are released.
+     *
+     * Applied on the loop. After `Shutdown()`, posts nothing.
+     */
+    void OnSnapshotLoaded();
+
+    /**
+     * @brief Cancels any slots left down on `device`'s guest touch device from
+     * a prior `OnDisplayRemoved()` if its driver has not reset since. Call when
+     * a display is added.
+     *
+     * Applied on the loop. After `Shutdown()`, posts nothing.
+     */
+    void OnDisplayAdded(TouchDeviceId device);
+
+    /**
+     * @brief Clears all contacts on `device` without writing to it, and reports
+     * their synthesized `CANCEL` activities. Call when a display is removed.
+     *
+     * Slots held on `device` are remembered and cancelled on the guest if
+     * `device` becomes active again without a driver reset.
+     *
+     * Applied on the loop. After `Shutdown()`, posts nothing.
+     */
+    void OnDisplayRemoved(TouchDeviceId device);
 
     /** @brief Callbacks run on the delivery thread. */
     ActivityEventSource& activity() override { return activity_events_; }
@@ -187,6 +222,32 @@ class InputDispatcher final : public IInputDispatcher {
         absl::Mutex mutex;
         InputDispatcher* dispatcher ABSL_GUARDED_BY(mutex);
     };
+    struct StaleDeviceSlots {
+        uint64_t generation = 0;
+        std::bitset<kTouchDeviceSlots> slots;
+        bool has_stylus_keys = false;
+    };
+    struct Session {
+        SessionOptions options;
+        // Bumped by every operation of the session. The idle timer fires for
+        // the generation it was armed with; a firing for an older one is stale.
+        uint64_t idle_generation = 0;
+        // The generation the armed timer fires for. Recorded in loop order
+        // after Timer::Schedule(), which arms from a loop task of its own.
+        uint64_t armed_generation = 0;
+        // Armed while the session holds input and has a positive idle_timeout.
+        // Never self-cancels, so Schedule() can re-arm it.
+        ::goldfish::async::EventLoop::ScopedTimer idle_timer;
+    };
+    // Shared with the idle-timer callbacks and the tasks they need in loop
+    // order, which may still run after the dispatcher is gone: once Shutdown()
+    // clears `dispatcher`, they do nothing, and Shutdown() waits for one that
+    // is running.
+    struct TimerGate {
+        explicit TimerGate(InputDispatcher* owner) : dispatcher(owner) {}
+        absl::Mutex mutex;
+        InputDispatcher* dispatcher ABSL_GUARDED_BY(mutex);
+    };
 
     void ShutdownOnce() ABSL_LOCKS_EXCLUDED(pending_mutex_, outbox_mutex_);
     void OnDeviceActiveChanged() ABSL_LOCKS_EXCLUDED(pending_mutex_);
@@ -219,11 +280,40 @@ class InputDispatcher final : public IInputDispatcher {
     // to, lifting them as `action` (CANCEL or HOVER_EXIT) does.
     absl::Status CancelOnDisplay(InputSessionId session, int32_t source_id, int32_t display_id,
                                  ::android::emulation::v2::PointerAction action);
+    // Updates `stylus_contacts_[device]` for `key` and appends its contact
+    // events (preceded by a stylus key reset when switching off stylus/eraser).
+    void RecordContactDownOrMove(TouchDeviceId device, const ContactKey& key,
+                                 const ::android::emulation::v2::PointerEvent::Pointer& pointer,
+                                 ::android::emulation::v2::PointerAction action, int slot,
+                                 bool new_contact,
+                                 ::android::emulation::control::EvDevEvents& events);
+    // Removes `key` from `stylus_contacts_[device]`. @return Whether `key` was
+    // the last stylus/eraser contact on `device`, requiring a stylus key reset.
+    bool EraseStylusContact(TouchDeviceId device, const ContactKey& key);
+    bool SessionHasHeldInput(InputSessionId session) const;
+    // Arms the idle timer of `session` for its current operation, if it has
+    // a positive idle_timeout and holds input.
+    void RefreshIdleTimer(InputSessionId session);
+    // Records that the idle timer of `session` fires for `generation`.
+    void ArmIdleGeneration(InputSessionId session, uint64_t generation);
+    // Releases the held input of `session` if no operation ran since the
+    // timer was armed.
+    void OnIdleTimer(InputSessionId session);
+    // Releases the contacts and keys `session` holds, reporting their
+    // synthesized CANCEL and KEY_ACTION_UP, and keeps the session open.
+    void ReleaseSessionInput(InputSessionId session);
     void ReleaseSession(InputSessionId session);
+    void ResetAfterSnapshotLoad();
+    // Cancels slots left down on `device` by OnDisplayRemoved() if `sink` is
+    // still on the same driver generation.
+    void FlushStaleSlots(TouchDeviceId device, TouchDeviceSink& sink);
     // Clears the contacts of each device whose guest driver went active or
     // inactive since the dispatcher recorded its generation, as the guest
     // forgot them, and reports their synthesized CANCELs. Writes nothing.
     void ResyncDevices();
+    // Notifies each affected session's `reset_tracker` once per `(session,
+    // display_id)` when a device removal or driver reset clears contacts.
+    void RecordDisplayResets(const ReleasedContacts& released);
     // Reports a synthesized CANCEL per session and requested display of
     // `released`, whose sessions must be open.
     void ReportCancels(const ReleasedContacts& released) ABSL_LOCKS_EXCLUDED(outbox_mutex_);
@@ -240,12 +330,13 @@ class InputDispatcher final : public IInputDispatcher {
     ::goldfish::async::EventLoop& loop_;
     TouchDevices& devices_;
     const KeyCodeResolver resolve_key_code_;
-    ::android::base::IClock* const clock_;
+    const ::goldfish::system::SteadyClock& clock_;
     const size_t max_pending_per_session_;
     std::atomic<InputSessionId> next_session_{1};
     absl::once_flag shutdown_once_;
     const std::shared_ptr<ActiveGate> active_gate_;
     ScopedActiveChangedListener devices_active_subscription_;
+    const std::shared_ptr<TimerGate> timer_gate_;
 
     mutable absl::Mutex pending_mutex_;
     bool shut_down_ ABSL_GUARDED_BY(pending_mutex_) = false;
@@ -256,15 +347,20 @@ class InputDispatcher final : public IInputDispatcher {
     // Loop-only state.
     KeyboardSink* keyboard_;
     ContactTable contacts_;
-    absl::flat_hash_map<InputSessionId, SessionOptions> sessions_;
+    absl::flat_hash_map<InputSessionId, Session> sessions_;
+    // Held contacts on each device whose last update emitted stylus/eraser EV_KEYs.
+    absl::flat_hash_map<TouchDeviceId, absl::flat_hash_set<ContactKey>> stylus_contacts_;
     // The sessions holding each pressed evdev code.
     absl::flat_hash_map<uint32_t, absl::flat_hash_set<InputSessionId>> key_holders_;
     // The active generation of each device written to, as of the first write
     // or the last resync; see ResyncDevices().
     absl::flat_hash_map<TouchDeviceId, uint64_t> active_generations_;
+    // Slots held on a removed display's permanent virtio-input device, to be
+    // cancelled if the display is recreated without a guest driver reset.
+    absl::flat_hash_map<TouchDeviceId, StaleDeviceSlots> stale_slots_;
     // When the activity of the running Dispatch*() operation, which reports
     // at most one, was stamped; unset until it reports it.
-    std::optional<absl::Time> reported_at_;
+    std::optional<absl::Duration> reported_at_;
 
     ActivityEventSource activity_events_;
     absl::Mutex outbox_mutex_;

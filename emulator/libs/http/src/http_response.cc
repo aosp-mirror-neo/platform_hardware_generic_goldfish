@@ -13,14 +13,33 @@
 // limitations under the License.
 #include "goldfish/http/http_response.h"
 
+#include <cstddef>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <utility>
 
-#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 
 namespace goldfish::http {
+namespace {
+
+inline char* AppendPiece(char* dst, std::string_view piece) noexcept {
+    if (!piece.empty()) {
+        std::memcpy(dst, piece.data(), piece.size());
+        dst += piece.size();
+    }
+    return dst;
+}
+
+inline char* AppendHeaderLine(char* dst, std::string_view name, std::string_view value) noexcept {
+    dst = AppendPiece(dst, name);
+    dst = AppendPiece(dst, protocol::kColonSpace);
+    dst = AppendPiece(dst, value);
+    return AppendPiece(dst, protocol::kCrlf);
+}
+
+}  // namespace
 
 std::string_view HttpStatusToReason(HttpStatus status) {
     return HttpStatusToReason(static_cast<int>(status));
@@ -204,37 +223,70 @@ HttpResponse& HttpResponse::WithContentType(std::string_view content_type) {
 }
 
 std::string HttpResponse::FormatWireResponse(bool keep_alive, bool is_head_request) const {
-    std::string response;
-    response.reserve(body_.size() + 256);
-    absl::StrAppend(&response, protocol::kHttp11, protocol::kSpace, status_, protocol::kSpace,
-                    HttpStatusToReason(status_), protocol::kCrlf);
+    const absl::AlphaNum status_num(status_);
+    const std::string_view reason = HttpStatusToReason(status_);
 
     bool has_content_length = false;
     bool has_connection = false;
+    size_t headers_size = 0;
 
     for (const auto& [name, value] : headers_) {
-        absl::StrAppend(&response, name, protocol::kColonSpace, value, protocol::kCrlf);
-        if (absl::EqualsIgnoreCase(name, headers::kContentLength)) {
+        headers_size +=
+                name.size() + protocol::kColonSpace.size() + value.size() + protocol::kCrlf.size();
+        if (CaseInsensitiveStringEq{}(name, headers::kContentLength)) {
             has_content_length = true;
-        }
-        if (absl::EqualsIgnoreCase(name, headers::kConnection)) {
+        } else if (CaseInsensitiveStringEq{}(name, headers::kConnection)) {
             has_connection = true;
         }
     }
 
-    bool forbids_content_length = (status_ >= 100 && status_ < 200) || status_ == 204;
-    if (!has_content_length && !forbids_content_length) {
-        absl::StrAppend(&response, headers::kContentLength, protocol::kColonSpace, body_.size(),
-                        protocol::kCrlf);
-    }
-    if (!has_connection) {
-        absl::StrAppend(&response, headers::kConnection, protocol::kColonSpace,
-                        keep_alive ? protocol::kKeepAlive : protocol::kClose, protocol::kCrlf);
+    const bool forbids_content_length = (status_ >= 100 && status_ < 200) || status_ == 204;
+    const bool emit_content_length = !has_content_length && !forbids_content_length;
+    const absl::AlphaNum content_length_num(body_.size());
+    if (emit_content_length) {
+        headers_size += headers::kContentLength.size() + protocol::kColonSpace.size() +
+                        content_length_num.size() + protocol::kCrlf.size();
     }
 
-    absl::StrAppend(&response, protocol::kCrlf);
-    if (!is_head_request && status_ != 204 && status_ != 304 && (status_ < 100 || status_ >= 200)) {
-        absl::StrAppend(&response, body_);
+    const std::string_view connection_value = keep_alive ? protocol::kKeepAlive : protocol::kClose;
+    if (!has_connection) {
+        headers_size += headers::kConnection.size() + protocol::kColonSpace.size() +
+                        connection_value.size() + protocol::kCrlf.size();
+    }
+
+    const bool include_body = !is_head_request && status_ != 204 && status_ != 304 &&
+                              (status_ < 100 || status_ >= 200);
+    const size_t header_section_size = protocol::kHttp11.size() + protocol::kSpace.size() +
+                                       status_num.size() + protocol::kSpace.size() + reason.size() +
+                                       protocol::kCrlf.size() + headers_size +
+                                       protocol::kCrlf.size();
+    const size_t total_size = header_section_size + (include_body ? body_.size() : 0);
+
+    std::string response;
+    response.reserve(total_size);
+    response.resize(header_section_size);
+    char* cursor = response.data();
+
+    cursor = AppendPiece(cursor, protocol::kHttp11);
+    cursor = AppendPiece(cursor, protocol::kSpace);
+    cursor = AppendPiece(cursor, status_num.Piece());
+    cursor = AppendPiece(cursor, protocol::kSpace);
+    cursor = AppendPiece(cursor, reason);
+    cursor = AppendPiece(cursor, protocol::kCrlf);
+
+    for (const auto& [name, value] : headers_) {
+        cursor = AppendHeaderLine(cursor, name, value);
+    }
+    if (emit_content_length) {
+        cursor = AppendHeaderLine(cursor, headers::kContentLength, content_length_num.Piece());
+    }
+    if (!has_connection) {
+        cursor = AppendHeaderLine(cursor, headers::kConnection, connection_value);
+    }
+    AppendPiece(cursor, protocol::kCrlf);
+
+    if (include_body && !body_.empty()) {
+        response.append(body_);
     }
     return response;
 }

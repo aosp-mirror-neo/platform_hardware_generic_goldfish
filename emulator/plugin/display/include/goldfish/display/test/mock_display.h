@@ -27,9 +27,6 @@ class MockDisplay : public IDisplay {
             : IDisplay(loop, id, width, height) {}
     MOCK_METHOD(absl::StatusOr<FrameInfo>, GetPixels,
                 (PixelFormat, int, int, ImageRotation, uint8_t*, size_t*), (const, override));
-    MOCK_METHOD(void, SendMultiTouchEvent, (uint8_t slot, int x, int y, MultiTouchType type),
-                (override));
-    MOCK_METHOD(void, SendMouseEvent, (int x, int y, int button_mask), (override));
     MOCK_METHOD(void, SendEvDevEvent, (uint16_t type, uint16_t code, uint32_t value), (override));
     MOCK_METHOD(void, SendEvDevReport, (EvDevEvents events), (override));
     MOCK_METHOD(void, WriteEvDevReportOnLoop, (absl::Span<const EvDevEvent> events), (override));

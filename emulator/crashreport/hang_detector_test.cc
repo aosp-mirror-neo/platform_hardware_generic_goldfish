@@ -25,11 +25,11 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/synchronization/notification.h"
 #include "absl/time/clock.h"
+#include "absl/time/simulated_clock.h"
 #include "absl/time/time.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
-#include "android/base/testing/test_clock.h"
 #include "android/crashreport/debug.h"
 #include "goldfish/async/libuv_event_loop.h"
 #include "goldfish/async/testing/test_event_loop.h"
@@ -40,8 +40,6 @@ namespace android::crashreport {
 class HangDetectorTest : public ::testing::Test {
   public:
     HangDetectorTest() {
-        auto clock = std::make_unique<android::base::TestClock>();
-        mTestClock = clock.get();
         mHangDetector = HangDetector::Create(
                 [this](std::string_view msg) {
                     if (!mNotify.HasBeenNotified()) {
@@ -53,7 +51,7 @@ class HangDetectorTest : public ::testing::Test {
                     .hang_loop_iteration_timeout = absl::Milliseconds(5),
                     .hang_check_timeout = absl::Milliseconds(1000),
                 },
-                std::move(clock));
+                mTestClock);
     }
 
     void TearDown() override {
@@ -68,7 +66,7 @@ class HangDetectorTest : public ::testing::Test {
 
   protected:
     const HangDetector::ActivePredicate mAlwaysActive = [] { return true; };
-    android::base::TestClock* mTestClock = nullptr;
+    absl::SimulatedClock mTestClock;
     std::string mHangMessage;
     absl::Notification mNotify;
     std::unique_ptr<HangDetector> mHangDetector;
@@ -110,7 +108,7 @@ TEST_F(HangDetectorTest, BlockedLoopTriggersHang) {
     // 1st advance: initial looper check (reschedules with task running)
     auto end_time = absl::Now() + absl::Seconds(5);
     while (!mNotify.HasBeenNotified() && absl::Now() < end_time) {
-        mTestClock->Advance(absl::Milliseconds(100));
+        mTestClock.AdvanceTime(absl::Milliseconds(100));
         absl::SleepFor(absl::Milliseconds(10));
     }
     ASSERT_TRUE(wait_for_hang(absl::Seconds(10)));
@@ -139,7 +137,7 @@ TEST_F(HangDetectorTest, BlockedLoopIgnoredWhenVmStopped) {
 
     // Advance clock past the hang timeout repeatedly
     for (int i = 0; i < 20; ++i) {
-        mTestClock->Advance(absl::Milliseconds(100));
+        mTestClock.AdvanceTime(absl::Milliseconds(100));
         absl::SleepFor(absl::Milliseconds(10));
     }
 
@@ -167,7 +165,7 @@ TEST_F(HangDetectorTest, HangCheckSuspendedAndResetAcrossSaveVmTransition) {
 
     // Advance clock by 10 seconds during SAVE_VM (> 2x 1s timeout)
     for (int i = 0; i < 20; ++i) {
-        mTestClock->Advance(absl::Milliseconds(500));
+        mTestClock.AdvanceTime(absl::Milliseconds(500));
         absl::SleepFor(absl::Milliseconds(5));
     }
     EXPECT_FALSE(mNotify.HasBeenNotified());
@@ -179,7 +177,7 @@ TEST_F(HangDetectorTest, HangCheckSuspendedAndResetAcrossSaveVmTransition) {
     // false and hang_count_ = 0, resuming starts a fresh check and must NOT fire a false-positive
     // crash!
     for (int i = 0; i < 5; ++i) {
-        mTestClock->Advance(absl::Milliseconds(100));
+        mTestClock.AdvanceTime(absl::Milliseconds(100));
         absl::SleepFor(absl::Milliseconds(5));
     }
     EXPECT_FALSE(mNotify.HasBeenNotified());
@@ -206,7 +204,7 @@ TEST_F(HangDetectorTest, ResumedVmDetectsSubsequentHang) {
     // Advance clock until hang is detected
     auto end_time = absl::Now() + absl::Seconds(5);
     while (!mNotify.HasBeenNotified() && absl::Now() < end_time) {
-        mTestClock->Advance(absl::Milliseconds(100));
+        mTestClock.AdvanceTime(absl::Milliseconds(100));
         absl::SleepFor(absl::Milliseconds(10));
     }
     ASSERT_TRUE(wait_for_hang(absl::Seconds(10)));
@@ -235,8 +233,7 @@ TEST_F(HangDetectorTest, NoHangCallbackDeadlockWhenRemovingLooper) {
         remove_completed.Notify();
     });
 
-    auto test_clock = std::make_unique<android::base::TestClock>();
-    auto* clock_ptr = test_clock.get();
+    absl::SimulatedClock test_clock;
 
     // Create a HangDetector where the hang callback triggers asynchronous looper removal.
     auto hang_detector = HangDetector::Create(
@@ -249,7 +246,7 @@ TEST_F(HangDetectorTest, NoHangCallbackDeadlockWhenRemovingLooper) {
                 .hang_loop_iteration_timeout = absl::Milliseconds(5),
                 .hang_check_timeout = absl::Milliseconds(100),
             },
-            std::move(test_clock));
+            test_clock);
 
     hang_detector->AddWatchedLooper("test loop", *event_loop, absl::Milliseconds(100),
                                     mAlwaysActive);
@@ -261,7 +258,7 @@ TEST_F(HangDetectorTest, NoHangCallbackDeadlockWhenRemovingLooper) {
     // 1st advance: initial check
     auto end_time = absl::Now() + absl::Seconds(5);
     while (!hang_cb_called.HasBeenNotified() && absl::Now() < end_time) {
-        clock_ptr->Advance(absl::Milliseconds(20));
+        test_clock.AdvanceTime(absl::Milliseconds(20));
         absl::SleepFor(absl::Milliseconds(5));
     }
     ASSERT_TRUE(hang_cb_called.WaitForNotificationWithTimeout(absl::Seconds(10)));
@@ -354,7 +351,7 @@ TEST_F(HangDetectorTest, PausedEventLoopIsIgnored) {
                                     mAlwaysActive);
 
     for (int i = 0; i < 20; ++i) {
-        mTestClock->Advance(absl::Milliseconds(100));
+        mTestClock.AdvanceTime(absl::Milliseconds(100));
         absl::SleepFor(absl::Milliseconds(10));
     }
 
@@ -374,7 +371,7 @@ TEST_F(HangDetectorTest, PauseAndResumeEventLoopResetsInFlightCheckAndDetectsSub
 
     // Advance clock by 10s (> 2x 1s timeout) while paused.
     for (int i = 0; i < 20; ++i) {
-        mTestClock->Advance(absl::Milliseconds(500));
+        mTestClock.AdvanceTime(absl::Milliseconds(500));
         absl::SleepFor(absl::Milliseconds(5));
     }
     EXPECT_FALSE(mNotify.HasBeenNotified());
@@ -383,7 +380,7 @@ TEST_F(HangDetectorTest, PauseAndResumeEventLoopResetsInFlightCheckAndDetectsSub
     // check, resuming must start a fresh check rather than firing a false-positive hang.
     event_loop->Resume();
     for (int i = 0; i < 5; ++i) {
-        mTestClock->Advance(absl::Milliseconds(100));
+        mTestClock.AdvanceTime(absl::Milliseconds(100));
         absl::SleepFor(absl::Milliseconds(5));
     }
     EXPECT_FALSE(mNotify.HasBeenNotified());
@@ -391,7 +388,7 @@ TEST_F(HangDetectorTest, PauseAndResumeEventLoopResetsInFlightCheckAndDetectsSub
     // Continue advancing the clock while the resumed loop does not advance its timers.
     auto end_time = absl::Now() + absl::Seconds(5);
     while (!mNotify.HasBeenNotified() && absl::Now() < end_time) {
-        mTestClock->Advance(absl::Milliseconds(100));
+        mTestClock.AdvanceTime(absl::Milliseconds(100));
         absl::SleepFor(absl::Milliseconds(10));
     }
     ASSERT_TRUE(wait_for_hang(absl::Seconds(10)));
@@ -406,7 +403,7 @@ TEST_F(HangDetectorTest, NotStartedEventLoopIsIgnored) {
     mHangDetector->AddWatchedLooper("unstarted loop", *event_loop, absl::Seconds(1), mAlwaysActive);
 
     for (int i = 0; i < 20; ++i) {
-        mTestClock->Advance(absl::Milliseconds(100));
+        mTestClock.AdvanceTime(absl::Milliseconds(100));
         absl::SleepFor(absl::Milliseconds(10));
     }
 
@@ -424,10 +421,10 @@ class PredicateStepSynchronizer {
         return ++evaluations_;
     }
 
-    bool AdvanceAndWaitForEvaluation(android::base::TestClock* clock, int target_evaluations,
+    bool AdvanceAndWaitForEvaluation(absl::SimulatedClock* clock, int target_evaluations,
                                      absl::Duration step = absl::Seconds(1),
                                      absl::Duration timeout = absl::Seconds(10)) {
-        clock->Advance(step);
+        clock->AdvanceTime(step);
         const absl::MutexLock l(&mutex_);
         auto reached = [this, target_evaluations]() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
             return evaluations_ >= target_evaluations;
@@ -459,7 +456,7 @@ TEST_F(HangDetectorTest, HealthyPredicateNeverFiresHangCallback) {
     });
 
     for (int step = 1; step <= 3; ++step) {
-        ASSERT_TRUE(sync.AdvanceAndWaitForEvaluation(mTestClock, step));
+        ASSERT_TRUE(sync.AdvanceAndWaitForEvaluation(&mTestClock, step));
     }
     EXPECT_EQ(sync.Evaluations(), 3);
     EXPECT_FALSE(mNotify.HasBeenNotified());
@@ -482,9 +479,9 @@ TEST_F(HangDetectorTest, SinglePredicateFailureDoesNotTriggerHangCallback) {
     });
 
     // 1st check fails (strike 1 of 2), which must not fire the hang callback.
-    ASSERT_TRUE(sync.AdvanceAndWaitForEvaluation(mTestClock, 1));
+    ASSERT_TRUE(sync.AdvanceAndWaitForEvaluation(&mTestClock, 1));
     // 2nd check succeeds, confirming the worker finished processing strike 1 without firing.
-    ASSERT_TRUE(sync.AdvanceAndWaitForEvaluation(mTestClock, 2));
+    ASSERT_TRUE(sync.AdvanceAndWaitForEvaluation(&mTestClock, 2));
     EXPECT_FALSE(mNotify.HasBeenNotified());
 
     mHangDetector->RemovePredicate("single_strike");
@@ -509,11 +506,11 @@ TEST_F(HangDetectorTest, TwoConsecutivePredicateFailuresTriggerHangCallbackWithD
     });
 
     // Strike 1
-    ASSERT_TRUE(sync.AdvanceAndWaitForEvaluation(mTestClock, 1));
+    ASSERT_TRUE(sync.AdvanceAndWaitForEvaluation(&mTestClock, 1));
     EXPECT_FALSE(mNotify.HasBeenNotified());
 
     // Strike 2 triggers hang_callback with the predicate name and status message.
-    mTestClock->Advance(absl::Seconds(1));
+    mTestClock.AdvanceTime(absl::Seconds(1));
     ASSERT_TRUE(wait_for_hang(absl::Seconds(10)));
     EXPECT_THAT(mHangMessage, ::testing::HasSubstr(kPredicateName));
     EXPECT_THAT(mHangMessage, ::testing::HasSubstr(kErrorDetail));
@@ -544,13 +541,13 @@ TEST_F(HangDetectorTest, PredicateRecoveryResetsStrikeCount) {
         return absl::DeadlineExceededError("second consecutive stall after recovery (strike 2)");
     });
 
-    ASSERT_TRUE(sync.AdvanceAndWaitForEvaluation(mTestClock, 1));
-    ASSERT_TRUE(sync.AdvanceAndWaitForEvaluation(mTestClock, 2));
-    ASSERT_TRUE(sync.AdvanceAndWaitForEvaluation(mTestClock, 3));
+    ASSERT_TRUE(sync.AdvanceAndWaitForEvaluation(&mTestClock, 1));
+    ASSERT_TRUE(sync.AdvanceAndWaitForEvaluation(&mTestClock, 2));
+    ASSERT_TRUE(sync.AdvanceAndWaitForEvaluation(&mTestClock, 3));
     EXPECT_FALSE(mNotify.HasBeenNotified());
 
     // Now the second consecutive failure (evaluation 4) triggers the hang callback.
-    mTestClock->Advance(absl::Seconds(1));
+    mTestClock.AdvanceTime(absl::Seconds(1));
     ASSERT_TRUE(wait_for_hang(absl::Seconds(10)));
     EXPECT_THAT(mHangMessage,
                 ::testing::HasSubstr("second consecutive stall after recovery (strike 2)"));
@@ -570,7 +567,7 @@ TEST_F(HangDetectorTest, RemovePredicatePreventsFurtherChecksAndUnregistersClean
     });
 
     // Evaluate once (strike 1), then remove the predicate.
-    ASSERT_TRUE(removed_sync.AdvanceAndWaitForEvaluation(mTestClock, 1));
+    ASSERT_TRUE(removed_sync.AdvanceAndWaitForEvaluation(&mTestClock, 1));
     mHangDetector->RemovePredicate("removable_check");
 
     // Register a probe predicate and advance the clock to prove the worker thread ran a full check
@@ -580,7 +577,7 @@ TEST_F(HangDetectorTest, RemovePredicatePreventsFurtherChecksAndUnregistersClean
         probe_sync.RecordEvaluation();
         return absl::OkStatus();
     });
-    ASSERT_TRUE(probe_sync.AdvanceAndWaitForEvaluation(mTestClock, 1));
+    ASSERT_TRUE(probe_sync.AdvanceAndWaitForEvaluation(&mTestClock, 1));
 
     EXPECT_EQ(removed_sync.Evaluations(), 1);
     EXPECT_FALSE(mNotify.HasBeenNotified());

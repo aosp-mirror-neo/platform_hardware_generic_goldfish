@@ -15,8 +15,10 @@
 
 #pragma once
 
+#include <cstdint>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "absl/synchronization/mutex.h"
@@ -40,6 +42,11 @@ class StudioFileMetricsWriter : public MetricsWriter {
     // that had at least one abandoned file.
     static std::vector<std::string> FinalizeAbandonedSessionFiles(const fs::path& spool_dir);
 
+    // Finalizes all .open files in `spool_dir` written by `(session_id, pid)` after
+    // that child process has exited, without touching other processes' .open files.
+    static void FinalizeProcessFiles(const fs::path& spool_dir, std::string_view session_id,
+                                     uint32_t pid);
+
   private:
     void OpenNextFile();
     void FinalizeCurrentFile();
@@ -49,7 +56,7 @@ class StudioFileMetricsWriter : public MetricsWriter {
     const int pid_;
     int file_counter_{0};
 
-    std::shared_ptr<goldfish::async::EventLoop::Timer> max_file_duration_timer_;
+    goldfish::async::EventLoop::ScopedTimer max_file_duration_timer_;
 
     absl::Mutex mutex_;
     fs::path open_file_path_ ABSL_GUARDED_BY(mutex_);

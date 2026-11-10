@@ -28,7 +28,7 @@ struct UniqueHandle : private Deleter {
         }
     }
 
-    UniqueHandle() : Deleter(typename Deleter::Empty()), value_(kEmpty) {}
+    UniqueHandle() : UniqueHandle(has_empty_tag<Deleter>{}) {}
 
     explicit UniqueHandle(Type value, Deleter d = Deleter())
             : Deleter(std::move(d)), value_(value) {}
@@ -68,6 +68,15 @@ struct UniqueHandle : private Deleter {
     }
 
   private:
+    template <typename T, typename = void>
+    struct has_empty_tag : std::false_type {};  // NOLINT
+
+    template <typename T>
+    struct has_empty_tag<T, std::void_t<typename T::Empty>> : std::true_type {};  // NOLINT
+
+    explicit UniqueHandle(std::true_type) : Deleter(typename Deleter::Empty()) {}
+    explicit UniqueHandle(std::false_type) {}
+
     Type value_ = kEmpty;
 };
 

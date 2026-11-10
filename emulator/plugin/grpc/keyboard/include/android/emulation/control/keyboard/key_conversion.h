@@ -27,6 +27,8 @@ typedef struct QKbdState QKbdState;
 // clang-format on
 }
 
+#include <cstdint>
+#include <ostream>
 #include <string_view>
 #include <vector>
 
@@ -66,6 +68,11 @@ struct QemuKeyEvent {
      * @brief True if the key is pressed (key down), false if released (key up).
      */
     bool down;
+
+    friend bool operator==(const QemuKeyEvent&, const QemuKeyEvent&) = default;
+    friend std::ostream& operator<<(std::ostream& os, const QemuKeyEvent& key) {
+        return os << "{qcode " << key.code << (key.down ? " down}" : " up}");
+    }
 };
 
 /**
@@ -174,6 +181,18 @@ QKeyCode keycode_to_qcode(uint32_t from, KeyCodeType source);
 std::vector<QemuKeyEvent> ascii_to_qcode(unsigned short ascii, bool down);
 
 /**
+ * @brief Returns whether text typing produces key presses for `code_point`.
+ *
+ * `EmitUtf8String()` types only the ASCII code points that `ascii_to_qcode()`
+ * maps to keys: printable ASCII, '\n' (Enter), and '\t' (Tab). Validate text
+ * with this predicate so that validation matches typing.
+ *
+ * @param code_point A Unicode code point.
+ * @return True if `code_point` is typed as US English key presses.
+ */
+bool IsTypeableCodePoint(int32_t code_point);
+
+/**
  * @brief Converts a DOM Code to an evdev keycode.
  *
  * @param key The DOM Code to convert.
@@ -205,6 +224,50 @@ uint32_t keycode_to_evdev(uint32_t from, KeyCodeType source);
  * @return The evdev KEY_* code, or 0 if the keycode is not supported.
  */
 uint32_t android_keycode_to_evdev(int32_t keycode);
+
+/**
+ * @brief Maps a Linux evdev keycode to its canonical W3C DOM Code string.
+ *
+ * @param evdev The Linux evdev KEY_* code.
+ * @return The corresponding non-empty W3C DOM Code string (e.g. "KeyA", "GoBack"),
+ *         or an empty string_view if unmapped or unnamed in keymap().
+ */
+std::string_view evdev_to_dom_code(uint32_t evdev);
+
+/**
+ * @brief Converts a QEMU QKeyCode to its corresponding Linux evdev keycode.
+ *
+ * Covers all QKeyCode values produced by ascii_to_qcode() (kSkinKeyCharacterMap
+ * plus modifier keys Q_KEY_CODE_SHIFT and Q_KEY_CODE_ALT).
+ *
+ * @param qcode The QEMU keycode to convert.
+ * @return The corresponding Linux evdev KEY_* code, or 0 if unmapped.
+ */
+uint32_t qcode_to_evdev(QKeyCode qcode);
+
+/**
+ * @brief Result of resolving a W3C DOM Key string via resolve_dom_key().
+ */
+struct DomKeyResolution {
+    enum class Kind : uint8_t {
+        kNone,
+        kNonPrintable,
+        kCharacter,
+    };
+    Kind kind = Kind::kNone;
+    uint32_t evdev = 0;
+    int32_t character = 0;
+};
+
+/**
+ * @brief Resolves a W3C DOM Key string into either a non-printable evdev code or a Unicode
+ * codepoint.
+ *
+ * @param key The W3C DOM Key string (e.g. "Enter", "ArrowUp", "a", "A").
+ * @return A DomKeyResolution indicating whether the key is non-printable, a printable
+ *         character, or unrecognized/dead.
+ */
+DomKeyResolution resolve_dom_key(std::string_view key);
 
 }  // namespace keyboard
 }  // namespace control

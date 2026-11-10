@@ -18,9 +18,17 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstring>
 #include <optional>
+#include <string>
+#include <string_view>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/strings/str_cat.h"
+
+#include "goldfish/http/http_headers.h"
 #include "goldfish/http/http_request.h"
+#include "goldfish/http/http_response.h"
 
 namespace goldfish::http::internal {
 
@@ -50,6 +58,64 @@ constexpr std::optional<HttpMethod> LlhttpMethodToHttpMethod(llhttp_method_t met
         return std::nullopt;
     }
     return kLlhttpMethodTable[index];
+}
+
+inline char* AppendWirePiece(char* dst, std::string_view piece) noexcept {
+    if (!piece.empty()) {
+        std::memcpy(dst, piece.data(), piece.size());
+        dst += piece.size();
+    }
+    return dst;
+}
+
+inline char* AppendWireHeaderLine(char* dst, std::string_view name,
+                                  std::string_view value) noexcept {
+    dst = AppendWirePiece(dst, name);
+    dst = AppendWirePiece(dst, protocol::kColonSpace);
+    dst = AppendWirePiece(dst, value);
+    return AppendWirePiece(dst, protocol::kCrlf);
+}
+
+// Formats the HTTP/1.1 status line and response headers for a streaming
+// response in a single allocation and reports whether `headers` enables
+// `Transfer-Encoding: chunked`.
+inline std::string FormatStreamingHeaders(
+        const absl::flat_hash_map<std::string, std::string>& headers, int status,
+        bool* is_chunked = nullptr) {
+    const absl::AlphaNum status_num(status);
+    const std::string_view reason = HttpStatusToReason(status);
+
+    bool chunked = false;
+    size_t headers_size = 0;
+    for (const auto& [name, value] : headers) {
+        headers_size +=
+                name.size() + protocol::kColonSpace.size() + value.size() + protocol::kCrlf.size();
+        if (!chunked && CaseInsensitiveStringEq{}(name, headers::kTransferEncoding) &&
+            CaseInsensitiveStringEq{}(value, "chunked")) {
+            chunked = true;
+        }
+    }
+    if (is_chunked != nullptr) {
+        *is_chunked = chunked;
+    }
+
+    const size_t total_size = protocol::kHttp11.size() + protocol::kSpace.size() +
+                              status_num.size() + protocol::kSpace.size() + reason.size() +
+                              protocol::kCrlf.size() + headers_size + protocol::kCrlf.size();
+
+    std::string response(total_size, '\0');
+    char* cursor = response.data();
+    cursor = AppendWirePiece(cursor, protocol::kHttp11);
+    cursor = AppendWirePiece(cursor, protocol::kSpace);
+    cursor = AppendWirePiece(cursor, status_num.Piece());
+    cursor = AppendWirePiece(cursor, protocol::kSpace);
+    cursor = AppendWirePiece(cursor, reason);
+    cursor = AppendWirePiece(cursor, protocol::kCrlf);
+    for (const auto& [name, value] : headers) {
+        cursor = AppendWireHeaderLine(cursor, name, value);
+    }
+    AppendWirePiece(cursor, protocol::kCrlf);
+    return response;
 }
 
 }  // namespace goldfish::http::internal

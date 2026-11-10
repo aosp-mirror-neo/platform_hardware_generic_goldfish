@@ -2,19 +2,19 @@
 
 **Role:** Provides system-level implementations backed by QEMU internals.
 **Location:** `hardware/generic/goldfish/emulator/plugin/system`
-**Namespace:** `android::base`
+**Namespace:** `goldfish::system`
 
 ## Integration Guide
 | Class / Interface | Bazel Target | Header Path | Description |
 | :--- | :--- | :--- | :--- |
-| `QemuClock` | `:qemu_clock` | `.../qemu_clock.h` | Implementation of `IClock` using QEMU timers. |
+| `GetQemuVirtualClock()` | `:qemu_virtual_clock` | `include/goldfish/system/qemu_virtual_clock.h` | Stateless `VirtualClock` implementation backed by `QEMU_CLOCK_VIRTUAL`. |
 
 ## Critical Infrastructure
-* **QemuClock:** Maps `ClockType` (Virtual, Host, Realtime) to QEMU's `QEMU_CLOCK_*` constants and calls `qemu_clock_get_ns`. This ensures that the emulator's C++ code (e.g., event loops, schedulers) respects the VM's time scaling and pauses.
+* **GetQemuVirtualClock():** Reads `qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)` as an `absl::Duration` of guest virtual uptime, advancing only while guest vCPUs run and preserving continuity across VM pauses and snapshots.
 
 ## Dependencies
-* **Upstream:** `@qemu` (`qemu/timer.h`).
-* **Internal:** `//emulator/libs/system:clock` (Interface definition).
+* **Upstream:** `@qemu` (`qemu/timer.h`), `@abseil-cpp//absl/base:no_destructor`, `@abseil-cpp//absl/time`.
+* **Internal:** `//emulator/libs/system:virtual_clock` (Interface definition).
 
 ## Threading Model
-* **Thread Safe:** `qemu_clock_get_ns` is generally thread-safe in QEMU.
+* **Thread Safe:** `GetQemuVirtualClock().Now()` is stateless and delegates to `qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)`, which is thread-safe in QEMU.

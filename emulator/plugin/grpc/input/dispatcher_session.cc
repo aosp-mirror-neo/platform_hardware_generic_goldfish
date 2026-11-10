@@ -34,12 +34,20 @@ void Reject(IInputDispatcher::DispatchCallback done, absl::Status status) {
     }
 }
 
+std::shared_ptr<SessionResetTracker> EnsureResetTracker(IInputDispatcher::SessionOptions& options) {
+    if (options.reset_tracker == nullptr) {
+        options.reset_tracker = std::make_shared<SessionResetTracker>();
+    }
+    return options.reset_tracker;
+}
+
 }  // namespace
 
 DispatcherSession::DispatcherSession(std::shared_ptr<IInputDispatcher> dispatcher,
                                      IInputDispatcher::SessionOptions options)
         : dispatcher_(RequireDispatcher(std::move(dispatcher)))
-        , id_(dispatcher_->OpenSession(options)) {}
+        , reset_tracker_(EnsureResetTracker(options))
+        , id_(dispatcher_->OpenSession(std::move(options))) {}
 
 DispatcherSession::~DispatcherSession() {
     dispatcher_->CloseSession(id_);

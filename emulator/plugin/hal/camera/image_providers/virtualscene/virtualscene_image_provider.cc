@@ -187,6 +187,7 @@ int VirtualsceneImageProvider::start(const CameraImageProviderStreamConfig* cons
     }
 
     std::vector<CaptureStreamBuffers> captureStreamBuffers(streamConfigsSize);
+    size_t maxScaledBufferSize = 0;
     size_t maxYuvConversionBufferSize = 0;
     for (unsigned i = 0; i < streamConfigsSize; ++i) {
         const CameraImageProviderStreamConfig& cfg = streamConfigs[i];
@@ -220,9 +221,11 @@ int VirtualsceneImageProvider::start(const CameraImageProviderStreamConfig* cons
         }
 
         CaptureStreamBuffers& bufs = captureStreamBuffers[i];
-        if ((framebufferFormat != stagingFormat) || (roc.size.width != cfg.size.width) ||
-            (roc.size.height != cfg.size.height)) {
-            bufs.dstBuffer.resize(dstBufferSize);
+        bufs.requiresScaling = (framebufferFormat != stagingFormat) ||
+                               (roc.size.width != cfg.size.width) ||
+                               (roc.size.height != cfg.size.height);
+        if (bufs.requiresScaling) {
+            maxScaledBufferSize = std::max(maxScaledBufferSize, static_cast<size_t>(dstBufferSize));
         }
 
         switch (streamFormat) {
@@ -276,6 +279,7 @@ int VirtualsceneImageProvider::start(const CameraImageProviderStreamConfig* cons
 
     CaptureSession captureSession;
     captureSession.captureStreamBuffers = std::move(captureStreamBuffers);
+    captureSession.scaledFramebuffer.resize(maxScaledBufferSize);
     captureSession.yuvConversionBuffer.resize(maxYuvConversionBufferSize);
     if (mScene != VER_INVALID_HANDLE &&
         !VerSceneConfig::modeSupportsViewRotations(ver_scene_get_mode(mScene))) {
@@ -380,7 +384,8 @@ int VirtualsceneImageProvider::capture(const CameraImageProviderCaptureOpts& /*o
     } else if (mCaptureSession) {
         CaptureSession& session = *mCaptureSession;
         if (!captureImpl(session, sink, sinkOpaque, scis, scisSize,
-                         session.yuvConversionBuffer.data(), session.rotatedFramebuffer.data())) {
+                         session.scaledFramebuffer.data(), session.yuvConversionBuffer.data(),
+                         session.rotatedFramebuffer.data())) {
             return FAILURE_STR("captureImpl", -1);
         }
 
@@ -394,7 +399,8 @@ bool VirtualsceneImageProvider::captureImpl(const CaptureSession& session,
                                             const CameraImageProviderStreamCaptureSink sink,
                                             void* const sinkOpaque,
                                             const CameraImageProviderStreamCaptureInfo* scis,
-                                            const unsigned scisSize, uint8_t* yuvConversionBuffer,
+                                            const unsigned scisSize, uint8_t* scaledFramebuffer,
+                                            uint8_t* yuvConversionBuffer,
                                             uint8_t* rotatedFramebuffer) {
     ver_scene_update(mScene, true);
 
@@ -471,7 +477,10 @@ bool VirtualsceneImageProvider::captureImpl(const CaptureSession& session,
         }
 
         const uint8_t* bits = fbData;
-        if (!bufs->dstBuffer.empty()) {
+        if (bufs->requiresScaling) {
+            if (!scaledFramebuffer || session.scaledFramebuffer.size() < bufs->bufferSizeBytes) {
+                return FAILURE_STR("!scaledFramebuffer", false);
+            }
             const int srcOffsetX = static_cast<int>(bufs->srcCropRegion.offset.width);
             const int srcOffsetY = static_cast<int>(bufs->srcCropRegion.offset.height);
             const int srcCropWidth = static_cast<int>(bufs->srcCropRegion.size.width);
@@ -481,12 +490,11 @@ bool VirtualsceneImageProvider::captureImpl(const CaptureSession& session,
             const int dstStride = dstWidth * 4;
 
             const uint8_t* srcPtr = fbData + (srcOffsetY * srcStride) + (srcOffsetX * 4);
-            if (libyuv::ARGBScale(srcPtr, srcStride, srcCropWidth, srcCropHeight,
-                                  bufs->dstBuffer.data(), dstStride, dstWidth, dstHeight,
-                                  libyuv::kFilterBilinear) != 0) {
+            if (libyuv::ARGBScale(srcPtr, srcStride, srcCropWidth, srcCropHeight, scaledFramebuffer,
+                                  dstStride, dstWidth, dstHeight, libyuv::kFilterBilinear) != 0) {
                 return FAILURE_STR("ARGBScale", false);
             }
-            bits = bufs->dstBuffer.data();
+            bits = scaledFramebuffer;
         }
 
         switch (static_cast<imaging::ImageFormat>(cfg.format)) {
@@ -541,6 +549,10 @@ void VirtualsceneImageProvider::stop() {
         }
         mCaptureSession.reset();
     }
+}
+
+size_t VirtualsceneImageProvider::getScaledFramebufferSizeBytes() const {
+    return mCaptureSession ? mCaptureSession->scaledFramebuffer.size() : 0;
 }
 
 VirtualsceneImageProvider::~VirtualsceneImageProvider() {

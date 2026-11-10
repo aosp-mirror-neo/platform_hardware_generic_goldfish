@@ -76,7 +76,7 @@ class CpuUsage final {
 
       private:
         ::goldfish::async::EventLoop& loop_;
-        std::shared_ptr<::goldfish::async::EventLoop::Timer> task_;
+        ::goldfish::async::EventLoop::ScopedTimer task_;
 
         mutable absl::Mutex mutex_;
         android::base::CpuTime last_measurement_ ABSL_GUARDED_BY(mutex_) = {};
@@ -86,7 +86,7 @@ class CpuUsage final {
     LoopMeasurement main_loop_;
     std::vector<LoopMeasurement> vcpu_loops_;
 
-    std::shared_ptr<::goldfish::async::EventLoop::Timer> timer_;
+    ::goldfish::async::EventLoop::ScopedTimer timer_;
 };
 
 }  // namespace goldfish::metrics

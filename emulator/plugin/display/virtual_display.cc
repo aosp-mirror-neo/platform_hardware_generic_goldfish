@@ -125,9 +125,7 @@ VirtualDisplay::VirtualDisplay(Private, EventLoop* loop, EventLoop* qloop, uint8
 
 void VirtualDisplay::Disconnect() {
     if (!disconnected_.exchange(true, std::memory_order_acq_rel)) {
-        if (poll_timer_) {
-            poll_timer_->Cancel();
-        }
+        poll_timer_.reset();
         auto* avd = avd::GetNullableAvd();
         if (auto device = avd ? avd->GetActiveMultiDisplayDevice() : nullptr) {
             device->SendDelDisplay(display_id_);
@@ -146,9 +144,7 @@ VirtualDisplay::~VirtualDisplay() {
     input_active_tracker_.Reset();
     StopProducerCalls();  // OnDemand uses poll_timer_.
     frame_producer_->Shutdown();
-    if (poll_timer_) {
-        poll_timer_->Cancel();
-    }
+    poll_timer_.reset();
 }
 
 std::pair<int, int> VirtualDisplay::ResizeKeepAspectRatio(int /*desired_width*/,
@@ -159,13 +155,20 @@ std::pair<int, int> VirtualDisplay::ResizeKeepAspectRatio(int /*desired_width*/,
 void VirtualDisplay::OnDemand(bool warm) {
     warm = warm && !disconnected_.load(std::memory_order_acquire);
     if (warm) {
+        if (!poll_timer_ && loop() != nullptr) {
+            poll_timer_ = loop()->CreateTimer([this] {
+                if (!frame_producer_->warm() || disconnected_.load(std::memory_order_acquire)) {
+                    return false;
+                }
+                OnFrameRequested();
+                return true;
+            });
+        }
         if (poll_timer_) {
             poll_timer_->Schedule(absl::Milliseconds(50), absl::Milliseconds(50));
         }
     } else {
-        if (poll_timer_) {
-            poll_timer_->Cancel();
-        }
+        poll_timer_.reset();
     }
     frame_producer_->SetDemand(warm);
 }
@@ -195,35 +198,6 @@ IFrameSource::Start VirtualDisplay::CaptureSurface(LegacySurfaceSource& source) 
         .stride = static_cast<size_t>(dims.width) * 4,
         .pixman_format = PIXMAN_x8b8g8r8,
     });
-}
-
-void VirtualDisplay::SendMultiTouchEvent(uint8_t slot, int x, int y, MultiTouchType type) {
-    const absl::MutexLock lock(&send_lock_);
-    if (!vhid_) return;
-
-    const Dimensions dims = GetDimensions();
-
-    qemu_loop_
-            ->Post([vhid = vhid_, slot, x, y, type, dims]() {
-                InputHandler::SendMultiTouchEvent(vhid, slot, x, y, type, dims);
-            })
-            .IgnoreError();
-
-    VLOG(2) << "[VirtualDisplay " << static_cast<int>(Id()) << "] MultiTouch -> "
-            << "Slot: " << static_cast<int>(slot) << ", X: " << x << ", Y: " << y
-            << ", Type: " << static_cast<int>(type) << "\n";
-}
-
-void VirtualDisplay::SendMouseEvent(int x, int y, int button_mask) {
-    const absl::MutexLock lock(&send_lock_);
-    if (!vhid_) return;
-    const Dimensions dims = GetDimensions();
-    qemu_loop_
-            ->Post([vhid = vhid_, x, y, button_mask, dims] {
-                InputHandler::SendMouseEvent(vhid, x, y, button_mask, dims);
-            })
-            .IgnoreError();
-    last_bmask_ = button_mask;
 }
 
 void VirtualDisplay::SendEvDevEvent(uint16_t type, uint16_t code, uint32_t value) {

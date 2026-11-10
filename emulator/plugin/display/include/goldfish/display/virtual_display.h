@@ -57,8 +57,6 @@ class VirtualDisplay : public IDisplay {
 
     std::pair<int, int> ResizeKeepAspectRatio(int desired_width, int desired_height) override;
 
-    void SendMultiTouchEvent(uint8_t slot, int x, int y, MultiTouchType type) override;
-    void SendMouseEvent(int x, int y, int button_mask) override;
     void SendEvDevEvent(uint16_t type, uint16_t code, uint32_t value) override;
     void SendEvDevReport(EvDevEvents events) override;
     void WriteEvDevReportOnLoop(absl::Span<const EvDevEvent> events) override;
@@ -74,7 +72,6 @@ class VirtualDisplay : public IDisplay {
     void OnFrameRequested() override;
 
   private:
-
     IFrameSource::Start CaptureSurface(LegacySurfaceSource& source);
 
     std::atomic<bool> disconnected_{false};
@@ -83,12 +80,11 @@ class VirtualDisplay : public IDisplay {
     // Declared before legacy_, which sends it re-capture requests.
     const std::shared_ptr<FrameProducer> frame_producer_;
     const std::shared_ptr<LegacySurfaceSource> legacy_;
-    std::shared_ptr<EventLoop::Timer> poll_timer_;
+    EventLoop::ScopedTimer poll_timer_;
 
     EventLoop* qemu_loop_;
     ::VirtIOInputHID* vhid_;
     VirtioInputActiveTracker input_active_tracker_;
-    int last_bmask_ ABSL_GUARDED_BY(send_lock_) = 0;
     absl::Mutex send_lock_;
 };
 
